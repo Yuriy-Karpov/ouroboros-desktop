@@ -189,6 +189,7 @@ class LocalModelManager:
             if chat_format:
                 cmd.extend(["--chat_format", chat_format])
             effective_ctx = n_ctx if n_ctx > 0 else 16384
+            self._context_length = effective_ctx
             cmd.extend(["--n_ctx", str(effective_ctx)])
 
             log.info("Starting local model server: %s", " ".join(cmd))
