@@ -167,7 +167,7 @@ class LocalModelManager:
         port: int = _LOCAL_MODEL_DEFAULT_PORT,
         n_gpu_layers: int = -1,
         n_ctx: int = 0,
-        chat_format: str = "chatml-function-calling",
+        chat_format: str = "",
     ) -> None:
         """Start the llama-cpp-python server as a subprocess."""
         with self._lock:
@@ -185,8 +185,9 @@ class LocalModelManager:
                 "--model", model_path,
                 "--port", str(port),
                 "--n_gpu_layers", str(n_gpu_layers),
-                "--chat_format", chat_format,
             ]
+            if chat_format:
+                cmd.extend(["--chat_format", chat_format])
             effective_ctx = n_ctx if n_ctx > 0 else 16384
             cmd.extend(["--n_ctx", str(effective_ctx)])
 

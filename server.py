@@ -150,7 +150,7 @@ def _auto_start_local_model(settings: dict) -> None:
         port = int(settings.get("LOCAL_MODEL_PORT", 8766))
         n_gpu_layers = int(settings.get("LOCAL_MODEL_N_GPU_LAYERS", 0))
         n_ctx = int(settings.get("LOCAL_MODEL_CONTEXT_LENGTH", 16384))
-        chat_format = str(settings.get("LOCAL_MODEL_CHAT_FORMAT", "chatml-function-calling")).strip()
+        chat_format = str(settings.get("LOCAL_MODEL_CHAT_FORMAT", "")).strip()
 
         log.info("Auto-starting local model: %s / %s", source, filename)
         model_path = mgr.download_model(source, filename)

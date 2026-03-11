@@ -245,7 +245,11 @@ class LLMClient:
             kwargs["tools"] = clean_tools
             kwargs["tool_choice"] = tool_choice
 
-        resp = client.chat.completions.create(**kwargs)
+        try:
+            resp = client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            log.warning("Local model request failed: %s", exc)
+            raise
         resp_dict = resp.model_dump()
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
