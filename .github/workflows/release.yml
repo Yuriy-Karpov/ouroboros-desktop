@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     strategy:
@@ -105,7 +108,7 @@ jobs:
           path: artifacts
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2.5.0
+        uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           generate_release_notes: true
