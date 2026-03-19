@@ -134,30 +134,34 @@ Cloud models via OpenRouter always work regardless of local model setup.
 
 ### Optional: NVIDIA GPU acceleration (Windows / Linux)
 
-Windows and Linux builds ship with CPU-only local inference. NVIDIA GPU acceleration can be installed from the Settings page:
+Windows and Linux builds ship with CPU-only local inference. NVIDIA GPU acceleration can be installed from the Settings page. The install builds `llama-cpp-python` from source with CUDA support.
 
+**Prerequisites (install these first):**
+- [NVIDIA CUDA Toolkit 12.4+](https://developer.nvidia.com/cuda-downloads)
+- [CMake](https://cmake.org/download/)
+- C++ compiler (Visual Studio Build Tools on Windows, `gcc`/`g++` on Linux)
+- NVIDIA GPU drivers
+
+**Steps:**
 1. Open **Settings** → **Local Model** section.
 2. Set **Backend** to `NVIDIA CUDA`.
-3. Click **Install GPU Packages** and wait for the download to finish.
+3. Click **Install GPU Packages** (builds from source — may take 10-20 minutes).
 4. Set **GPU Device** to `auto` (or `0`, `1`, `0,1` for specific GPUs).
 5. Start the local model.
-
-**Requirements:**
-- NVIDIA GPU with compatible drivers installed
-- ~1 GB additional disk space for GPU runtime packages
 
 GPU packages are stored in `~/Ouroboros/data/backends/nvidia-cu124/` and can be removed or reinstalled from Settings at any time. Removing them does not affect CPU or cloud usage.
 
 #### Manual GPU install (advanced)
 
-Windows:
+Windows (requires CUDA Toolkit + Visual Studio Build Tools):
 ```powershell
-python-standalone\python.exe -m pip install --target "%USERPROFILE%\Ouroboros\data\backends\nvidia-cu124\site-packages" --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 "llama-cpp-python[server]" "nvidia-cuda-runtime-cu12==12.4.127" "nvidia-cublas-cu12==12.4.5.8"
+$env:CMAKE_ARGS="-DGGML_CUDA=on"
+python-standalone\python.exe -m pip install --target "$env:USERPROFILE\Ouroboros\data\backends\nvidia-cu124\site-packages" --no-cache-dir "llama-cpp-python[server]" "nvidia-cuda-runtime-cu12==12.4.127" "nvidia-cublas-cu12==12.4.5.8"
 ```
 
-Linux:
+Linux (requires CUDA Toolkit + gcc):
 ```bash
-python-standalone/bin/python3 -m pip install --target "$HOME/Ouroboros/data/backends/nvidia-cu124/site-packages" --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 "llama-cpp-python[server]" "nvidia-cuda-runtime-cu12==12.4.127" "nvidia-cublas-cu12==12.4.5.8"
+CMAKE_ARGS="-DGGML_CUDA=on" python-standalone/bin/python3 -m pip install --target "$HOME/Ouroboros/data/backends/nvidia-cu124/site-packages" --no-cache-dir "llama-cpp-python[server]" "nvidia-cuda-runtime-cu12==12.4.127" "nvidia-cublas-cu12==12.4.5.8"
 ```
 
 ### Troubleshooting
@@ -165,6 +169,7 @@ python-standalone/bin/python3 -m pip install --target "$HOME/Ouroboros/data/back
 | Problem | Solution |
 |---------|----------|
 | GPU packages installed but model fails to start | Check that NVIDIA drivers are installed and up to date |
+| Build fails with "nvcc not found" or "cmake not found" | Install [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) and [CMake](https://cmake.org/download/) |
 | "Failed to load shared library" on Windows | Reinstall GPU packages from Settings; ensure NVIDIA driver supports CUDA 12.4 |
 | Model runs but is slow | Verify GPU Device is not set to `cpu`; check that the model fits in VRAM |
 | Want to go back to CPU | Set Backend to `CPU (bundled)` in Settings |
