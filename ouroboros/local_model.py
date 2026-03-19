@@ -199,6 +199,23 @@ class LocalModelManager:
             n_gpu_layers, cuda_device = self._resolve_gpu_device(gpu_device)
 
             python = sys.executable
+
+            # Build env for subprocesses (probe + server)
+            env = os.environ.copy()
+            if cuda_device is not None:
+                env["CUDA_VISIBLE_DEVICES"] = cuda_device
+            if sys.platform == "win32":
+                # CUDA wheels bundle DLLs in llama_cpp/lib/ but Windows
+                # doesn't search there automatically — add to PATH.
+                python_dir = os.path.dirname(python)
+                for subdir in ("lib", "Lib"):
+                    lib_dir = os.path.join(
+                        python_dir, subdir, "site-packages", "llama_cpp", "lib",
+                    )
+                    if os.path.isdir(lib_dir):
+                        env["PATH"] = lib_dir + os.pathsep + env.get("PATH", "")
+                        break
+
             cmd = [
                 python, "-m", "llama_cpp.server",
                 "--model", model_path,
@@ -223,6 +240,7 @@ class LocalModelManager:
                         "capture_output": True,
                         "text": True,
                         "timeout": 15,
+                        "env": env,
                     }),
                 )
             except Exception as exc:
@@ -246,11 +264,8 @@ class LocalModelManager:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     stdin=subprocess.DEVNULL,
+                    env=env,
                 )
-                if cuda_device is not None:
-                    env = os.environ.copy()
-                    env["CUDA_VISIBLE_DEVICES"] = cuda_device
-                    _popen_kwargs["env"] = env
                 if sys.platform == "win32":
                     _popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 else:
