@@ -134,20 +134,20 @@ Cloud models via OpenRouter always work regardless of local model setup.
 
 ### Optional: NVIDIA GPU acceleration (Windows / Linux)
 
-Windows and Linux builds ship with CPU-only local inference. NVIDIA GPU acceleration can be installed from the Settings page. The install builds `llama-cpp-python` from source with CUDA support.
+Windows and Linux builds ship with CPU-only local inference. NVIDIA GPU acceleration can be installed from the Settings page.
 
-**Prerequisites (install these first):**
-- [NVIDIA CUDA Toolkit 12.4+](https://developer.nvidia.com/cuda-downloads)
-- [CMake](https://cmake.org/download/)
-- C++ compiler (Visual Studio Build Tools on Windows, `gcc`/`g++` on Linux)
-- NVIDIA GPU drivers
+**Requirements:**
+- NVIDIA GPU with compatible drivers
+- ~1 GB disk space for GPU packages
 
 **Steps:**
 1. Open **Settings** → **Local Model** section.
 2. Set **Backend** to `NVIDIA CUDA`.
-3. Click **Install GPU Packages** (builds from source — may take 10-20 minutes).
+3. Click **Install GPU Packages** and wait for the install to finish.
 4. Set **GPU Device** to `auto` (or `0`, `1`, `0,1` for specific GPUs).
 5. Start the local model.
+
+The installer first tries a pre-built CUDA wheel (fast, no build tools needed). If the pre-built wheel is unavailable, it falls back to building from source — this requires [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads), [CMake](https://cmake.org/download/), and a C++ compiler.
 
 GPU packages are stored in `~/Ouroboros/data/backends/nvidia-cu124/` and can be removed or reinstalled from Settings at any time. Removing them does not affect CPU or cloud usage.
 
