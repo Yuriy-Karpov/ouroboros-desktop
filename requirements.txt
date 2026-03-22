@@ -2,6 +2,7 @@ openai>=1.66.0
 requests
 dulwich
 starlette
+python-multipart
 uvicorn[standard]
 websockets
 huggingface_hub

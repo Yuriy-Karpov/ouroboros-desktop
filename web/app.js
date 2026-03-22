@@ -11,6 +11,7 @@
 import { createWS } from './modules/ws.js';
 import { loadVersion, initMatrixRain } from './modules/utils.js';
 import { initChat } from './modules/chat.js';
+import { initFiles } from './modules/files.js';
 import { initDashboard } from './modules/dashboard.js';
 import { initLogs } from './modules/logs.js';
 import { initEvolution } from './modules/evolution.js';
@@ -76,6 +77,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
 const ctx = { ws, state, updateUnreadBadge };
 
 initChat(ctx);
+initFiles(ctx);
 initDashboard(ctx);
 initLogs(ctx);
 initEvolution(ctx);

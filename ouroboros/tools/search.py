@@ -57,7 +57,8 @@ def _web_search(
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
+        base_url = (os.environ.get("OPENAI_BASE_URL", "") or "").strip() or None
+        client = OpenAI(api_key=api_key, base_url=base_url)
         resp = client.responses.create(
             model=active_model,
             tools=[{

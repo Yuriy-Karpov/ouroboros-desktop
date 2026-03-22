@@ -78,6 +78,26 @@ python server.py
 
 Then open `http://127.0.0.1:8765` in your browser. The setup wizard will guide you through API key configuration.
 
+You can also override the bind address and port:
+
+```bash
+python server.py --host 127.0.0.1 --port 9000
+```
+
+Available launch arguments:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--host` | `127.0.0.1` | Host/interface to bind the web server to |
+| `--port` | `8765` | Port to bind the web server to |
+
+The same values can also be provided via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OUROBOROS_SERVER_HOST` | `127.0.0.1` | Default bind host |
+| `OUROBOROS_SERVER_PORT` | `8765` | Default bind port |
+
 ### Run Tests
 
 ```bash
@@ -87,6 +107,41 @@ make test
 ---
 
 ## Build
+
+### Docker (web UI)
+
+Build the image:
+
+```bash
+docker build -t ouroboros-web .
+```
+
+Run on the default port:
+
+```bash
+docker run --rm -p 8765:8765 ouroboros-web
+```
+
+Run on a custom port via launch arguments:
+
+```bash
+docker run --rm -p 9000:9000 ouroboros-web --port 9000
+```
+
+You can also override both host and port:
+
+```bash
+docker run --rm -p 9000:9000 ouroboros-web --host 0.0.0.0 --port 9000
+```
+
+You can pass the same values with environment variables instead of launch arguments:
+
+```bash
+docker run --rm -p 9000:9000 \
+  -e OUROBOROS_SERVER_HOST=0.0.0.0 \
+  -e OUROBOROS_SERVER_PORT=9000 \
+  ouroboros-web
+```
 
 ### macOS (.dmg)
 
@@ -177,6 +232,7 @@ Created on first launch:
 |-----|----------|-----------------|
 | OpenRouter API Key | **Yes** | [openrouter.ai/keys](https://openrouter.ai/keys) |
 | OpenAI API Key | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — enables web search tool |
+| OpenAI Base URL | No | Optional OpenAI-compatible endpoint for web search, e.g. a proxy or third-party compatible API |
 | Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — enables Claude Code CLI |
 | GitHub Token | No | [github.com/settings/tokens](https://github.com/settings/tokens) — enables remote sync |
 
@@ -195,7 +251,31 @@ All keys are configured through the **Settings** page in the UI or during the fi
 
 Task/chat reasoning defaults to `medium`.
 
-Models are configurable in the Settings page. All LLM calls go through [OpenRouter](https://openrouter.ai) (except web search, which uses OpenAI directly).
+Models are configurable in the Settings page. All LLM calls go through [OpenRouter](https://openrouter.ai) (except web search, which uses OpenAI directly or an OpenAI-compatible base URL if configured).
+
+### File Browser Start Directory
+
+The web UI file browser is rooted at one configurable directory. Users can browse only inside that directory tree.
+
+| Variable | Example | Behavior |
+|----------|---------|----------|
+| `OUROBOROS_FILE_BROWSER_DEFAULT` | `/home/app` | Sets the root directory of the `Files` tab |
+
+Examples:
+
+```bash
+OUROBOROS_FILE_BROWSER_DEFAULT=/home/app python server.py
+OUROBOROS_FILE_BROWSER_DEFAULT=/mnt/shared python server.py --port 9000
+```
+
+If the variable is not set, Ouroboros uses the current user's home directory. If the configured path does not exist or is not a directory, Ouroboros also falls back to the home directory.
+
+The `Files` tab supports:
+
+- downloading any file inside the configured browser root
+- uploading a file into the currently opened directory
+
+Uploads do not overwrite existing files. If a file with the same name already exists, the UI will show an error.
 
 ---
 

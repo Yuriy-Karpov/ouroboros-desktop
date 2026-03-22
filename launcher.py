@@ -24,6 +24,7 @@ import threading
 import time
 from typing import Optional
 
+from ouroboros import get_version
 from ouroboros.compat import (
     IS_WINDOWS, IS_MACOS,
     embedded_python_candidates, kill_process_on_port, force_kill_pid,
@@ -38,7 +39,7 @@ from ouroboros.compat import (
 from ouroboros.config import (
     HOME, APP_ROOT, REPO_DIR, DATA_DIR, SETTINGS_PATH, PID_FILE, PORT_FILE,
     RESTART_EXIT_CODE, PANIC_EXIT_CODE, AGENT_SERVER_PORT,
-    read_version, load_settings, save_settings, acquire_pid_lock, release_pid_lock,
+    load_settings, save_settings, acquire_pid_lock, release_pid_lock,
 )
 MAX_CRASH_RESTARTS = 5
 CRASH_WINDOW_SEC = 120
@@ -63,7 +64,7 @@ logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=_handlers)
 log = logging.getLogger("launcher")
 
 
-APP_VERSION = read_version()
+APP_VERSION = get_version()
 
 # Windows: prevent console windows when spawning subprocesses from the GUI app.
 _SUBPROCESS_NO_WINDOW = (

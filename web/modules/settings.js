@@ -12,6 +12,7 @@ export function initSettings({ ws, state }) {
                 <h3>API Keys</h3>
                 <div class="form-row"><div class="form-field"><label>OpenRouter API Key</label><input id="s-openrouter" type="password" placeholder="sk-or-..."></div></div>
                 <div class="form-row"><div class="form-field"><label>OpenAI API Key (optional)</label><input id="s-openai" type="password"></div></div>
+                <div class="form-row"><div class="form-field"><label>OpenAI Base URL (optional)</label><input id="s-openai-base-url" placeholder="https://api.openai.com/v1 or compatible endpoint"></div></div>
                 <div class="form-row"><div class="form-field"><label>Anthropic API Key (optional)</label><input id="s-anthropic" type="password"></div></div>
             </div>
             <div class="divider"></div>
@@ -174,6 +175,7 @@ export function initSettings({ ws, state }) {
     function applySettings(s) {
         if (s.OPENROUTER_API_KEY) document.getElementById('s-openrouter').value = s.OPENROUTER_API_KEY;
         if (s.OPENAI_API_KEY) document.getElementById('s-openai').value = s.OPENAI_API_KEY;
+        if (s.OPENAI_BASE_URL) document.getElementById('s-openai-base-url').value = s.OPENAI_BASE_URL;
         if (s.ANTHROPIC_API_KEY) document.getElementById('s-anthropic').value = s.ANTHROPIC_API_KEY;
         if (s.OUROBOROS_MODEL) document.getElementById('s-model').value = s.OUROBOROS_MODEL;
         if (s.OUROBOROS_MODEL_CODE) document.getElementById('s-model-code').value = s.OUROBOROS_MODEL_CODE;
@@ -319,6 +321,7 @@ export function initSettings({ ws, state }) {
             USE_LOCAL_CODE: document.getElementById('s-local-code').checked,
             USE_LOCAL_LIGHT: document.getElementById('s-local-light').checked,
             USE_LOCAL_FALLBACK: document.getElementById('s-local-fallback').checked,
+            OPENAI_BASE_URL: document.getElementById('s-openai-base-url').value.trim(),
         };
         const orKey = document.getElementById('s-openrouter').value;
         if (orKey && !orKey.includes('...')) body.OPENROUTER_API_KEY = orKey;

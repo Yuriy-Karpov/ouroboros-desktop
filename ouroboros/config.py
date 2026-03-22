@@ -40,6 +40,7 @@ AGENT_SERVER_PORT = 8765
 SETTINGS_DEFAULTS = {
     "OPENROUTER_API_KEY": "",
     "OPENAI_API_KEY": "",
+    "OPENAI_BASE_URL": "",
     "ANTHROPIC_API_KEY": "",
     "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
     "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
@@ -121,20 +122,6 @@ def get_review_enforcement() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Version
-# ---------------------------------------------------------------------------
-def read_version() -> str:
-    try:
-        if getattr(sys, "frozen", False):
-            vp = pathlib.Path(sys._MEIPASS) / "VERSION"
-        else:
-            vp = pathlib.Path(__file__).parent.parent / "VERSION"
-        return vp.read_text(encoding="utf-8").strip()
-    except Exception:
-        return "0.0.0"
-
-
-# ---------------------------------------------------------------------------
 # Settings file locking
 # ---------------------------------------------------------------------------
 _SETTINGS_LOCK = pathlib.Path(str(SETTINGS_PATH) + ".lock")
@@ -204,7 +191,7 @@ def save_settings(settings: dict) -> None:
 def apply_settings_to_env(settings: dict) -> None:
     """Push settings into environment variables for supervisor modules."""
     env_keys = [
-        "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_FALLBACK", "CLAUDE_CODE_MODEL",
         "TOTAL_BUDGET", "GITHUB_TOKEN", "GITHUB_REPO",
