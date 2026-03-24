@@ -51,6 +51,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Identity Persistence** — One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.
 - **Embedded Version Control** — Contains its own local Git repo. Version controls its own evolution. Optional GitHub sync for remote backup.
 - **Local Model Support** — Run with a local GGUF model via llama-cpp-python (Metal acceleration on Apple Silicon, CPU on Linux/Windows).
+- **Shared Web + Telegram Chat** — The same conversation can be used from the Web UI and a Telegram bot without splitting the runtime.
 
 ---
 
@@ -78,6 +79,9 @@ python server.py
 
 Then open `http://127.0.0.1:8765` in your browser. The setup wizard will guide you through API key configuration.
 
+If you want the same chat to be reachable from Telegram, configure `TELEGRAM_BOT_TOKEN`
+and optionally `TELEGRAM_CHAT_ID` in the **General** tab or via environment variables.
+
 You can also override the bind address and port:
 
 ```bash
@@ -97,6 +101,8 @@ The same values can also be provided via environment variables:
 |----------|---------|-------------|
 | `OUROBOROS_SERVER_HOST` | `127.0.0.1` | Default bind host |
 | `OUROBOROS_SERVER_PORT` | `8765` | Default bind port |
+| `TELEGRAM_BOT_TOKEN` | unset | Optional Telegram bot token for the shared chat bridge |
+| `TELEGRAM_CHAT_ID` | unset | Optional single Telegram chat ID to bind the bot to |
 
 If `OUROBOROS_NETWORK_PASSWORD` is set, the built-in password gate is skipped for localhost
 requests but enforced for remote/browser access regardless of bind host.
@@ -162,6 +168,8 @@ Required/important environment variables:
 | `OUROBOROS_FILE_BROWSER_DEFAULT` | Recommended, required for Files tab in Docker/non-localhost mode | Explicit root directory exposed in the Files tab |
 | `OUROBOROS_SERVER_PORT` | Optional | Override container listen port |
 | `OUROBOROS_SERVER_HOST` | Optional | Defaults to `0.0.0.0` in Docker |
+| `TELEGRAM_BOT_TOKEN` | Optional | Enables the shared Telegram bot chat |
+| `TELEGRAM_CHAT_ID` | Optional | Restricts the Telegram bot to one chat ID |
 
 Example: mount a host workspace and expose only that directory in Files:
 
@@ -269,6 +277,22 @@ Created on first launch:
 
 All keys are configured through the **AI Providers** tab in the Settings page or during the first-run wizard.
 
+### Telegram
+
+Telegram is configured through the **General** tab in Settings.
+
+| Setting / Variable | Required | Purpose |
+|--------------------|----------|---------|
+| Telegram Bot Token / `TELEGRAM_BOT_TOKEN` | Optional | Enables Telegram bot polling and message delivery |
+| Telegram Chat ID / `TELEGRAM_CHAT_ID` | Optional | Binds the bot to one Telegram chat |
+
+Behavior:
+
+- When `TELEGRAM_BOT_TOKEN` is set, Ouroboros can share the same chat between Web UI and Telegram.
+- When `TELEGRAM_CHAT_ID` is set, only that Telegram chat is used.
+- When `TELEGRAM_CHAT_ID` is empty, the first Telegram chat that messages the bot becomes the active Telegram chat for the current runtime.
+- Messages from Telegram appear in the Web UI chat, and messages from the Web UI can be mirrored to Telegram.
+
 ### Default Models
 
 | Slot | Default | Purpose |
@@ -302,6 +326,8 @@ Legacy `OPENAI_BASE_URL` is still recognized for backward compatibility, but new
 | `CLOUDRU_FOUNDATION_MODELS_BASE_URL` | Cloud.ru Foundation Models base URL. Defaults to `https://foundation-models.api.cloud.ru/v1` |
 | `ANTHROPIC_API_KEY` | Enables Claude Code CLI tooling |
 | `OUROBOROS_NETWORK_PASSWORD` | Optional password gate for non-localhost access |
+| `TELEGRAM_BOT_TOKEN` | Enables the shared Telegram bot chat |
+| `TELEGRAM_CHAT_ID` | Optional single Telegram chat ID |
 
 Legacy variable:
 

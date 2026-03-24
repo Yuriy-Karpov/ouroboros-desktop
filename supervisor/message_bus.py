@@ -10,7 +10,10 @@ import datetime
 import logging
 import queue
 import re
+import threading
 from typing import Any, Dict, List, Optional, Tuple
+
+import requests
 
 from supervisor.state import load_state, save_state, append_jsonl
 
@@ -47,29 +50,255 @@ def get_bridge() -> "LocalChatBridge":
 class LocalChatBridge:
     """Local message bus using queue.Queue."""
 
-    def __init__(self):
+    def __init__(self, settings: Optional[Dict[str, Any]] = None):
         self._inbox = queue.Queue()   # user -> agent
         self._outbox = queue.Queue()  # agent -> UI
         self._log_queue: queue.Queue = queue.Queue(maxsize=1000)
         self._update_counter = 0
         self._broadcast_fn = None  # set by server.py for WebSocket streaming
+        self._telegram_bot_token = ""
+        self._telegram_chat_id: int = 0
+        self._telegram_active_chat_id: int = 0
+        self._telegram_poll_thread: Optional[threading.Thread] = None
+        self._telegram_stop = threading.Event()
+        if settings:
+            self.configure_from_settings(settings)
 
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
         """Block on the inbox queue and return updates."""
         try:
-            msg_text = self._inbox.get(timeout=timeout)
+            msg = self._inbox.get(timeout=timeout)
+            message = {
+                "chat": {"id": int(msg.get("chat_id") or 1)},
+                "from": {"id": int(msg.get("user_id") or 1)},
+                "text": str(msg.get("text") or ""),
+                "source": str(msg.get("source") or "web"),
+            }
+            sender_label = str(msg.get("sender_label") or "")
+            if sender_label:
+                message["sender_label"] = sender_label
 
             self._update_counter = max(offset, self._update_counter + 1)
             return [{
                 "update_id": self._update_counter,
-                "message": {
-                    "chat": {"id": 1},
-                    "from": {"id": 1},
-                    "text": msg_text,
-                }
+                "message": message,
             }]
         except queue.Empty:
             return []
+
+    def configure_from_settings(self, settings: Dict[str, Any]) -> None:
+        token = str(settings.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
+        chat_id = self._parse_single_chat_id(
+            str(settings.get("TELEGRAM_CHAT_ID", "") or "").strip(),
+            str(settings.get("TELEGRAM_ALLOWED_CHAT_IDS", "") or "").strip(),
+        )
+        token_changed = token != self._telegram_bot_token
+        chat_id_changed = chat_id != self._telegram_chat_id
+        self._telegram_bot_token = token
+        self._telegram_chat_id = chat_id
+        if chat_id:
+            self._telegram_active_chat_id = chat_id
+        elif token_changed:
+            self._telegram_active_chat_id = 0
+        if token_changed or chat_id_changed:
+            self._restart_telegram_polling()
+
+    def shutdown(self) -> None:
+        self._stop_telegram_polling()
+
+    def _parse_single_chat_id(self, raw: str, legacy_raw: str = "") -> int:
+        value = str(raw or "").strip()
+        if value:
+            try:
+                return int(value)
+            except ValueError:
+                log.warning("Ignoring invalid Telegram chat id: %s", value)
+                return 0
+        for part in str(legacy_raw or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                return int(part)
+            except ValueError:
+                log.warning("Ignoring invalid legacy Telegram chat id: %s", part)
+        return 0
+
+    def _restart_telegram_polling(self) -> None:
+        self._stop_telegram_polling()
+        if not self._telegram_bot_token:
+            return
+        self._telegram_stop.clear()
+        self._telegram_poll_thread = threading.Thread(
+            target=self._telegram_poll_loop,
+            daemon=True,
+            name="telegram-poll",
+        )
+        self._telegram_poll_thread.start()
+
+    def _stop_telegram_polling(self) -> None:
+        self._telegram_stop.set()
+        thread = self._telegram_poll_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=2)
+        if not (thread and thread.is_alive()):
+            self._telegram_poll_thread = None
+
+    def _telegram_api(self, method: str, *, params: Optional[dict] = None, files: Optional[dict] = None, timeout: int = 35) -> dict:
+        if not self._telegram_bot_token:
+            raise RuntimeError("Telegram bot token is not configured")
+        url = f"https://api.telegram.org/bot{self._telegram_bot_token}/{method}"
+        response = requests.post(url, data=params, files=files, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise RuntimeError(payload.get("description") or f"Telegram API error for {method}")
+        return payload
+
+    def _telegram_target(self, preferred_chat_id: int = 0) -> int:
+        if self._telegram_chat_id:
+            return self._telegram_chat_id
+        if preferred_chat_id:
+            return int(preferred_chat_id)
+        return int(self._telegram_active_chat_id or 0)
+
+    def _register_telegram_chat(self, chat_id: int) -> None:
+        if not chat_id:
+            return
+        if self._telegram_chat_id and int(chat_id) != self._telegram_chat_id:
+            return
+        if not self._telegram_active_chat_id:
+            self._telegram_active_chat_id = int(chat_id)
+
+    def _telegram_poll_loop(self) -> None:
+        offset = 0
+        while not self._telegram_stop.is_set():
+            try:
+                payload = self._telegram_api(
+                    "getUpdates",
+                    params={"timeout": 20, "offset": offset},
+                    timeout=25,
+                )
+                for update in payload.get("result", []):
+                    update_id = int(update.get("update_id") or 0)
+                    if update_id >= offset:
+                        offset = update_id + 1
+                    message = update.get("message") or {}
+                    text = str(message.get("text") or "").strip()
+                    if not text:
+                        continue
+                    chat = message.get("chat") or {}
+                    sender = message.get("from") or {}
+                    chat_id = int(chat.get("id") or 0)
+                    if self._telegram_chat_id and chat_id != self._telegram_chat_id:
+                        continue
+                    if not self._telegram_chat_id and self._telegram_active_chat_id and chat_id != self._telegram_active_chat_id:
+                        continue
+                    user_id = int(sender.get("id") or chat_id or 0)
+                    sender_name = (
+                        str(sender.get("username") or "").strip()
+                        or " ".join(str(part).strip() for part in (sender.get("first_name"), sender.get("last_name")) if part)
+                        or f"Telegram {user_id}"
+                    )
+                    self._register_telegram_chat(chat_id)
+                    self._inbox.put({
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "text": text,
+                        "source": "telegram",
+                        "sender_label": f"Telegram ({sender_name})",
+                    })
+                    if self._broadcast_fn:
+                        self._broadcast_fn({
+                            "type": "chat",
+                            "role": "user",
+                            "content": text,
+                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "source": "telegram",
+                            "sender_label": f"Telegram ({sender_name})",
+                            "telegram_chat_id": chat_id,
+                        })
+            except Exception as exc:
+                log.warning("Telegram polling error: %s", exc)
+                self._telegram_stop.wait(5)
+
+    def _send_telegram_text(self, text: str, preferred_chat_id: int = 0) -> None:
+        clean_text = str(text or "").strip()
+        if not clean_text or not self._telegram_bot_token:
+            return
+        chat_id = self._telegram_target(preferred_chat_id)
+        if not chat_id:
+            return
+        try:
+            self._telegram_api("sendMessage", params={"chat_id": str(chat_id), "text": clean_text}, timeout=20)
+        except Exception:
+            log.debug("Failed to send Telegram message to chat %s", chat_id, exc_info=True)
+
+    def _send_telegram_action(self, action: str, preferred_chat_id: int = 0) -> None:
+        if not self._telegram_bot_token:
+            return
+        chat_id = self._telegram_target(preferred_chat_id)
+        if not chat_id:
+            return
+        try:
+            self._telegram_api("sendChatAction", params={"chat_id": str(chat_id), "action": action}, timeout=10)
+        except Exception:
+            log.debug("Failed to send Telegram chat action to chat %s", chat_id, exc_info=True)
+
+    def _send_telegram_photo(self, photo_bytes: bytes, caption: str = "", mime: str = "image/png", preferred_chat_id: int = 0) -> None:
+        if not self._telegram_bot_token:
+            return
+        filename = "image.png" if mime == "image/png" else "image.jpg"
+        chat_id = self._telegram_target(preferred_chat_id)
+        if not chat_id:
+            return
+        try:
+            self._telegram_api(
+                "sendPhoto",
+                params={"chat_id": str(chat_id), "caption": str(caption or "")},
+                files={"photo": (filename, photo_bytes, mime)},
+                timeout=30,
+            )
+        except Exception:
+            log.debug("Failed to send Telegram photo to chat %s", chat_id, exc_info=True)
+
+    def handle_web_message(self, text: str, *, sender_session_id: str = "", client_message_id: str = "") -> None:
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            return
+        ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if self._broadcast_fn:
+            self._broadcast_fn({
+                "type": "chat",
+                "role": "user",
+                "content": clean_text,
+                "ts": ts,
+                "source": "web",
+                "sender_session_id": sender_session_id,
+                "client_message_id": client_message_id,
+            })
+        if self._telegram_bot_token:
+            sender = sender_session_id[:8] if sender_session_id else "web"
+            self._send_telegram_text(f"WebUI ({sender}):\n{clean_text}")
+        self._inbox.put({
+            "chat_id": 1,
+            "user_id": 1,
+            "text": clean_text,
+            "source": "web",
+            "sender_label": "",
+        })
+
+    def enqueue_local_message(self, text: str) -> None:
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            return
+        self._inbox.put({
+            "chat_id": 1,
+            "user_id": 1,
+            "text": clean_text,
+            "source": "web",
+            "sender_label": "",
+        })
 
     def send_message(
         self,
@@ -99,6 +328,7 @@ class LocalChatBridge:
                 "is_progress": bool(is_progress),
                 "ts": message_ts,
             })
+        self._send_telegram_text(_strip_markdown(clean_text), preferred_chat_id=chat_id)
         return True, "ok"
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
@@ -109,6 +339,8 @@ class LocalChatBridge:
         })
         if self._broadcast_fn:
             self._broadcast_fn({"type": "typing", "action": action})
+        if action == "typing":
+            self._send_telegram_action("typing", preferred_chat_id=chat_id)
         return True
 
     def send_photo(self, chat_id: int, photo_bytes: bytes,
@@ -126,6 +358,7 @@ class LocalChatBridge:
         self._outbox.put(msg)
         if self._broadcast_fn:
             self._broadcast_fn(msg)
+        self._send_telegram_photo(photo_bytes, caption=caption, mime=mime, preferred_chat_id=chat_id)
         return True, "ok"
 
     def download_file_base64(self, file_id: str, max_bytes: int = 10_000_000) -> Tuple[Optional[str], str]:
@@ -160,9 +393,12 @@ class LocalChatBridge:
         return batch
 
     # UI hooks
-    def ui_send(self, text: str):
+    def ui_send(self, text: str, *, sender_session_id: str = "", client_message_id: str = "", broadcast: bool = True):
         """Called by the web UI to send a message to the agent."""
-        self._inbox.put(text)
+        if broadcast:
+            self.handle_web_message(text, sender_session_id=sender_session_id, client_message_id=client_message_id)
+        else:
+            self.enqueue_local_message(text)
 
     def ui_receive(self, timeout: float = 0.1) -> Optional[Dict[str, Any]]:
         """Called by the web UI to check for new messages from the agent."""
@@ -268,9 +504,11 @@ def log_chat(
     text: str,
     ts: Optional[str] = None,
     fmt: str = "",
+    source: str = "",
+    sender_label: str = "",
 ) -> None:
     if DATA_DIR:
-        append_jsonl(DATA_DIR / "logs" / "chat.jsonl", {
+        payload = {
             "ts": ts or datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "session_id": load_state().get("session_id"),
             "direction": direction,
@@ -278,7 +516,12 @@ def log_chat(
             "user_id": user_id,
             "text": text,
             "format": fmt,
-        })
+        }
+        if source:
+            payload["source"] = source
+        if sender_label:
+            payload["sender_label"] = sender_label
+        append_jsonl(DATA_DIR / "logs" / "chat.jsonl", payload)
 
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,

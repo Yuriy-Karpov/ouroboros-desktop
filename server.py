@@ -247,7 +247,7 @@ def _run_supervisor(settings: dict) -> None:
         from supervisor.message_bus import init as bus_init
         from supervisor.message_bus import LocalChatBridge
 
-        bridge = LocalChatBridge()
+        bridge = LocalChatBridge(settings)
         bridge._broadcast_fn = broadcast_ws_sync
 
         from ouroboros.utils import set_log_sink
@@ -391,8 +391,10 @@ def _run_supervisor(settings: dict) -> None:
                 if not msg:
                     continue
 
-                chat_id = 1
-                user_id = 1
+                chat = msg.get("chat") or {}
+                sender = msg.get("from") or {}
+                chat_id = int(chat.get("id") or 1)
+                user_id = int(sender.get("id") or 1)
                 text = str(msg.get("text") or "")
                 now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -402,7 +404,14 @@ def _run_supervisor(settings: dict) -> None:
                     st["owner_chat_id"] = chat_id
 
                 from supervisor.message_bus import log_chat
-                log_chat("in", chat_id, user_id, text)
+                log_chat(
+                    "in",
+                    chat_id,
+                    user_id,
+                    text,
+                    source=str(msg.get("source") or ""),
+                    sender_label=str(msg.get("sender_label") or ""),
+                )
                 st["last_owner_message_at"] = now_iso
                 save_state(st)
 
@@ -490,6 +499,12 @@ def _stop_live_runtime() -> None:
     global _supervisor_thread, _supervisor_ctx, _supervisor_error
 
     _supervisor_stop_requested.set()
+
+    try:
+        from supervisor.message_bus import get_bridge
+        get_bridge().shutdown()
+    except Exception:
+        log.debug("Failed to stop chat bridge during runtime reset", exc_info=True)
 
     try:
         consciousness = getattr(_supervisor_ctx, "consciousness", None)
@@ -658,18 +673,16 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             payload = msg.get("content", "") if msg_type == "chat" else msg.get("cmd", "")
             if msg_type in ("chat", "command") and payload:
                 try:
-                    if msg_type == "chat":
-                        await broadcast_ws({
-                            "type": "chat",
-                            "role": "user",
-                            "content": payload,
-                            "ts": datetime.now(timezone.utc).isoformat(),
-                            "client_message_id": str(msg.get("client_message_id", "") or ""),
-                            "sender_session_id": str(msg.get("sender_session_id", "") or ""),
-                        })
                     from supervisor.message_bus import get_bridge
                     bridge = get_bridge()
-                    bridge.ui_send(payload)
+                    if msg_type == "chat":
+                        bridge.ui_send(
+                            payload,
+                            sender_session_id=str(msg.get("sender_session_id", "") or ""),
+                            client_message_id=str(msg.get("client_message_id", "") or ""),
+                        )
+                    else:
+                        bridge.ui_send(payload, broadcast=False)
                 except Exception:
                     ts = datetime.now(timezone.utc).isoformat()
                     await websocket.send_text(json.dumps({
@@ -747,6 +760,7 @@ async def api_settings_get(request: Request) -> JSONResponse:
         "OPENAI_COMPATIBLE_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
         "ANTHROPIC_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
         "GITHUB_TOKEN",
         "OUROBOROS_NETWORK_PASSWORD",
     ):
@@ -761,6 +775,11 @@ async def api_settings_post(request: Request) -> JSONResponse:
         current = load_settings()
         supervisor_was_ready = _supervisor_ready.is_set()
         previous_provider_snapshot = _provider_settings_snapshot(current)
+        previous_telegram_snapshot = (
+            str(current.get("TELEGRAM_BOT_TOKEN", "") or "").strip(),
+            str(current.get("TELEGRAM_CHAT_ID", "") or "").strip(),
+            str(current.get("TELEGRAM_ALLOWED_CHAT_IDS", "") or "").strip(),
+        )
         legacy_compatible_key = str(current.get("OPENAI_API_KEY", "") or "")
         legacy_compatible_base_url = str(current.get("OPENAI_BASE_URL", "") or "").strip()
         for key in _SETTINGS_DEFAULTS:
@@ -782,6 +801,11 @@ async def api_settings_post(request: Request) -> JSONResponse:
         _apply_settings_to_env(current)
         supervisor_started = _ensure_supervisor_started(current)
         provider_settings_changed = previous_provider_snapshot != _provider_settings_snapshot(current)
+        telegram_settings_changed = previous_telegram_snapshot != (
+            str(current.get("TELEGRAM_BOT_TOKEN", "") or "").strip(),
+            str(current.get("TELEGRAM_CHAT_ID", "") or "").strip(),
+            str(current.get("TELEGRAM_ALLOWED_CHAT_IDS", "") or "").strip(),
+        )
         provider_reload_result = {"reloaded": False, "recovered_tasks": 0, "error": None}
         if provider_settings_changed and not supervisor_started:
             provider_reload_result = _reload_live_supervisor_for_provider_change(current)
@@ -801,6 +825,15 @@ async def api_settings_post(request: Request) -> JSONResponse:
         resp = {"status": "saved"}
         if supervisor_started:
             resp["info"] = "Supervisor started with updated model/provider settings."
+        if supervisor_was_ready or supervisor_started:
+            try:
+                from supervisor.message_bus import get_bridge
+                get_bridge().configure_from_settings(current)
+                if telegram_settings_changed and "info" not in resp:
+                    resp["info"] = "Telegram integration updated."
+            except Exception as exc:
+                if telegram_settings_changed:
+                    warnings.append(f"Telegram update failed: {exc}")
         elif provider_reload_result.get("reloaded"):
             recovered_tasks = int(provider_reload_result.get("recovered_tasks") or 0)
             if recovered_tasks:
@@ -1260,6 +1293,8 @@ async def api_chat_history(request: Request) -> JSONResponse:
                         "is_progress": False,
                         "system_type": str(entry.get("type", "")),
                         "markdown": str(entry.get("format", "")).lower() == "markdown",
+                        "source": str(entry.get("source", "")),
+                        "sender_label": str(entry.get("sender_label", "")),
                     })
         except Exception as e:
             log.warning("Failed to read chat history: %s", e)
@@ -1376,6 +1411,11 @@ async def lifespan(app):
         try:
             from ouroboros.tools.shell import kill_all_tracked_subprocesses
             kill_all_tracked_subprocesses()
+        except Exception:
+            pass
+        try:
+            from supervisor.message_bus import get_bridge
+            get_bridge().shutdown()
         except Exception:
             pass
         try:

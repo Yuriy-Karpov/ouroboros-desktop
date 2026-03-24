@@ -434,6 +434,20 @@ export function initSettings({ ws, state }) {
                                 <div class="settings-note">Localhost requests bypass this password. Non-localhost access requires it only when you set it.</div>
                             </div>
                         </div>
+                        <div class="form-row">
+                            <div class="form-field provider-field-wide">
+                                <label>Telegram Bot Token (optional)</label>
+                                ${renderSecretInput('s-telegram-bot-token', '123456789:AA...')}
+                                <div class="settings-note">Connect the shared chat to Telegram through your bot token.</div>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-field provider-field-wide">
+                                <label>Telegram Chat ID (optional)</label>
+                                <input id="s-telegram-chat-id" placeholder="123456789 or -100987654321" />
+                                <div class="settings-note">If set, the bot works only with this chat. If empty, the first Telegram chat that messages the bot is used for this runtime.</div>
+                            </div>
+                        </div>
                         <div class="settings-panel-actions">
                             <button class="btn btn-save" data-settings-save>Save Settings</button>
                             <button class="btn btn-danger" data-settings-reset>Reset All Data</button>
@@ -513,7 +527,7 @@ export function initSettings({ ws, state }) {
         });
     }
 
-    const secretInputIds = ['s-openrouter', 's-openai-official', 's-openai-compatible-key', 's-cloudru-key', 's-anthropic', 's-network-password', 's-gh-token'];
+    const secretInputIds = ['s-openrouter', 's-openai-official', 's-openai-compatible-key', 's-cloudru-key', 's-anthropic', 's-network-password', 's-telegram-bot-token', 's-gh-token'];
     secretInputIds.forEach((id) => {
         const input = document.getElementById(id);
         input.addEventListener('focus', () => {
@@ -854,6 +868,8 @@ export function initSettings({ ws, state }) {
         if (s.CLOUDRU_FOUNDATION_MODELS_API_KEY) document.getElementById('s-cloudru-key').value = s.CLOUDRU_FOUNDATION_MODELS_API_KEY;
         if (s.ANTHROPIC_API_KEY) document.getElementById('s-anthropic').value = s.ANTHROPIC_API_KEY;
         if (s.OUROBOROS_NETWORK_PASSWORD) document.getElementById('s-network-password').value = s.OUROBOROS_NETWORK_PASSWORD;
+        if (s.TELEGRAM_BOT_TOKEN) document.getElementById('s-telegram-bot-token').value = s.TELEGRAM_BOT_TOKEN;
+        document.getElementById('s-telegram-chat-id').value = s.TELEGRAM_CHAT_ID || s.TELEGRAM_ALLOWED_CHAT_IDS || '';
         setModelFieldValue('s-model', s.OUROBOROS_MODEL || DEFAULT_MODEL_VALUES['s-model']);
         setModelFieldValue('s-model-code', s.OUROBOROS_MODEL_CODE || DEFAULT_MODEL_VALUES['s-model-code']);
         setModelFieldValue('s-model-light', s.OUROBOROS_MODEL_LIGHT || DEFAULT_MODEL_VALUES['s-model-light']);
@@ -1071,6 +1087,10 @@ export function initSettings({ ws, state }) {
         if (antKey && !antKey.includes('...')) body.ANTHROPIC_API_KEY = antKey;
         const networkPassword = document.getElementById('s-network-password').value;
         if (networkPassword && !networkPassword.includes('...')) body.OUROBOROS_NETWORK_PASSWORD = networkPassword;
+        body.TELEGRAM_CHAT_ID = document.getElementById('s-telegram-chat-id').value.trim();
+        body.TELEGRAM_ALLOWED_CHAT_IDS = '';
+        const telegramBotToken = document.getElementById('s-telegram-bot-token').value;
+        if (telegramBotToken && !telegramBotToken.includes('...')) body.TELEGRAM_BOT_TOKEN = telegramBotToken;
         const ghToken = document.getElementById('s-gh-token').value;
         if (ghToken && !ghToken.includes('...')) body.GITHUB_TOKEN = ghToken;
 

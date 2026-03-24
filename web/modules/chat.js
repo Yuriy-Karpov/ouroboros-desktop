@@ -206,6 +206,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     if (!includeUser && msg.role === 'user') continue;
                     addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, !!msg.is_progress, {
                         systemType: msg.system_type || '',
+                        senderLabel: msg.sender_label || '',
                     });
                 }
                 historyLoaded = true;
@@ -335,9 +336,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             if (!reconciled) {
                 const senderSessionId = String(msg.sender_session_id || '').trim();
                 const isLocalSender = senderSessionId && senderSessionId === clientSessionId;
+                const explicitSenderLabel = String(msg.sender_label || '').trim();
                 addMessage(msg.content, 'user', false, msg.ts || null, false, {
                     clientMessageId: msg.client_message_id || '',
-                    senderLabel: buildUserSenderLabel(senderSessionId, isLocalSender),
+                    senderLabel: explicitSenderLabel || buildUserSenderLabel(senderSessionId, isLocalSender),
                 });
             }
             if (state.activePage !== 'chat') {
