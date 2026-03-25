@@ -946,9 +946,13 @@ async def lifespan(app):
         _supervisor_ready.set()
         log.info("No API key or local model configured. Supervisor not started.")
 
-    if has_local and (settings.get("LOCAL_MODEL_SOURCE") or settings.get("LOCAL_MODEL_URL")):
-        if _is_source_dev_mode():
-            log.info("Source dev mode: skipping built-in model server autostart.")
+    local_autostart = str(settings.get("LOCAL_MODEL_AUTOSTART", "")).strip().lower() in ("1", "true", "yes", "on")
+    local_source = str(settings.get("LOCAL_MODEL_SOURCE", "")).strip()
+    local_url = str(settings.get("LOCAL_MODEL_URL", "")).strip()
+    if local_autostart and local_source:
+        from ouroboros.local_model import is_localhost_model_url
+        if local_url and not is_localhost_model_url(local_url):
+            log.info("Built-in model server autostart is enabled, but an external Server URL is configured. Skipping.")
         else:
             from ouroboros.local_model_autostart import auto_start_local_model
             threading.Thread(

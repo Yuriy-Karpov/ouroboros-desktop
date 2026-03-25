@@ -13,6 +13,8 @@ def auto_start_local_model(settings: dict) -> None:
     When LOCAL_MODEL_URL points to an external server, just health-check it.
     When it points to localhost (auto-filled by a previous Start), fall through
     to start the built-in server.
+
+    This helper is only called when the explicit built-in autostart setting is enabled.
     """
     external_url = str(settings.get("LOCAL_MODEL_URL", "")).strip()
     if external_url:
@@ -47,6 +49,10 @@ def auto_start_local_model(settings: dict) -> None:
         n_gpu_layers = int(settings.get("LOCAL_MODEL_N_GPU_LAYERS", 0))
         n_ctx = int(settings.get("LOCAL_MODEL_CONTEXT_LENGTH", 16384))
         chat_format = str(settings.get("LOCAL_MODEL_CHAT_FORMAT", "")).strip()
+
+        if not source:
+            log.info("Built-in model server autostart requested, but no Model Source is configured. Skipping.")
+            return
 
         log.info("Auto-starting local model: %s / %s", source, filename)
         model_path = mgr.download_model(source, filename)

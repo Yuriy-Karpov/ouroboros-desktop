@@ -40,6 +40,15 @@ export function initSettings({ ws, state }) {
                         <div class="form-field"><label>Context Length</label><input id="s-local-ctx" type="number" value="16384" style="width:120px" placeholder="16384"></div>
                         <div class="form-field"><label>Chat Format</label><input id="s-local-chat-format" value="" placeholder="auto-detect" style="width:200px"></div>
                     </div>
+                    <div class="form-row" style="align-items:center;gap:10px">
+                        <label style="display:flex;align-items:center;gap:6px;margin:0;font-size:13px;color:var(--text-primary)">
+                            <input type="checkbox" id="s-local-autostart">
+                            Auto-start built-in server on app launch
+                        </label>
+                        <div style="font-size:12px;color:var(--text-secondary)">
+                            Only applies to the built-in llama.cpp server. External Server URL targets are never auto-started.
+                        </div>
+                    </div>
                     <div class="form-row" style="align-items:center;gap:8px">
                         <button class="btn btn-primary" id="btn-local-start">Start</button>
                         <button class="btn btn-primary" id="btn-local-stop" style="opacity:0.5">Stop</button>
@@ -216,6 +225,7 @@ export function initSettings({ ws, state }) {
         if (s.LOCAL_MODEL_N_GPU_LAYERS != null) document.getElementById('s-local-gpu-layers').value = s.LOCAL_MODEL_N_GPU_LAYERS;
         if (s.LOCAL_MODEL_CONTEXT_LENGTH) document.getElementById('s-local-ctx').value = s.LOCAL_MODEL_CONTEXT_LENGTH;
         if (s.LOCAL_MODEL_CHAT_FORMAT) document.getElementById('s-local-chat-format').value = s.LOCAL_MODEL_CHAT_FORMAT;
+        document.getElementById('s-local-autostart').checked = s.LOCAL_MODEL_AUTOSTART === true || String(s.LOCAL_MODEL_AUTOSTART).toLowerCase() === 'true';
         toggleBuiltinSection();
         document.getElementById('s-local-main').checked = s.USE_LOCAL_MAIN === true || s.USE_LOCAL_MAIN === 'True';
         document.getElementById('s-local-code').checked = s.USE_LOCAL_CODE === true || s.USE_LOCAL_CODE === 'True';
@@ -257,6 +267,12 @@ export function initSettings({ ws, state }) {
             el.textContent = text;
             el.style.color = isReady ? 'var(--green)' : d.status === 'error' ? 'var(--red)' : 'var(--text-secondary)';
             if (d.status === 'ready' && !d.external && d.model_name) {
+                const urlEl = document.getElementById('s-local-url');
+                if (!urlEl.value.trim()) {
+                    const port = parseInt(document.getElementById('s-local-port').value) || 8766;
+                    urlEl.value = `http://127.0.0.1:${port}/v1`;
+                    toggleBuiltinSection();
+                }
                 const nameEl = document.getElementById('s-local-model-name');
                 if (!nameEl.value.trim()) nameEl.value = d.model_name;
             }
@@ -403,6 +419,7 @@ export function initSettings({ ws, state }) {
             LOCAL_MODEL_N_GPU_LAYERS: parseInt(document.getElementById('s-local-gpu-layers').value),
             LOCAL_MODEL_CONTEXT_LENGTH: parseInt(document.getElementById('s-local-ctx').value) || 16384,
             LOCAL_MODEL_CHAT_FORMAT: document.getElementById('s-local-chat-format').value,
+            LOCAL_MODEL_AUTOSTART: document.getElementById('s-local-autostart').checked,
             USE_LOCAL_MAIN: document.getElementById('s-local-main').checked,
             USE_LOCAL_CODE: document.getElementById('s-local-code').checked,
             USE_LOCAL_LIGHT: document.getElementById('s-local-light').checked,
