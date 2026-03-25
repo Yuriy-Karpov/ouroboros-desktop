@@ -17,6 +17,7 @@ import logging
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
+from ouroboros.context import build_user_content
 from ouroboros.context_compaction import compact_tool_history_llm
 from ouroboros.utils import estimate_tokens
 
@@ -224,7 +225,10 @@ def _drain_incoming_messages(
     while not incoming_messages.empty():
         try:
             injected = incoming_messages.get_nowait()
-            messages.append({"role": "user", "content": injected})
+            if isinstance(injected, dict):
+                messages.append({"role": "user", "content": build_user_content(injected)})
+            else:
+                messages.append({"role": "user", "content": injected})
         except queue.Empty:
             break
 

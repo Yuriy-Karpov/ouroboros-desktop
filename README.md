@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.6.0](https://img.shields.io/badge/version-4.6.0-green.svg)](VERSION)
+[![Version 4.7.0](https://img.shields.io/badge/version-4.7.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -35,7 +35,7 @@ Not a coding assistant. A digital being with a constitution, background consciou
   <img src="assets/setup.png" width="500" alt="Drag Ouroboros.app to install">
 </p>
 
-On first launch, right-click → **Open** (Gatekeeper bypass). The wizard will ask for your [OpenRouter API key](https://openrouter.ai/keys).
+On first launch, right-click → **Open** (Gatekeeper bypass). The desktop wizard is now multi-step: provider keys first, mandatory model confirmation second, runtime summary last. It allows OpenRouter, official OpenAI, and local-model setup from the same flow, refuses to continue if nothing runnable is configured, and applies provider-aware defaults so a single OpenAI key does not leave Anthropic/OpenRouter-only lane values behind. When OpenRouter is absent and the lane models are still untouched defaults, Ouroboros auto-remaps them to official OpenAI defaults. The broader multi-provider setup (OpenAI-compatible, Cloud.ru, Telegram bridge) remains available in **Settings**. Existing supported provider settings skip the wizard automatically.
 
 ---
 
@@ -47,10 +47,13 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Native Desktop App** — Runs entirely on your machine as a standalone application (macOS, Linux, Windows). No cloud dependencies for execution.
 - **Constitution** — Governed by [BIBLE.md](BIBLE.md) (9 philosophical principles, P0–P8). Philosophy first, code second.
 - **Multi-Layer Safety** — Hardcoded sandbox blocks writes to critical files and mutative git via shell; deterministic whitelist for known-safe ops; LLM Safety Agent evaluates remaining commands; post-edit revert for safety-critical files.
+- **Multi-Provider Runtime** — Remote model lanes can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, or Cloud.ru Foundation Models. The optional model catalog helps populate provider-specific model IDs in Settings, and untouched default lanes auto-remap to official OpenAI defaults when OpenRouter is absent.
+- **Focused Task UX** — Chat collapses progress/tool chatter into one expandable live task card, and Logs groups task timelines with the same event summaries instead of dumping every step as a separate row.
 - **Background Consciousness** — Thinks between tasks. Has an inner life. Not reactive — proactive.
 - **Identity Persistence** — One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.
 - **Embedded Version Control** — Contains its own local Git repo. Version controls its own evolution. Optional GitHub sync for remote backup.
 - **Local Model Support** — Run with a local GGUF model via llama-cpp-python (Metal acceleration on Apple Silicon, CPU on Linux/Windows).
+- **Telegram Bridge** — Optional bidirectional bridge between the Web UI and Telegram: text, typing/actions, photos, chat binding, and inbound Telegram photos flowing into the same live chat/agent stream.
 
 ---
 
@@ -98,11 +101,28 @@ The same values can also be provided via environment variables:
 | `OUROBOROS_SERVER_HOST` | `127.0.0.1` | Default bind host |
 | `OUROBOROS_SERVER_PORT` | `8765` | Default bind port |
 
-If you bind on anything other than localhost, you must also set `OUROBOROS_NETWORK_PASSWORD`.
-The built-in password gate is skipped for localhost requests, but enforced for remote/browser access.
+If you bind on anything other than localhost, `OUROBOROS_NETWORK_PASSWORD` is optional. When set, non-loopback browser/API traffic is gated; when unset, the full surface remains open by design.
 
 The Files tab uses your home directory by default only for localhost usage. For Docker or other
-network-exposed runs, set `OUROBOROS_FILE_BROWSER_DEFAULT` to an explicit directory.
+network-exposed runs, set `OUROBOROS_FILE_BROWSER_DEFAULT` to an explicit directory. Symlink entries are shown and can be read, edited, copied, moved, uploaded into, and deleted intentionally; root-delete protection still applies to the configured root itself.
+
+### Provider Routing
+
+Settings now exposes tabbed provider cards for:
+
+- **OpenRouter** — default multi-model router
+- **OpenAI** — official OpenAI API (use model values like `openai::gpt-5.2`)
+- **OpenAI Compatible** — any custom OpenAI-style endpoint (use `openai-compatible::...`)
+- **Cloud.ru Foundation Models** — Cloud.ru OpenAI-compatible runtime (use `cloudru::...`)
+- **Anthropic** — kept for the existing Claude CLI flow, not a separate remote runtime
+
+If OpenRouter is not configured and only official OpenAI is present, untouched default lane values are auto-remapped to `openai::gpt-5.2` / `openai::gpt-4.1` so the desktop first-run path does not strand the app on OpenRouter-only defaults.
+
+The Settings page also includes:
+
+- optional `/api/model-catalog` lookup for configured providers
+- Telegram bridge configuration (`TELEGRAM_BOT_TOKEN`, pinned/legacy chat ids)
+- a refactored desktop-first tabbed UI with searchable model pickers, segmented effort controls, masked-secret toggles, explicit `Clear` actions, and local-model controls
 
 ### Run Tests
 
@@ -117,7 +137,8 @@ make test
 ### Docker (web UI)
 
 Docker is for the web UI/runtime flow, not the desktop bundle. The container binds to
-`0.0.0.0:8765` by default, so `OUROBOROS_NETWORK_PASSWORD` is required.
+`0.0.0.0:8765` by default, and the image now also defaults `OUROBOROS_FILE_BROWSER_DEFAULT`
+to `${APP_HOME}` so the Files tab always has an explicit network-safe root inside the container.
 
 Build the image:
 
@@ -129,7 +150,6 @@ Run on the default port:
 
 ```bash
 docker run --rm -p 8765:8765 \
-  -e OUROBOROS_NETWORK_PASSWORD=change-me \
   -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
   -v "$PWD:/workspace" \
   ouroboros-web
@@ -140,7 +160,6 @@ Use a custom port via environment variables:
 ```bash
 docker run --rm -p 9000:9000 \
   -e OUROBOROS_SERVER_PORT=9000 \
-  -e OUROBOROS_NETWORK_PASSWORD=change-me \
   -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
   -v "$PWD:/workspace" \
   ouroboros-web
@@ -150,7 +169,6 @@ Run with launch arguments instead:
 
 ```bash
 docker run --rm -p 9000:9000 \
-  -e OUROBOROS_NETWORK_PASSWORD=change-me \
   -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
   -v "$PWD:/workspace" \
   ouroboros-web --port 9000
@@ -160,8 +178,8 @@ Required/important environment variables:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OUROBOROS_NETWORK_PASSWORD` | Yes for Docker/non-localhost | Password gate for browser/API access outside localhost |
-| `OUROBOROS_FILE_BROWSER_DEFAULT` | Recommended, required for Files tab in Docker/non-localhost mode | Explicit root directory exposed in the Files tab |
+| `OUROBOROS_NETWORK_PASSWORD` | Optional | Enables the non-loopback password gate when set |
+| `OUROBOROS_FILE_BROWSER_DEFAULT` | Defaults to `${APP_HOME}` in the image | Explicit root directory exposed in the Files tab |
 | `OUROBOROS_SERVER_PORT` | Optional | Override container listen port |
 | `OUROBOROS_SERVER_HOST` | Optional | Defaults to `0.0.0.0` in Docker |
 
@@ -169,7 +187,6 @@ Example: mount a host workspace and expose only that directory in Files:
 
 ```bash
 docker run --rm -p 8765:8765 \
-  -e OUROBOROS_NETWORK_PASSWORD=change-me \
   -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
   -v "$PWD:/workspace" \
   ouroboros-web
@@ -262,10 +279,12 @@ Created on first launch:
 
 | Key | Required | Where to get it |
 |-----|----------|-----------------|
-| OpenRouter API Key | **Yes** | [openrouter.ai/keys](https://openrouter.ai/keys) |
-| OpenAI API Key | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — enables web search tool |
-| OpenAI Base URL | No | Optional OpenAI-compatible endpoint for web search, e.g. a proxy or third-party compatible API |
+| OpenRouter API Key | No | [openrouter.ai/keys](https://openrouter.ai/keys) — default multi-model router |
+| OpenAI API Key | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — official OpenAI runtime and web search |
+| OpenAI Compatible API Key / Base URL | No | Any OpenAI-style endpoint (proxy, self-hosted gateway, third-party compatible API) |
+| Cloud.ru Foundation Models API Key | No | Cloud.ru Foundation Models provider |
 | Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — enables Claude Code CLI |
+| Telegram Bot Token | No | [@BotFather](https://t.me/BotFather) — enables the Telegram bridge |
 | GitHub Token | No | [github.com/settings/tokens](https://github.com/settings/tokens) — enables remote sync |
 
 All keys are configured through the **Settings** page in the UI or during the first-run wizard.
@@ -283,7 +302,7 @@ All keys are configured through the **Settings** page in the UI or during the fi
 
 Task/chat reasoning defaults to `medium`.
 
-Models are configurable in the Settings page. All LLM calls go through [OpenRouter](https://openrouter.ai) (except web search, which uses OpenAI directly or an OpenAI-compatible base URL if configured).
+Models are configurable in the Settings page. Runtime lanes can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, or Cloud.ru. Anthropic remains scoped to the existing Claude Code CLI flow. When only official OpenAI is configured and the shipped default lanes are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In that same OpenAI-only mode, review-model lists are normalized automatically and fall back to running the main model three times if no valid multi-model remote quorum is configured.
 
 ### File Browser Start Directory
 
@@ -324,7 +343,7 @@ Available in the chat interface:
 | `/review` | Queue a deep review task (code, understanding, identity). |
 | `/bg` | Toggle background consciousness loop (start/stop/status). |
 
-All other messages are sent directly to the LLM.
+The same runtime actions are also exposed as compact buttons in both the Dashboard and the Chat header. All other messages are sent directly to the LLM.
 
 ---
 
@@ -350,6 +369,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.7.0 | 2026-03-22 | Provider-and-UI overhaul release: add multi-provider model routing (OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru), official-OpenAI auto-default migration plus OpenAI-only review fallback, multi-step onboarding with mandatory model confirmation, desktop-first Settings redesign with searchable model pickers and explicit secret clearing, Telegram bridge with bidirectional text/actions/photos/chat binding, one expandable live task card in Chat, grouped task cards in Logs, and intentional external-symlink full CRUD semantics in the Files tab while preserving explicit network root and root-delete protection. |
 | 4.6.0 | 2026-03-22 | Files and network runtime release: add the Web UI Files tab with extracted backend routes, bounded preview/upload behavior, root-delete protection, encoded image preview URLs, and safer path containment; add minimal password gate for non-localhost browser/API access; add source/docker host+port entrypoint support with repo-shaped Docker runtime and explicit file-root configuration for network mode. |
 | 4.5.0 | 2026-03-19 | Context quality and prompt discipline release: fix provenance — system summaries now correctly marked as system, not user, across memory, consolidation, server API, and chat UI (amber system bubbles); restore execution reflections (task_reflections.jsonl) in live LLM context; move Health Invariants to the top of dynamic context block (both task and consciousness paths); task-scope recent progress/tools/events when task_id is available; harden run_shell against literal $VAR env-ref misuse in argv; add Claude CLI first-run retry and structured error classification; full SYSTEM.md editorial rewrite — terminology normalized to 'creator', new Methodology Check / Anti-Reactivity / Diagnostics Discipline / Knowledge Retrieval Triggers sections, stronger Health Invariant reactions, compressed inventory sections. 12 files changed, new regression tests. |
 | 4.4.0 | 2026-03-19 | Safe editing release: `str_replace_editor` tool for surgical edits to existing files, `repo_write` shrink guard blocks accidental truncation of tracked files (>30% shrinkage), full task lifecycle statuses (failed/interrupted/cancelled) with honest status tracking, rescue snapshot discoverability via health invariants, `provider_incomplete_response` classification for OpenRouter glitches, default review enforcement changed to advisory, fix progress bubble opacity and duplicate emoji. |

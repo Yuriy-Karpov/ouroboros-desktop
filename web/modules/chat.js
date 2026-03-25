@@ -1,16 +1,64 @@
 import { escapeHtml, renderMarkdown } from './utils.js';
+import {
+    duplicateLogEventKey,
+    getLogTaskGroupId,
+    isGroupedTaskEvent,
+    normalizeLogTs,
+    summarizeLogEvent,
+} from './log_events.js';
+
+const CHAT_STORAGE_KEY = 'ouro_chat';
+const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
+const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
+
+function getOrCreateChatSessionId() {
+    try {
+        const existing = sessionStorage.getItem(CHAT_SESSION_ID_KEY);
+        if (existing) return existing;
+        const created = (globalThis.crypto && typeof crypto.randomUUID === 'function')
+            ? crypto.randomUUID()
+            : `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        sessionStorage.setItem(CHAT_SESSION_ID_KEY, created);
+        return created;
+    } catch {
+        return `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+}
+
+function loadInputHistory() {
+    try {
+        const raw = JSON.parse(sessionStorage.getItem(CHAT_INPUT_HISTORY_KEY) || '[]');
+        return Array.isArray(raw) ? raw.filter(Boolean).slice(-50) : [];
+    } catch {
+        return [];
+    }
+}
+
+function saveInputHistory(entries) {
+    try {
+        sessionStorage.setItem(CHAT_INPUT_HISTORY_KEY, JSON.stringify(entries.slice(-50)));
+    } catch {}
+}
 
 export function initChat({ ws, state, updateUnreadBadge }) {
     const container = document.getElementById('content');
+    const chatSessionId = getOrCreateChatSessionId();
 
     const page = document.createElement('div');
     page.id = 'page-chat';
     page.className = 'page active';
     page.innerHTML = `
-        <div class="page-header">
+        <div class="page-header chat-page-header">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <h2>Chat</h2>
             <div class="spacer"></div>
+            <div class="chat-header-actions" id="chat-header-actions">
+                <button class="chat-header-btn" type="button" data-chat-command="evolve" title="Toggle evolution mode">Evolve</button>
+                <button class="chat-header-btn" type="button" data-chat-command="bg" title="Toggle background consciousness">Consciousness</button>
+                <button class="chat-header-btn" type="button" data-chat-command="review" title="Run review now">Review</button>
+                <button class="chat-header-btn" type="button" data-chat-command="restart" title="Restart agent">Restart</button>
+                <button class="chat-header-btn danger" type="button" data-chat-command="panic" title="Stop all workers">Panic</button>
+            </div>
             <span id="chat-status" class="status-badge offline">Connecting...</span>
         </div>
         <div id="chat-messages"></div>
@@ -26,16 +74,59 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const messagesDiv = document.getElementById('chat-messages');
     const input = document.getElementById('chat-input');
     const sendBtn = document.getElementById('chat-send');
+    const statusBadge = document.getElementById('chat-status');
+    const headerActions = document.getElementById('chat-header-actions');
 
-    const _chatHistory = [];
+    const persistedHistory = [];
     const seenMessageKeys = new Set();
     const messageKeyOrder = [];
+    const pendingUserBubbles = new Map();
+    const inputHistory = loadInputHistory();
+    let inputHistoryIndex = inputHistory.length;
+    let inputDraft = '';
     let historyLoaded = false;
     let historySyncPromise = null;
+    let welcomeShown = false;
+    const liveCard = document.createElement('details');
+    liveCard.id = 'chat-live-card';
+    liveCard.className = 'chat-live-card';
+    liveCard.hidden = true;
+    liveCard.innerHTML = `
+        <summary>
+            <div class="chat-live-summary">
+                <span class="chat-live-phase info" data-live-phase>idle</span>
+                <span class="chat-live-title" data-live-title>Waiting for work</span>
+                <span class="chat-live-count" data-live-count hidden>0 updates</span>
+            </div>
+            <div class="chat-live-meta" data-live-meta></div>
+        </summary>
+        <div class="chat-live-timeline" data-live-timeline></div>
+    `;
+    const liveCardPhase = liveCard.querySelector('[data-live-phase]');
+    const liveCardTitle = liveCard.querySelector('[data-live-title]');
+    const liveCardCount = liveCard.querySelector('[data-live-count]');
+    const liveCardMeta = liveCard.querySelector('[data-live-meta]');
+    const liveCardTimeline = liveCard.querySelector('[data-live-timeline]');
+    const liveCardState = {
+        groupId: '',
+        updates: 0,
+        finished: false,
+        items: [],
+    };
 
-    function buildMessageKey(role, text, timestamp, isProgress = false, systemType = '') {
+    function buildMessageKey(role, text, timestamp, opts = {}) {
+        if (opts.clientMessageId) return `client|${opts.clientMessageId}`;
         if (!timestamp) return '';
-        return `${role}|${isProgress ? '1' : '0'}|${systemType}|${timestamp}|${text}`;
+        return [
+            role,
+            opts.isProgress ? '1' : '0',
+            opts.systemType || '',
+            opts.source || '',
+            opts.senderLabel || '',
+            opts.senderSessionId || '',
+            timestamp,
+            text,
+        ].join('|');
     }
 
     function rememberMessageKey(key) {
@@ -56,27 +147,29 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             const now = new Date();
             const pad = n => String(n).padStart(2, '0');
             const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-            const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
             const todayStr = now.toDateString();
-            const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+            const yesterday = new Date(now);
+            yesterday.setDate(now.getDate() - 1);
             let short;
-            if (d.toDateString() === todayStr) {
-                short = hhmm;
-            } else if (d.toDateString() === yesterday.toDateString()) {
-                short = `Yesterday, ${hhmm}`;
-            } else {
-                short = `${months[d.getMonth()]} ${d.getDate()}, ${hhmm}`;
-            }
+            if (d.toDateString() === todayStr) short = hhmm;
+            else if (d.toDateString() === yesterday.toDateString()) short = `Yesterday, ${hhmm}`;
+            else short = `${months[d.getMonth()]} ${d.getDate()}, ${hhmm}`;
             const full = `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} at ${hhmm}`;
             return { short, full };
-        } catch { return null; }
+        } catch {
+            return null;
+        }
     }
 
-    const pendingUserBubbles = new Map();
-    let welcomeShown = false;
-
-    function getSenderLabel(role, isProgress = false, systemType = '') {
-        if (role === 'user') return 'You';
+    function getSenderLabel(role, isProgress = false, systemType = '', opts = {}) {
+        if (role === 'user') {
+            if (opts.source === 'telegram') return opts.senderLabel || 'Telegram';
+            if (opts.senderSessionId && opts.senderSessionId !== chatSessionId) {
+                return `WebUI (${opts.senderSessionId.slice(0, 8)})`;
+            }
+            return opts.senderLabel || 'You';
+        }
         if (role === 'system') {
             return systemType === 'task_summary' ? '📋 Task Summary' : '📋 System';
         }
@@ -84,49 +177,232 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         return 'Ouroboros';
     }
 
+    function setStatus(kind, text) {
+        if (!statusBadge) return;
+        statusBadge.className = `status-badge ${kind}`;
+        statusBadge.textContent = text;
+    }
+
+    function syncHeaderControlState(data) {
+        headerActions?.querySelectorAll('[data-chat-command]').forEach((button) => {
+            const cmd = button.dataset.chatCommand;
+            if (cmd === 'evolve') {
+                button.classList.toggle('on', !!data?.evolution_enabled);
+            } else if (cmd === 'bg') {
+                button.classList.toggle('on', !!data?.bg_consciousness_enabled);
+            }
+        });
+    }
+
+    async function refreshHeaderControlState(force = false) {
+        if (!force && state.activePage !== 'chat') return;
+        try {
+            const resp = await fetch('/api/state', { cache: 'no-store' });
+            if (!resp.ok) return;
+            syncHeaderControlState(await resp.json());
+        } catch {}
+    }
+
+    function persistVisibleHistory() {
+        try {
+            sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(persistedHistory.slice(-200)));
+        } catch {}
+    }
+
+    function insertMessageNode(node) {
+        const typing = document.getElementById('typing-indicator');
+        if (typing && typing.parentNode === messagesDiv) messagesDiv.insertBefore(node, typing);
+        else messagesDiv.appendChild(node);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    function resetLiveCard(groupId) {
+        liveCardState.groupId = groupId || '';
+        liveCardState.updates = 0;
+        liveCardState.finished = false;
+        liveCardState.items = [];
+        liveCardTitle.textContent = 'Working...';
+        liveCardPhase.textContent = 'progress';
+        liveCardPhase.className = 'chat-live-phase progress';
+        liveCardCount.hidden = true;
+        liveCardCount.textContent = '0 updates';
+        liveCardMeta.innerHTML = '';
+        liveCardTimeline.innerHTML = '';
+        liveCard.open = false;
+        liveCard.dataset.finished = '0';
+    }
+
+    function ensureLiveCardVisible() {
+        if (liveCard.hidden) {
+            liveCard.hidden = false;
+            insertMessageNode(liveCard);
+            return;
+        }
+        insertMessageNode(liveCard);
+    }
+
+    function renderLiveCardTimeline() {
+        liveCardTimeline.innerHTML = liveCardState.items.map((item) => `
+            <div class="chat-live-line">
+                <div class="chat-live-line-main">
+                    <span class="chat-live-line-phase ${item.phase || 'info'}">${escapeHtml(item.phase || 'info')}</span>
+                    <span class="chat-live-line-title">${escapeHtml(item.headline)}</span>
+                    <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `x${item.count}` : ''}</span>
+                </div>
+                <div class="chat-live-line-meta">
+                    ${item.ts ? `<span>${escapeHtml(item.ts)}</span>` : ''}
+                    ${item.meta.map((meta) => `<span class="chat-live-pill">${escapeHtml(meta)}</span>`).join('')}
+                </div>
+                ${item.body ? `<div class="chat-live-line-body">${escapeHtml(item.body)}</div>` : ''}
+            </div>
+        `).join('');
+    }
+
+    function applyLiveCardState(summary, groupId, ts, dedupeKey = '') {
+        const nextGroupId = groupId || liveCardState.groupId || 'active';
+        if (liveCardState.groupId && liveCardState.groupId !== nextGroupId) {
+            resetLiveCard(nextGroupId);
+        } else if (!liveCardState.groupId) {
+            resetLiveCard(nextGroupId);
+        }
+
+        ensureLiveCardVisible();
+        liveCardState.updates += 1;
+        liveCardState.finished = ['done', 'error', 'timeout'].includes(summary.phase || '');
+        liveCard.dataset.finished = liveCardState.finished ? '1' : '0';
+        liveCardPhase.textContent = summary.phase || 'info';
+        liveCardPhase.className = `chat-live-phase ${summary.phase || 'info'}`;
+        liveCardTitle.textContent = summary.headline || 'Working...';
+        liveCardCount.hidden = false;
+        liveCardCount.textContent = `${liveCardState.updates} updates`;
+        liveCardMeta.innerHTML = [
+            nextGroupId === 'bg-consciousness' ? 'background' : `task=${nextGroupId}`,
+            ts || '',
+            ...summary.meta,
+        ].filter(Boolean).map((item) => `<span class="chat-live-pill">${escapeHtml(item)}</span>`).join('');
+
+        const last = liveCardState.items[liveCardState.items.length - 1];
+        const syntheticKey = dedupeKey || `${summary.phase || 'info'}|${summary.headline || ''}|${summary.body || ''}`;
+        if (last && last.dedupeKey === syntheticKey) {
+            last.count += 1;
+            last.ts = ts || last.ts;
+        } else {
+            liveCardState.items.push({
+                phase: summary.phase || 'info',
+                headline: summary.headline || 'Update',
+                body: summary.body || '',
+                meta: summary.meta || [],
+                ts: ts || '',
+                count: 1,
+                dedupeKey: syntheticKey,
+            });
+            if (liveCardState.items.length > 20) liveCardState.items.shift();
+        }
+        renderLiveCardTimeline();
+        insertMessageNode(liveCard);
+        hideTypingIndicatorOnly();
+        if (liveCardState.finished) {
+            setStatus(summary.phase === 'error' || summary.phase === 'timeout' ? 'error' : 'online', summary.phase === 'error' || summary.phase === 'timeout' ? 'Attention' : 'Online');
+        } else {
+            setStatus('thinking', 'Working...');
+        }
+    }
+
+    function updateLiveCardFromProgressMessage(msg) {
+        const content = String(msg?.content || '').replace(/^💬\s*/, '').trim();
+        if (!content) return;
+        applyLiveCardState(
+            {
+                phase: 'progress',
+                headline: content,
+                body: '',
+                meta: ['thought'],
+            },
+            liveCardState.groupId || 'chat',
+            normalizeLogTs(msg.ts || new Date().toISOString()),
+            `progress:${content}`,
+        );
+    }
+
+    function updateLiveCardFromLogEvent(evt) {
+        if (!evt || !isGroupedTaskEvent(evt)) return;
+        const summary = summarizeLogEvent(evt);
+        const dedupeKey = evt.type === 'send_message'
+            ? `progress:${summary.headline || ''}`
+            : (duplicateLogEventKey(evt) || `${evt.type || evt.event || 'event'}|${summary.phase || ''}|${summary.headline || ''}`);
+        applyLiveCardState(
+            summary,
+            getLogTaskGroupId(evt) || liveCardState.groupId || 'active',
+            normalizeLogTs(evt.ts || evt.timestamp),
+            dedupeKey,
+        );
+    }
+
     function addMessage(text, role, markdown = false, timestamp = null, isProgress = false, opts = {}) {
         const pending = !!opts.pending;
         const ephemeral = !!opts.ephemeral;
         const clientMessageId = opts.clientMessageId || '';
+        const senderLabel = opts.senderLabel || '';
+        const senderSessionId = opts.senderSessionId || '';
+        const source = opts.source || '';
         const systemType = opts.systemType || '';
         const ts = timestamp || new Date().toISOString();
-        const messageKey = role === 'user' ? '' : buildMessageKey(role, text, ts, isProgress, systemType);
+        const messageKey = buildMessageKey(role, text, ts, {
+            clientMessageId,
+            systemType,
+            isProgress,
+            source,
+            senderLabel,
+            senderSessionId,
+        });
         if (messageKey && seenMessageKeys.has(messageKey)) return null;
+
         if (!isProgress && !ephemeral) {
-            _chatHistory.push({ text, role, ts, markdown: !!markdown, systemType });
+            persistedHistory.push({
+                text,
+                role,
+                ts,
+                markdown: !!markdown,
+                systemType,
+                source,
+                senderLabel,
+                senderSessionId,
+                clientMessageId,
+            });
+            persistVisibleHistory();
         }
+
         const bubble = document.createElement('div');
         bubble.className = `chat-bubble ${role}` + (isProgress ? ' progress' : '');
         if (pending) bubble.classList.add('pending');
         if (ephemeral) bubble.dataset.ephemeral = '1';
         if (clientMessageId) bubble.dataset.clientMessageId = clientMessageId;
         if (systemType) bubble.dataset.systemType = systemType;
-        const sender = getSenderLabel(role, isProgress, systemType);
+        if (senderSessionId) bubble.dataset.senderSessionId = senderSessionId;
+
+        const sender = getSenderLabel(role, isProgress, systemType, { source, senderLabel, senderSessionId });
         const rendered = role === 'user' ? escapeHtml(text) : renderMarkdown(text);
         const timeFmt = formatMsgTime(ts);
-        const timeHtml = timeFmt
-            ? `<div class="msg-time" title="${timeFmt.full}">${timeFmt.short}</div>`
-            : '';
+        const timeHtml = timeFmt ? `<div class="msg-time" title="${timeFmt.full}">${timeFmt.short}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         bubble.innerHTML = `
-            <div class="sender">${sender}</div>
+            <div class="sender">${escapeHtml(sender)}</div>
             <div class="message">${rendered}</div>
             ${pendingHtml}
             ${timeHtml}
         `;
-        const typing = document.getElementById('typing-indicator');
-        if (typing && typing.parentNode === messagesDiv) {
-            messagesDiv.insertBefore(bubble, typing);
-        } else {
-            messagesDiv.appendChild(bubble);
-        }
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        if (!ephemeral) {
-            try { sessionStorage.setItem('ouro_chat', JSON.stringify(_chatHistory.slice(-200))); } catch {}
-        }
+        insertMessageNode(bubble);
         rememberMessageKey(messageKey);
         if (pending && clientMessageId) pendingUserBubbles.set(clientMessageId, bubble);
         return bubble;
+    }
+
+    function markPendingDelivered(clientMessageId) {
+        const bubble = pendingUserBubbles.get(clientMessageId || '');
+        if (!bubble) return;
+        bubble.classList.remove('pending');
+        bubble.querySelector('.msg-pending')?.remove();
+        pendingUserBubbles.delete(clientMessageId);
     }
 
     function ensureWelcomeMessage() {
@@ -149,8 +425,13 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 const messages = Array.isArray(data.messages) ? data.messages : [];
                 for (const msg of messages) {
                     if (!includeUser && msg.role === 'user') continue;
-                    addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, !!msg.is_progress, {
+                    if (msg.is_progress) continue;
+                    addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, false, {
                         systemType: msg.system_type || '',
+                        source: msg.source || '',
+                        senderLabel: msg.sender_label || '',
+                        senderSessionId: msg.sender_session_id || '',
+                        clientMessageId: msg.client_message_id || '',
                     });
                 }
                 historyLoaded = true;
@@ -165,15 +446,17 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         return historySyncPromise;
     }
 
-    // Restore chat history from server (persists across app restarts)
     (async () => {
         if (await syncHistory({ includeUser: true })) return;
-        // Fallback: sessionStorage (survives page reload but not app restart)
         try {
-            const saved = JSON.parse(sessionStorage.getItem('ouro_chat') || '[]');
+            const saved = JSON.parse(sessionStorage.getItem(CHAT_STORAGE_KEY) || '[]');
             for (const msg of saved) {
                 addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, false, {
                     systemType: msg.systemType || '',
+                    source: msg.source || '',
+                    senderLabel: msg.senderLabel || '',
+                    senderSessionId: msg.senderSessionId || '',
+                    clientMessageId: msg.clientMessageId || '',
                 });
             }
         } catch {}
@@ -181,14 +464,47 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         ensureWelcomeMessage();
     })();
 
+    function rememberInput(text) {
+        if (!text) return;
+        if (inputHistory[inputHistory.length - 1] !== text) inputHistory.push(text);
+        saveInputHistory(inputHistory);
+        inputHistoryIndex = inputHistory.length;
+        inputDraft = '';
+    }
+
+    function restoreInputHistory(step) {
+        if (!inputHistory.length) return;
+        if (step < 0) {
+            if (input.selectionStart !== 0 || input.selectionEnd !== 0) return;
+            if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
+            inputHistoryIndex = Math.max(0, inputHistoryIndex - 1);
+            input.value = inputHistory[inputHistoryIndex] || '';
+        } else {
+            if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) return;
+            inputHistoryIndex = Math.min(inputHistory.length, inputHistoryIndex + 1);
+            input.value = inputHistoryIndex === inputHistory.length ? inputDraft : (inputHistory[inputHistoryIndex] || '');
+        }
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+        const cursor = input.value.length;
+        input.setSelectionRange(cursor, cursor);
+    }
+
     function sendMessage() {
         const text = input.value.trim();
         if (!text) return;
+        rememberInput(text);
         input.value = '';
         input.style.height = 'auto';
-        const result = ws.send({ type: 'chat', content: text });
+        const result = ws.send({
+            type: 'chat',
+            content: text,
+            sender_session_id: chatSessionId,
+        });
         addMessage(text, 'user', false, null, false, {
             pending: result?.status === 'queued',
+            source: 'web',
+            senderSessionId: chatSessionId,
             clientMessageId: result?.clientMessageId || '',
         });
     }
@@ -198,14 +514,52 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             sendMessage();
+            return;
+        }
+        if (e.key === 'ArrowUp' && !e.shiftKey) {
+            restoreInputHistory(-1);
+        } else if (e.key === 'ArrowDown' && !e.shiftKey) {
+            restoreInputHistory(1);
         }
     });
     input.addEventListener('input', () => {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+        if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
     });
 
-    // Typing indicator element (persistent, shown/hidden as needed)
+    headerActions?.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-chat-command]');
+        if (!button) return;
+        const command = button.dataset.chatCommand;
+        if (command === 'evolve') {
+            const next = !button.classList.contains('on');
+            button.classList.toggle('on', next);
+            ws.send({ type: 'command', cmd: `/evolve ${next ? 'start' : 'stop'}` });
+            return;
+        }
+        if (command === 'bg') {
+            const next = !button.classList.contains('on');
+            button.classList.toggle('on', next);
+            ws.send({ type: 'command', cmd: `/bg ${next ? 'start' : 'stop'}` });
+            return;
+        }
+        if (command === 'review') {
+            ws.send({ type: 'command', cmd: '/review' });
+            return;
+        }
+        if (command === 'restart') {
+            ws.send({ type: 'command', cmd: '/restart' });
+            return;
+        }
+        if (command === 'panic' && confirm('Kill all workers immediately?')) {
+            ws.send({ type: 'command', cmd: '/panic' });
+        }
+    });
+
+    refreshHeaderControlState(true);
+    setInterval(refreshHeaderControlState, 3000);
+
     const typingEl = document.createElement('div');
     typingEl.id = 'typing-indicator';
     typingEl.className = 'chat-bubble assistant typing-bubble';
@@ -216,86 +570,116 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     function showTyping() {
         typingEl.style.display = '';
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        const badge = document.getElementById('chat-status');
-        if (badge) {
-            badge.className = 'status-badge thinking';
-            badge.textContent = 'Thinking...';
-        }
+        setStatus('thinking', 'Thinking...');
     }
-    function hideTyping() {
+
+    function hideTypingIndicatorOnly() {
         typingEl.style.display = 'none';
-        const badge = document.getElementById('chat-status');
-        if (badge && badge.textContent === 'Thinking...') {
-            badge.className = 'status-badge online';
-            badge.textContent = 'Online';
+    }
+
+    function hideTyping() {
+        hideTypingIndicatorOnly();
+        if (statusBadge && ['Thinking...', 'Working...'].includes(statusBadge.textContent)) {
+            setStatus('online', 'Online');
         }
     }
 
-    ws.on('typing', () => { showTyping(); });
+    function incrementUnreadIfNeeded() {
+        if (state.activePage === 'chat') return;
+        state.unreadCount++;
+        updateUnreadBadge();
+    }
+
+    ws.on('typing', () => {
+        showTyping();
+    });
 
     ws.on('chat', (msg) => {
+        if (msg.role === 'user') {
+            const clientMessageId = msg.client_message_id || '';
+            const senderSessionId = msg.sender_session_id || '';
+            if (senderSessionId === chatSessionId && clientMessageId) {
+                markPendingDelivered(clientMessageId);
+                return;
+            }
+            addMessage(msg.content, 'user', false, msg.ts || null, false, {
+                source: msg.source || '',
+                senderLabel: msg.sender_label || '',
+                senderSessionId,
+                clientMessageId,
+            });
+            incrementUnreadIfNeeded();
+            return;
+        }
+
         if (msg.role === 'assistant' || msg.role === 'system') {
             hideTyping();
-            addMessage(msg.content, msg.role, msg.markdown, msg.ts || null, !!msg.is_progress, {
-                systemType: msg.system_type || '',
-            });
-            if (state.activePage !== 'chat') {
-                state.unreadCount++;
-                updateUnreadBadge();
+            if (msg.is_progress) {
+                updateLiveCardFromProgressMessage(msg);
+                return;
             }
+            if (liveCardState.groupId && !liveCardState.finished) {
+                liveCardState.finished = true;
+                liveCard.dataset.finished = '1';
+                if (liveCardPhase.textContent === 'progress' || liveCardPhase.textContent === 'calling') {
+                    liveCardPhase.textContent = 'done';
+                    liveCardPhase.className = 'chat-live-phase done';
+                }
+            }
+            addMessage(msg.content, msg.role, msg.markdown, msg.ts || null, false, {
+                systemType: msg.system_type || '',
+                source: msg.source || '',
+            });
+            incrementUnreadIfNeeded();
         }
     });
 
+    ws.on('log', (msg) => {
+        if (!msg?.data) return;
+        updateLiveCardFromLogEvent(msg.data);
+    });
+
     ws.on('outbound_sent', (evt) => {
-        const bubble = pendingUserBubbles.get(evt?.clientMessageId || '');
-        if (!bubble) return;
-        bubble.classList.remove('pending');
-        bubble.querySelector('.msg-pending')?.remove();
-        pendingUserBubbles.delete(evt.clientMessageId);
+        markPendingDelivered(evt?.clientMessageId || '');
     });
 
     ws.on('photo', (msg) => {
         hideTyping();
+        const role = msg.role === 'user' ? 'user' : 'assistant';
+        const sender = role === 'user'
+            ? getSenderLabel('user', false, '', {
+                source: msg.source || '',
+                senderLabel: msg.sender_label || '',
+                senderSessionId: msg.sender_session_id || '',
+            })
+            : 'Ouroboros';
         const bubble = document.createElement('div');
-        bubble.className = 'chat-bubble assistant';
+        bubble.className = `chat-bubble ${role}`;
         const timeFmt = formatMsgTime(msg.ts || new Date().toISOString());
-        const timeHtml = timeFmt
-            ? `<div class="msg-time" title="${timeFmt.full}">${timeFmt.short}</div>`
-            : '';
+        const timeHtml = timeFmt ? `<div class="msg-time" title="${timeFmt.full}">${timeFmt.short}</div>` : '';
         const captionHtml = msg.caption ? `<div class="message">${escapeHtml(msg.caption)}</div>` : '';
         bubble.innerHTML = `
-            <div class="sender">Ouroboros</div>
+            <div class="sender">${escapeHtml(sender)}</div>
             ${captionHtml}
             <div class="message"><img src="data:${msg.mime || 'image/png'};base64,${msg.image_base64}" style="max-width:100%;border-radius:8px;cursor:pointer" onclick="window.open(this.src,'_blank')" /></div>
             ${timeHtml}
         `;
-        const typing = document.getElementById('typing-indicator');
-        const messagesDiv = document.getElementById('chat-messages');
-        if (typing && typing.parentNode === messagesDiv) {
-            messagesDiv.insertBefore(bubble, typing);
-        } else {
-            messagesDiv.appendChild(bubble);
-        }
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        if (state.activePage !== 'chat') {
-            state.unreadCount++;
-            updateUnreadBadge();
-        }
+        insertMessageNode(bubble);
+        incrementUnreadIfNeeded();
     });
 
     ws.on('open', () => {
-        document.getElementById('chat-status').className = 'status-badge online';
-        document.getElementById('chat-status').textContent = 'Online';
+        setStatus('online', 'Online');
+        refreshHeaderControlState(true);
         syncHistory({ includeUser: !historyLoaded })
             .then((hasMessages) => {
                 if (!hasMessages) ensureWelcomeMessage();
             })
             .catch(() => {});
     });
+
     ws.on('close', () => {
         hideTyping();
-        document.getElementById('chat-status').className = 'status-badge offline';
-        document.getElementById('chat-status').textContent = 'Reconnecting...';
+        setStatus('offline', 'Reconnecting...');
     });
-
 }

@@ -31,6 +31,8 @@ import uvicorn
 
 from ouroboros import get_version
 from ouroboros.file_browser_api import file_browser_routes
+from ouroboros.model_catalog_api import api_model_catalog
+from ouroboros.server_history_api import make_chat_history_endpoint, make_cost_breakdown_endpoint
 from ouroboros.server_auth import NetworkAuthGate, validate_network_auth_configuration
 from ouroboros.server_entrypoint import find_free_port, parse_server_args, write_port_file
 from ouroboros.server_web import NoCacheStaticFiles, make_index_page, resolve_web_dir
@@ -123,7 +125,13 @@ from ouroboros.config import (
     SETTINGS_DEFAULTS as _SETTINGS_DEFAULTS,
     load_settings, save_settings, apply_settings_to_env as _apply_settings_to_env,
 )
-from ouroboros.server_runtime import has_local_routing, setup_remote_if_configured, ws_heartbeat_loop
+from ouroboros.server_runtime import (
+    apply_runtime_provider_defaults,
+    has_local_routing,
+    has_supervisor_provider,
+    setup_remote_if_configured,
+    ws_heartbeat_loop,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -132,11 +140,154 @@ from ouroboros.server_runtime import has_local_routing, setup_remote_if_configur
 _supervisor_ready = threading.Event()
 _supervisor_error: Optional[str] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
+_supervisor_thread: Optional[threading.Thread] = None
+
+
+def _start_supervisor_if_needed(settings: dict) -> bool:
+    """Start the supervisor once when runtime providers become available."""
+    global _supervisor_thread, _supervisor_error
+    if not has_supervisor_provider(settings):
+        return False
+    if _supervisor_thread and _supervisor_thread.is_alive():
+        return False
+    _supervisor_error = None
+    _supervisor_thread = threading.Thread(
+        target=_run_supervisor,
+        args=(settings,),
+        daemon=True,
+        name="supervisor-main",
+    )
+    _supervisor_thread.start()
+    return True
+
+
+def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
+    updates = bridge.get_updates(offset=offset, timeout=1)
+    for upd in updates:
+        offset = int(upd["update_id"]) + 1
+        msg = upd.get("message") or {}
+        if not msg:
+            continue
+
+        chat_id = int((msg.get("chat") or {}).get("id") or 1)
+        user_id = int((msg.get("from") or {}).get("id") or chat_id or 1)
+        text = str(msg.get("text") or "")
+        source = str(msg.get("source") or "web")
+        sender_label = str(msg.get("sender_label") or "")
+        sender_session_id = str(msg.get("sender_session_id") or "")
+        client_message_id = str(msg.get("client_message_id") or "")
+        telegram_chat_id = int(msg.get("telegram_chat_id") or 0)
+        image_base64 = str(msg.get("image_base64") or "")
+        image_mime = str(msg.get("image_mime") or "image/jpeg")
+        image_caption = str(msg.get("image_caption") or "")
+        image_data = (
+            (image_base64, image_mime, image_caption)
+            if image_base64
+            else None
+        )
+        log_text = text or image_caption or ("(image attached)" if image_base64 else "")
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        st = ctx.load_state()
+        if st.get("owner_id") is None:
+            st["owner_id"] = user_id
+            st["owner_chat_id"] = chat_id
+
+        from supervisor.message_bus import log_chat
+
+        log_chat(
+            "in",
+            chat_id,
+            user_id,
+            log_text,
+            source=source,
+            sender_label=sender_label,
+            sender_session_id=sender_session_id,
+            client_message_id=client_message_id,
+            telegram_chat_id=telegram_chat_id,
+        )
+        st["last_owner_message_at"] = now_iso
+        ctx.save_state(st)
+
+        if not text and not image_base64:
+            continue
+
+        lowered = text.strip().lower()
+        if lowered.startswith("/panic"):
+            ctx.send_with_budget(chat_id, "🛑 PANIC: killing everything. App will close.")
+            _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
+        elif lowered.startswith("/restart"):
+            ctx.send_with_budget(chat_id, "♻️ Restarting (soft).")
+            ok, restart_msg = ctx.safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
+            if not ok:
+                ctx.send_with_budget(chat_id, f"⚠️ Restart cancelled: {restart_msg}")
+                continue
+            ctx.kill_workers()
+            _request_restart_exit()
+        elif lowered.startswith("/review"):
+            ctx.queue_review_task(reason="owner:/review", force=True)
+        elif lowered.startswith("/evolve"):
+            parts = lowered.split()
+            action = parts[1] if len(parts) > 1 else "on"
+            turn_on = action not in ("off", "stop", "0")
+            st2 = ctx.load_state()
+            st2["evolution_mode_enabled"] = bool(turn_on)
+            if turn_on:
+                st2["evolution_consecutive_failures"] = 0
+            ctx.save_state(st2)
+            if not turn_on:
+                ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
+                ctx.sort_pending()
+                ctx.persist_queue_snapshot(reason="evolve_off")
+            ctx.send_with_budget(chat_id, f"🧬 Evolution: {'ON' if turn_on else 'OFF'}")
+        elif lowered.startswith("/bg"):
+            parts = lowered.split()
+            action = parts[1] if len(parts) > 1 else "status"
+            if action in ("start", "on", "1"):
+                result = ctx.consciousness.start()
+                _bg_s = ctx.load_state()
+                _bg_s["bg_consciousness_enabled"] = True
+                ctx.save_state(_bg_s)
+                ctx.send_with_budget(chat_id, f"🧠 {result}")
+            elif action in ("stop", "off", "0"):
+                result = ctx.consciousness.stop()
+                _bg_s = ctx.load_state()
+                _bg_s["bg_consciousness_enabled"] = False
+                ctx.save_state(_bg_s)
+                ctx.send_with_budget(chat_id, f"🧠 {result}")
+            else:
+                bg_status = "running" if ctx.consciousness.is_running else "stopped"
+                ctx.send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
+        elif lowered.startswith("/status"):
+            from supervisor.state import status_text
+
+            status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, ctx.soft_timeout, ctx.hard_timeout)
+            ctx.send_with_budget(chat_id, status, force_budget=True)
+        else:
+            ctx.consciousness.inject_observation(f"Owner message: {log_text}")
+            agent = ctx.get_chat_agent()
+            if agent._busy:
+                agent.inject_message(text or image_caption, image_data=image_data)
+            else:
+                ctx.consciousness.pause()
+
+                def _run_and_resume(cid, txt, img):
+                    try:
+                        ctx.handle_chat_direct(cid, txt, img)
+                    finally:
+                        ctx.consciousness.resume()
+
+                threading.Thread(
+                    target=_run_and_resume,
+                    args=(chat_id, text or image_caption, image_data),
+                    daemon=True,
+                ).start()
+    return offset
 
 
 def _run_supervisor(settings: dict) -> None:
     """Initialize and run the supervisor loop. Called in a background thread."""
-    global _supervisor_error
+    global _supervisor_error, _supervisor_thread
 
     _apply_settings_to_env(settings)
 
@@ -144,7 +295,7 @@ def _run_supervisor(settings: dict) -> None:
         from supervisor.message_bus import init as bus_init
         from supervisor.message_bus import LocalChatBridge
 
-        bridge = LocalChatBridge()
+        bridge = LocalChatBridge(settings)
         bridge._broadcast_fn = broadcast_ws_sync
 
         from ouroboros.utils import set_log_sink
@@ -243,12 +394,15 @@ def _run_supervisor(settings: dict) -> None:
             queue_review_task=queue_review_task, persist_queue_snapshot=persist_queue_snapshot,
             safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
             sort_pending=sort_pending, consciousness=_consciousness,
+            soft_timeout=soft_timeout, hard_timeout=hard_timeout,
+            get_chat_agent=_get_chat_agent, handle_chat_direct=handle_chat_direct,
             request_restart=_request_restart_exit,
         )
     except Exception as exc:
         _supervisor_error = f"Supervisor init failed: {exc}"
         log.critical("Supervisor initialization failed", exc_info=True)
         _supervisor_ready.set()
+        _supervisor_thread = None
         return
 
     _supervisor_ready.set()
@@ -278,94 +432,7 @@ def _run_supervisor(settings: dict) -> None:
             assign_tasks()
             persist_queue_snapshot(reason="main_loop")
 
-            # Process messages from WebSocket bridge
-            updates = bridge.get_updates(offset=offset, timeout=1)
-            for upd in updates:
-                offset = int(upd["update_id"]) + 1
-                msg = upd.get("message") or {}
-                if not msg:
-                    continue
-
-                chat_id = 1
-                user_id = 1
-                text = str(msg.get("text") or "")
-                now_iso = datetime.now(timezone.utc).isoformat()
-
-                st = load_state()
-                if st.get("owner_id") is None:
-                    st["owner_id"] = user_id
-                    st["owner_chat_id"] = chat_id
-
-                from supervisor.message_bus import log_chat
-                log_chat("in", chat_id, user_id, text)
-                st["last_owner_message_at"] = now_iso
-                save_state(st)
-
-                if not text:
-                    continue
-
-                lowered = text.strip().lower()
-                if lowered.startswith("/panic"):
-                    send_with_budget(chat_id, "🛑 PANIC: killing everything. App will close.")
-                    _execute_panic_stop(_consciousness, kill_workers)
-                elif lowered.startswith("/restart"):
-                    send_with_budget(chat_id, "♻️ Restarting (soft).")
-                    ok, restart_msg = safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
-                    if not ok:
-                        send_with_budget(chat_id, f"⚠️ Restart cancelled: {restart_msg}")
-                        continue
-                    kill_workers()
-                    _request_restart_exit()
-                elif lowered.startswith("/review"):
-                    queue_review_task(reason="owner:/review", force=True)
-                elif lowered.startswith("/evolve"):
-                    parts = lowered.split()
-                    action = parts[1] if len(parts) > 1 else "on"
-                    turn_on = action not in ("off", "stop", "0")
-                    st2 = load_state()
-                    st2["evolution_mode_enabled"] = bool(turn_on)
-                    if turn_on:
-                        st2["evolution_consecutive_failures"] = 0
-                    save_state(st2)
-                    if not turn_on:
-                        PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
-                        sort_pending()
-                        persist_queue_snapshot(reason="evolve_off")
-                    state_str = "ON" if turn_on else "OFF"
-                    send_with_budget(chat_id, f"🧬 Evolution: {state_str}")
-                elif lowered.startswith("/bg"):
-                    parts = lowered.split()
-                    action = parts[1] if len(parts) > 1 else "status"
-                    if action in ("start", "on", "1"):
-                        result = _consciousness.start()
-                        _bg_s = load_state(); _bg_s["bg_consciousness_enabled"] = True; save_state(_bg_s)
-                        send_with_budget(chat_id, f"🧠 {result}")
-                    elif action in ("stop", "off", "0"):
-                        result = _consciousness.stop()
-                        _bg_s = load_state(); _bg_s["bg_consciousness_enabled"] = False; save_state(_bg_s)
-                        send_with_budget(chat_id, f"🧠 {result}")
-                    else:
-                        bg_status = "running" if _consciousness.is_running else "stopped"
-                        send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
-                elif lowered.startswith("/status"):
-                    from supervisor.state import status_text
-                    status = status_text(WORKERS, PENDING, RUNNING, soft_timeout, hard_timeout)
-                    send_with_budget(chat_id, status, force_budget=True)
-                else:
-                    _consciousness.inject_observation(f"Owner message: {text}")
-                    agent = _get_chat_agent()
-                    if agent._busy:
-                        agent.inject_message(text)
-                    else:
-                        _consciousness.pause()
-                        def _run_and_resume(cid, txt):
-                            try:
-                                handle_chat_direct(cid, txt, None)
-                            finally:
-                                _consciousness.resume()
-                        threading.Thread(
-                            target=_run_and_resume, args=(chat_id, text), daemon=True,
-                        ).start()
+            offset = _process_bridge_updates(bridge, offset, _event_ctx)
 
             crash_count = 0
             time.sleep(0.5)
@@ -377,6 +444,7 @@ def _run_supervisor(settings: dict) -> None:
                 log.critical("Supervisor exceeded max retries.")
                 return
             time.sleep(min(30, 2 ** crash_count))
+    _supervisor_thread = None
 
 
 def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
@@ -463,6 +531,8 @@ def _execute_panic_stop(consciousness, kill_workers_fn) -> None:
 # HTTP/WebSocket routes
 # ---------------------------------------------------------------------------
 APP_START = time.time()
+api_cost_breakdown = make_cost_breakdown_endpoint(DATA_DIR)
+api_chat_history = make_chat_history_endpoint(DATA_DIR)
 
 
 async def ws_endpoint(websocket: WebSocket) -> None:
@@ -484,7 +554,14 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 try:
                     from supervisor.message_bus import get_bridge
                     bridge = get_bridge()
-                    bridge.ui_send(payload)
+                    if msg_type == "chat":
+                        bridge.ui_send(
+                            payload,
+                            sender_session_id=str(msg.get("sender_session_id", "") or ""),
+                            client_message_id=str(msg.get("client_message_id", "") or ""),
+                        )
+                    else:
+                        bridge.ui_send(payload, broadcast=False)
                 except Exception:
                     ts = datetime.now(timezone.utc).isoformat()
                     await websocket.send_text(json.dumps({
@@ -554,12 +631,15 @@ async def api_state(request: Request) -> JSONResponse:
 
 
 async def api_settings_get(request: Request) -> JSONResponse:
-    settings = load_settings()
+    settings, _, _ = apply_runtime_provider_defaults(load_settings())
     safe = {k: v for k, v in settings.items()}
     for key in (
         "OPENROUTER_API_KEY",
         "OPENAI_API_KEY",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "CLOUDRU_FOUNDATION_MODELS_API_KEY",
         "ANTHROPIC_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
         "GITHUB_TOKEN",
         "OUROBOROS_NETWORK_PASSWORD",
     ):
@@ -575,9 +655,20 @@ async def api_settings_post(request: Request) -> JSONResponse:
         for key in _SETTINGS_DEFAULTS:
             if key in body:
                 current[key] = body[key]
+        current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
         save_settings(current)
         _apply_settings_to_env(current)
+        _start_supervisor_if_needed(current)
         warnings = []
+        if provider_defaults_changed:
+            warnings.append(
+                "Normalized official OpenAI-only routing because OpenRouter is not configured."
+            )
+        try:
+            from supervisor.message_bus import get_bridge
+            get_bridge().configure_from_settings(current)
+        except Exception:
+            pass
         _repo_slug = current.get("GITHUB_REPO", "")
         _gh_token = current.get("GITHUB_TOKEN", "")
         if _repo_slug and _gh_token:
@@ -699,143 +790,6 @@ async def api_evolution_data(request: Request) -> JSONResponse:
     return JSONResponse({"points": data_points})
 
 
-async def api_cost_breakdown(request: Request) -> JSONResponse:
-    """Aggregate llm_usage events from events.jsonl into cost breakdowns."""
-    events_path = DATA_DIR / "logs" / "events.jsonl"
-    by_model: Dict[str, Dict[str, Any]] = {}
-    by_api_key: Dict[str, Dict[str, Any]] = {}
-    by_model_category: Dict[str, Dict[str, Any]] = {}
-    by_task_category: Dict[str, Dict[str, Any]] = {}
-    total_cost = 0.0
-    total_calls = 0
-
-    def _acc(d, key):
-        if key not in d:
-            d[key] = {"cost": 0.0, "calls": 0}
-        return d[key]
-
-    try:
-        if events_path.exists():
-            with events_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        evt = json.loads(line)
-                    except Exception:
-                        continue
-                    if evt.get("type") != "llm_usage":
-                        continue
-                    cost = float(evt.get("cost") or 0)
-                    model = str(evt.get("model") or "unknown")
-                    api_key_type = str(evt.get("api_key_type") or evt.get("provider") or "openrouter")
-                    model_cat = str(evt.get("model_category") or "other")
-                    task_cat = str(evt.get("category") or "task")
-
-                    total_cost += cost
-                    total_calls += 1
-
-                    e = _acc(by_model, model)
-                    e["cost"] += cost
-                    e["calls"] += 1
-
-                    e = _acc(by_api_key, api_key_type)
-                    e["cost"] += cost
-                    e["calls"] += 1
-
-                    e = _acc(by_model_category, model_cat)
-                    e["cost"] += cost
-                    e["calls"] += 1
-
-                    e = _acc(by_task_category, task_cat)
-                    e["cost"] += cost
-                    e["calls"] += 1
-    except Exception:
-        pass
-
-    def _sorted(d):
-        return dict(sorted(d.items(), key=lambda x: x[1]["cost"], reverse=True))
-
-    return JSONResponse({
-        "total_cost": round(total_cost, 4),
-        "total_calls": total_calls,
-        "by_model": _sorted(by_model),
-        "by_api_key": _sorted(by_api_key),
-        "by_model_category": _sorted(by_model_category),
-        "by_task_category": _sorted(by_task_category),
-    })
-
-
-async def api_chat_history(request: Request) -> JSONResponse:
-    """Return recent chat, system, and progress messages merged chronologically."""
-    try:
-        limit = max(0, min(int(request.query_params.get("limit", 1000)), 2000))
-    except (ValueError, TypeError):
-        limit = 1000
-
-    combined: list = []
-
-    # Read chat.jsonl
-    chat_path = DATA_DIR / "logs" / "chat.jsonl"
-    if chat_path.exists():
-        try:
-            with chat_path.open(encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    direction = str(entry.get("direction", "")).lower()
-                    role = {"in": "user", "out": "assistant", "system": "system"}.get(direction)
-                    if role is None:
-                        continue
-                    combined.append({
-                        "text": str(entry.get("text", "")),
-                        "role": role,
-                        "ts": str(entry.get("ts", "")),
-                        "is_progress": False,
-                        "system_type": str(entry.get("type", "")),
-                        "markdown": str(entry.get("format", "")).lower() == "markdown",
-                    })
-        except Exception as e:
-            log.warning("Failed to read chat history: %s", e)
-
-    # Read progress.jsonl
-    progress_path = DATA_DIR / "logs" / "progress.jsonl"
-    if progress_path.exists():
-        try:
-            with progress_path.open(encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    text = str(entry.get("content", entry.get("text", "")))
-                    if not text:
-                        continue
-                    combined.append({
-                        "text": text,
-                        "role": "assistant",
-                        "ts": str(entry.get("ts", "")),
-                        "is_progress": True,
-                        "markdown": str(entry.get("format", "")).lower() == "markdown",
-                    })
-        except Exception as e:
-            log.warning("Failed to read progress log: %s", e)
-
-    # Sort by timestamp, take last `limit`
-    combined.sort(key=lambda m: m.get("ts", ""))
-    messages = combined[-limit:] if len(combined) > limit else combined
-
-    return JSONResponse({"messages": messages})
-
 from ouroboros.local_model_api import (
     api_local_model_start, api_local_model_stop,
     api_local_model_status, api_local_model_test,
@@ -855,6 +809,7 @@ routes = [
     *file_browser_routes(),
     Route("/api/settings", endpoint=api_settings_get, methods=["GET"]),
     Route("/api/settings", endpoint=api_settings_post, methods=["POST"]),
+    Route("/api/model-catalog", endpoint=api_model_catalog),
     Route("/api/command", endpoint=api_command, methods=["POST"]),
     Route("/api/reset", endpoint=api_reset, methods=["POST"]),
     Route("/api/git/log", endpoint=api_git_log),
@@ -883,15 +838,16 @@ async def lifespan(app):
         name="ws-heartbeat",
     )
 
-    settings = load_settings()
-    has_api_key = bool(settings.get("OPENROUTER_API_KEY"))
+    settings, provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
+    if provider_defaults_changed:
+        save_settings(settings)
     has_local = has_local_routing(settings)
 
-    if has_api_key or has_local:
-        threading.Thread(target=_run_supervisor, args=(settings,), daemon=True).start()
+    if has_supervisor_provider(settings):
+        _start_supervisor_if_needed(settings)
     else:
         _supervisor_ready.set()
-        log.info("No API key or local model configured. Supervisor not started.")
+        log.info("No supported provider or local routing configured. Supervisor not started.")
 
     if has_local and settings.get("LOCAL_MODEL_SOURCE"):
         from ouroboros.local_model_autostart import auto_start_local_model
@@ -921,6 +877,11 @@ async def lifespan(app):
         try:
             from supervisor.workers import kill_workers
             kill_workers(force=True)
+        except Exception:
+            pass
+        try:
+            from supervisor.message_bus import get_bridge
+            get_bridge().shutdown()
         except Exception:
             pass
 

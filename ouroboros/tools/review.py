@@ -15,6 +15,7 @@ import pathlib
 from typing import List, Optional
 
 from ouroboros.llm import LLMClient
+from ouroboros.pricing import infer_api_key_type, infer_model_category
 from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl
 from ouroboros import config as _cfg
 from ouroboros.tools.registry import ToolEntry, ToolContext
@@ -158,10 +159,6 @@ async def _multi_model_review_async(content: str, prompt: str,
     if len(models) > MAX_MODELS:
         return {"error": f"Too many models ({len(models)}). Maximum is {MAX_MODELS}."}
 
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        return {"error": "OPENROUTER_API_KEY not set"}
-
     bible_text = _load_bible()
     if bible_text:
         system_content = (
@@ -182,7 +179,7 @@ async def _multi_model_review_async(content: str, prompt: str,
     ]
 
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-    llm_client = LLMClient(api_key=api_key)
+    llm_client = LLMClient()
     tasks = [_query_model(llm_client, m, messages, semaphore) for m in models]
     results = await asyncio.gather(*tasks)
 
@@ -200,9 +197,13 @@ async def _multi_model_review_async(content: str, prompt: str,
 
 
 def _parse_model_response(model: str, result, headers_dict) -> dict:
+    usage = result.get("usage", {}) if isinstance(result, dict) else {}
+    resolved_model = str(usage.get("resolved_model") or model)
+    provider = str(usage.get("provider") or "openrouter")
     if isinstance(result, str):
         return {
-            "model": model, "verdict": "ERROR", "text": result,
+            "model": resolved_model, "request_model": model,
+            "provider": provider, "verdict": "ERROR", "text": result,
             "tokens_in": 0, "tokens_out": 0, "cost_estimate": 0.0,
         }
     try:
@@ -228,7 +229,6 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
         text = f"(unexpected response format: {json.dumps(result)[:200]})"
         verdict = "ERROR"
 
-    usage = result.get("usage", {})
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)
     cached_tokens = usage.get("cached_tokens", 0)
@@ -249,7 +249,8 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
         pass
 
     return {
-        "model": model, "verdict": verdict, "text": text,
+        "model": resolved_model, "request_model": model,
+        "provider": provider, "verdict": verdict, "text": text,
         "tokens_in": prompt_tokens, "tokens_out": completion_tokens,
         "cached_tokens": cached_tokens, "cache_write_tokens": cache_write_tokens,
         "cost_estimate": cost,
@@ -263,6 +264,11 @@ def _emit_usage_event(review_result: dict, ctx: ToolContext) -> None:
         "type": "llm_usage", "ts": utc_now_iso(),
         "task_id": ctx.task_id if ctx.task_id else "",
         "model": review_result.get("model", ""),
+        "api_key_type": infer_api_key_type(
+            review_result.get("model", ""),
+            review_result.get("provider", ""),
+        ),
+        "model_category": infer_model_category(review_result.get("model", "")),
         "usage": {
             "prompt_tokens": review_result["tokens_in"],
             "completion_tokens": review_result["tokens_out"],
@@ -270,7 +276,7 @@ def _emit_usage_event(review_result: dict, ctx: ToolContext) -> None:
             "cache_write_tokens": review_result.get("cache_write_tokens", 0),
             "cost": review_result["cost_estimate"],
         },
-        "provider": "openrouter",
+        "provider": review_result.get("provider", "openrouter"),
         "source": "review",
         "category": "review",
     }

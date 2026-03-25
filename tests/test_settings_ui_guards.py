@@ -10,26 +10,37 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 class TestSettingsUiGuards(unittest.TestCase):
+    def _read_settings_sources(self):
+        return {
+            "settings": (REPO / "web/modules/settings.js").read_text(encoding="utf-8"),
+            "settings_ui": (REPO / "web/modules/settings_ui.js").read_text(encoding="utf-8"),
+        }
+
     def test_save_checks_http_status(self):
-        source = (REPO / "web/modules/settings.js").read_text(encoding="utf-8")
+        source = self._read_settings_sources()["settings"]
         self.assertIn("if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);", source)
 
     def test_save_does_not_overwrite_masked_secrets(self):
-        source = (REPO / "web/modules/settings.js").read_text(encoding="utf-8")
-        self.assertIn("if (orKey && !orKey.includes('...')) body.OPENROUTER_API_KEY = orKey;", source)
-        self.assertIn("if (oaiKey && !oaiKey.includes('...')) body.OPENAI_API_KEY = oaiKey;", source)
-        self.assertIn("if (antKey && !antKey.includes('...')) body.ANTHROPIC_API_KEY = antKey;", source)
-        self.assertIn("if (ghToken && !ghToken.includes('...')) body.GITHUB_TOKEN = ghToken;", source)
+        source = self._read_settings_sources()["settings"]
+        self.assertIn("function collectSecretValue(id, body) {", source)
+        self.assertIn("if (input.dataset.forceClear === '1') {", source)
+        self.assertIn("if (value && !value.includes('...')) body[settingKey] = value;", source)
 
     def test_masked_secret_inputs_clear_on_focus(self):
-        source = (REPO / "web/modules/settings.js").read_text(encoding="utf-8")
+        source = self._read_settings_sources()["settings_ui"]
         self.assertIn("if (input.value.includes('...')) input.value = '';", source)
+        self.assertIn("target.dataset.forceClear = '1';", source)
 
     def test_models_section_explains_local_switching(self):
-        source = (REPO / "web/modules/settings.js").read_text(encoding="utf-8")
+        source = self._read_settings_sources()["settings_ui"]
         self.assertIn("These fields are cloud model IDs.", source)
         self.assertIn("through the GGUF server configured above.", source)
 
+    def test_settings_tabs_are_single_row_scrollable(self):
+        css = (REPO / "web/settings.css").read_text(encoding="utf-8")
+        self.assertIn("flex-wrap: nowrap;", css)
+        self.assertIn("overflow-x: auto;", css)
+
     def test_save_reloads_settings_after_success(self):
-        source = (REPO / "web/modules/settings.js").read_text(encoding="utf-8")
+        source = self._read_settings_sources()["settings"]
         self.assertIn("await loadSettings();", source)

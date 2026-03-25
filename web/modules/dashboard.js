@@ -67,9 +67,10 @@ export function initDashboard({ ws, state }) {
     });
 
     // Poll dashboard state
-    async function updateDashboard() {
+    async function updateDashboard(force = false) {
+        if (!force && state.activePage !== 'dashboard') return;
         try {
-            const resp = await fetch('/api/state');
+            const resp = await fetch('/api/state', { cache: 'no-store' });
             const data = await resp.json();
             const uptime = data.uptime || 0;
             const h = Math.floor(uptime / 3600);
@@ -98,6 +99,6 @@ export function initDashboard({ ws, state }) {
         } catch {}
     }
 
-    updateDashboard();
+    updateDashboard(true);
     setInterval(updateDashboard, 3000);
 }

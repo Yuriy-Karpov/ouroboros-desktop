@@ -96,6 +96,12 @@ class TestInferApiKeyType:
     def test_bare_claude_is_anthropic(self):
         assert infer_api_key_type("claude-sonnet-4.6") == "anthropic"
 
+    def test_provider_override_uses_official_openai(self):
+        assert infer_api_key_type("openai/gpt-5.2", provider="openai") == "openai"
+
+    def test_openai_double_colon_is_official_openai(self):
+        assert infer_api_key_type("openai::gpt-5.2") == "openai"
+
     def test_unknown_defaults_openrouter(self):
         assert infer_api_key_type("some-random-model") == "openrouter"
 
@@ -111,6 +117,10 @@ class TestInferModelCategory:
     def test_matches_light_model(self):
         with patch.dict(os.environ, {"OUROBOROS_MODEL_LIGHT": "google/gemini-3-flash-preview"}):
             assert infer_model_category("google/gemini-3-flash-preview") == "light"
+
+    def test_matches_openai_double_colon_against_resolved_usage_name(self):
+        with patch.dict(os.environ, {"OUROBOROS_MODEL": "openai::gpt-5.2"}):
+            assert infer_model_category("openai/gpt-5.2") == "main"
 
     def test_no_match_returns_other(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -140,6 +150,20 @@ class TestEmitLlmUsageEvent:
         assert event["cost"] == 0.0105
         assert event["category"] == "task"
         assert "ts" in event
+
+    def test_provider_override_sets_api_key_type(self):
+        q = queue.Queue()
+        emit_llm_usage_event(
+            event_queue=q,
+            task_id="test-123",
+            model="openai/gpt-5.2",
+            usage={"prompt_tokens": 100, "completion_tokens": 50},
+            cost=0.01,
+            provider="openai",
+        )
+        event = q.get_nowait()
+        assert event["provider"] == "openai"
+        assert event["api_key_type"] == "openai"
 
     def test_none_queue_no_error(self):
         # Should silently do nothing

@@ -229,26 +229,121 @@ class LLMClient:
         self._async_client_api_key: Optional[str] = None
         self._local_client = None
         self._local_port: Optional[int] = None
+        self._remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
+        self._async_remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
 
-    def _get_client(self):
+    @staticmethod
+    def _parse_provider_model(model: str) -> Tuple[str, str]:
+        model_name = str(model or "").strip()
+        for prefix, provider in (
+            ("openai::", "openai"),
+            ("cloudru::", "cloudru"),
+            ("openai-compatible::", "openai-compatible"),
+            ("openrouter::", "openrouter"),
+        ):
+            if model_name.startswith(prefix):
+                return provider, model_name[len(prefix):].strip()
+        return "openrouter", model_name
+
+    @staticmethod
+    def _qualified_model_name(provider: str, resolved_model: str) -> str:
+        if provider == "openrouter":
+            return resolved_model
+        if provider == "openai":
+            return f"openai/{resolved_model}"
+        if provider == "cloudru":
+            return f"cloudru/{resolved_model}"
+        return f"openai-compatible/{resolved_model}"
+
+    def _resolve_remote_target(self, model: str) -> Dict[str, Any]:
+        provider, resolved_model = self._parse_provider_model(model)
+        usage_model = self._qualified_model_name(provider, resolved_model)
+
+        if provider == "openai":
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": os.environ.get("OPENAI_API_KEY", ""),
+                "base_url": "https://api.openai.com/v1",
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "cloudru":
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", ""),
+                "base_url": (
+                    os.environ.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL", "") or ""
+                ).strip() or "https://foundation-models.api.cloud.ru/v1",
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "openai-compatible":
+            compatible_key = (os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+            compatible_base_url = (os.environ.get("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip()
+            legacy_base_url = (os.environ.get("OPENAI_BASE_URL", "") or "").strip()
+            legacy_key = (os.environ.get("OPENAI_API_KEY", "") or "").strip()
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": compatible_key or legacy_key,
+                "base_url": compatible_base_url or legacy_base_url,
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
         current_api_key = self._api_key_override
         if current_api_key is None:
             current_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        return {
+            "provider": "openrouter",
+            "resolved_model": resolved_model,
+            "usage_model": usage_model,
+            "api_key": current_api_key,
+            "base_url": self._base_url,
+            "default_headers": {
+                "HTTP-Referer": "https://ouroboros.local/",
+                "X-Title": "Ouroboros",
+            },
+            "supports_openrouter_extensions": True,
+            "supports_generation_cost": True,
+        }
 
-        if self._client is None or self._client_api_key != current_api_key:
+    def _get_client(self):
+        target = self._resolve_remote_target("openrouter::")
+        return self._get_remote_client(target)
+
+    def _get_remote_client(self, target: Dict[str, Any]):
+        base_url = str(target.get("base_url") or "")
+        api_key = str(target.get("api_key") or "")
+        headers_dict = dict(target.get("default_headers") or {})
+        headers = tuple(sorted((str(k), str(v)) for k, v in headers_dict.items()))
+        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers)
+
+        client = self._remote_clients.get(cache_key)
+        if client is None:
             from openai import OpenAI
-            self._client = OpenAI(
-                base_url=self._base_url,
-                api_key=current_api_key,
-                max_retries=0,
-                default_headers={
-                    "HTTP-Referer": "https://ouroboros.local/",
-                    "X-Title": "Ouroboros",
-                },
-            )
-            self._client_api_key = current_api_key
-            self._api_key = current_api_key
-        return self._client
+
+            kwargs: Dict[str, Any] = {
+                "api_key": api_key,
+                "max_retries": 0,
+            }
+            if base_url:
+                kwargs["base_url"] = base_url
+            if headers_dict:
+                kwargs["default_headers"] = headers_dict
+            client = OpenAI(**kwargs)
+            self._remote_clients[cache_key] = client
+        return client
 
     def _get_local_client(self):
         port = int(os.environ.get("LOCAL_MODEL_PORT", "8766"))
@@ -263,23 +358,31 @@ class LLMClient:
         return self._local_client
 
     def _get_async_client(self):
-        current_api_key = self._api_key_override
-        if current_api_key is None:
-            current_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        target = self._resolve_remote_target("openrouter::")
+        return self._get_async_remote_client(target)
 
-        if self._async_client is None or self._async_client_api_key != current_api_key:
+    def _get_async_remote_client(self, target: Dict[str, Any]):
+        base_url = str(target.get("base_url") or "")
+        api_key = str(target.get("api_key") or "")
+        headers_dict = dict(target.get("default_headers") or {})
+        headers = tuple(sorted((str(k), str(v)) for k, v in headers_dict.items()))
+        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers)
+
+        client = self._async_remote_clients.get(cache_key)
+        if client is None:
             from openai import AsyncOpenAI
-            self._async_client = AsyncOpenAI(
-                base_url=self._base_url,
-                api_key=current_api_key,
-                max_retries=0,
-                default_headers={
-                    "HTTP-Referer": "https://ouroboros.local/",
-                    "X-Title": "Ouroboros",
-                },
-            )
-            self._async_client_api_key = current_api_key
-        return self._async_client
+
+            kwargs: Dict[str, Any] = {
+                "api_key": api_key,
+                "max_retries": 0,
+            }
+            if base_url:
+                kwargs["base_url"] = base_url
+            if headers_dict:
+                kwargs["default_headers"] = headers_dict
+            client = AsyncOpenAI(**kwargs)
+            self._async_remote_clients[cache_key] = client
+        return client
 
     @staticmethod
     def _strip_cache_control(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -294,12 +397,21 @@ class LLMClient:
                         block.pop("cache_control", None)
         return cleaned
 
-    def _fetch_generation_cost(self, generation_id: str) -> Optional[float]:
+    def _fetch_generation_cost(
+        self,
+        generation_id: str,
+        target: Optional[Dict[str, Any]] = None,
+    ) -> Optional[float]:
         """Fetch cost from OpenRouter Generation API as fallback."""
+        active_target = target or self._resolve_remote_target("openrouter::")
+        if not active_target.get("supports_generation_cost"):
+            return None
         try:
             import requests
-            url = f"{self._base_url.rstrip('/')}/generation?id={generation_id}"
-            resp = requests.get(url, headers={"Authorization": f"Bearer {self._api_key}"}, timeout=5)
+            base_url = str(active_target.get("base_url") or "").rstrip("/")
+            api_key = str(active_target.get("api_key") or "")
+            url = f"{base_url}/generation?id={generation_id}"
+            resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5)
             if resp.status_code == 200:
                 data = resp.json().get("data") or {}
                 cost = data.get("total_cost") or data.get("usage", {}).get("cost")
@@ -307,7 +419,7 @@ class LLMClient:
                     return float(cost)
             # Generation might not be ready yet — retry once after short delay
             time.sleep(0.5)
-            resp = requests.get(url, headers={"Authorization": f"Bearer {self._api_key}"}, timeout=5)
+            resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5)
             if resp.status_code == 200:
                 data = resp.json().get("data") or {}
                 cost = data.get("total_cost") or data.get("usage", {}).get("cost")
@@ -337,7 +449,8 @@ class LLMClient:
         if use_local:
             return self._chat_local(messages, tools, max_tokens, tool_choice)
 
-        return self._chat_openrouter(messages, model, tools, reasoning_effort, max_tokens, tool_choice, temperature)
+        target = self._resolve_remote_target(model)
+        return self._chat_remote(target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature)
 
     async def chat_async(
         self,
@@ -349,15 +462,16 @@ class LLMClient:
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Async OpenRouter chat used by review/concurrent callers."""
+        """Async remote chat used by review/concurrent callers."""
         if tools:
             raise ValueError("chat_async does not support tool calls")
-        client = self._get_async_client()
-        kwargs = self._build_openrouter_kwargs(
-            messages, model, tools, reasoning_effort, max_tokens, tool_choice, temperature
+        target = self._resolve_remote_target(model)
+        client = self._get_async_remote_client(target)
+        kwargs = self._build_remote_kwargs(
+            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
         )
         resp = await client.chat.completions.create(**kwargs)
-        return self._normalize_openrouter_response(resp.model_dump())
+        return self._normalize_remote_response(resp.model_dump(), target)
 
     def _prepare_messages_for_local_context(
         self,
@@ -460,8 +574,15 @@ class LLMClient:
                 err = str(exc)
                 if "context_length_exceeded" in err:
                     raise LocalContextTooLargeError(err) from exc
-                log.warning("Local model request failed: %s", exc)
-                raise
+                if attempt == 2:
+                    log.warning("Local model request failed: %s", exc)
+                    raise
+                log.warning(
+                    "Local model request failed (attempt %d/3): %s",
+                    attempt + 1,
+                    exc,
+                )
+                time.sleep(0.5 * (attempt + 1))
         if last_exc is not None:
             raise last_exc
 
@@ -618,29 +739,46 @@ class LLMClient:
                     log.info("Retry-truncated system message to %d chars (ratio=%.2f)", new_len, ratio)
                 return
 
-    def _build_openrouter_kwargs(
+    def _build_remote_kwargs(
         self,
+        target: Dict[str, Any],
         messages: List[Dict[str, Any]],
-        model: str,
-        tools: Optional[List[Dict[str, Any]]],
         reasoning_effort: str,
         max_tokens: int,
         tool_choice: str,
         temperature: Optional[float],
+        tools: Optional[List[Dict[str, Any]]],
     ) -> Dict[str, Any]:
+        resolved_model = str(target.get("resolved_model") or "")
+        if not target.get("supports_openrouter_extensions"):
+            kwargs: Dict[str, Any] = {
+                "model": resolved_model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+            }
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            if tools:
+                kwargs["tools"] = [
+                    {k: v for k, v in t.items() if k != "cache_control"}
+                    for t in tools
+                ]
+                kwargs["tool_choice"] = tool_choice
+            return kwargs
+
         effort = normalize_reasoning_effort(reasoning_effort)
 
         extra_body: Dict[str, Any] = {
             "reasoning": {"effort": effort, "exclude": True},
         }
 
-        if model.startswith("anthropic/"):
+        if resolved_model.startswith("anthropic/"):
             extra_body["provider"] = {
                 "require_parameters": True,
             }
 
         kwargs: Dict[str, Any] = {
-            "model": model,
+            "model": resolved_model,
             "messages": messages,
             "max_tokens": max_tokens,
             "extra_body": extra_body,
@@ -657,36 +795,76 @@ class LLMClient:
             kwargs["tool_choice"] = tool_choice
         return kwargs
 
-    def _normalize_openrouter_response(
+    def _build_openrouter_kwargs(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        tools: Optional[List[Dict[str, Any]]],
+        reasoning_effort: str,
+        max_tokens: int,
+        tool_choice: str,
+        temperature: Optional[float],
+    ) -> Dict[str, Any]:
+        target = self._resolve_remote_target(model)
+        return self._build_remote_kwargs(
+            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
+        )
+
+    def _normalize_remote_response(
         self,
         resp_dict: Dict[str, Any],
+        target: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
 
-        if not usage.get("cached_tokens"):
-            prompt_details = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
-                usage["cached_tokens"] = int(prompt_details["cached_tokens"])
+        if target.get("supports_openrouter_extensions"):
+            if not usage.get("cached_tokens"):
+                prompt_details = usage.get("prompt_tokens_details") or {}
+                if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
+                    usage["cached_tokens"] = int(prompt_details["cached_tokens"])
 
-        if not usage.get("cache_write_tokens"):
-            prompt_details_for_write = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details_for_write, dict):
-                cache_write = (prompt_details_for_write.get("cache_write_tokens")
-                              or prompt_details_for_write.get("cache_creation_tokens")
-                              or prompt_details_for_write.get("cache_creation_input_tokens"))
-                if cache_write:
-                    usage["cache_write_tokens"] = int(cache_write)
+            if not usage.get("cache_write_tokens"):
+                prompt_details_for_write = usage.get("prompt_tokens_details") or {}
+                if isinstance(prompt_details_for_write, dict):
+                    cache_write = (
+                        prompt_details_for_write.get("cache_write_tokens")
+                        or prompt_details_for_write.get("cache_creation_tokens")
+                        or prompt_details_for_write.get("cache_creation_input_tokens")
+                    )
+                    if cache_write:
+                        usage["cache_write_tokens"] = int(cache_write)
 
-        if not usage.get("cost"):
-            gen_id = resp_dict.get("id") or ""
-            if gen_id:
-                cost = self._fetch_generation_cost(gen_id)
-                if cost is not None:
-                    usage["cost"] = cost
+            if not usage.get("cost"):
+                gen_id = resp_dict.get("id") or ""
+                if gen_id:
+                    cost = self._fetch_generation_cost(gen_id, target)
+                    if cost is not None:
+                        usage["cost"] = cost
+
+        usage["provider"] = str(target.get("provider") or "openrouter")
+        usage["resolved_model"] = str(target.get("usage_model") or target.get("resolved_model") or "")
 
         return msg, usage
+
+    def _chat_remote(
+        self,
+        target: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        reasoning_effort: str,
+        max_tokens: int,
+        tool_choice: str,
+        temperature: Optional[float] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Send a chat request to the resolved remote provider."""
+        client = self._get_remote_client(target)
+        kwargs = self._build_remote_kwargs(
+            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
+        )
+        resp = client.chat.completions.create(**kwargs)
+        return self._normalize_remote_response(resp.model_dump(), target)
 
     def _chat_openrouter(
         self,
@@ -698,13 +876,8 @@ class LLMClient:
         tool_choice: str,
         temperature: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Send a chat request to OpenRouter."""
-        client = self._get_client()
-        kwargs = self._build_openrouter_kwargs(
-            messages, model, tools, reasoning_effort, max_tokens, tool_choice, temperature
-        )
-        resp = client.chat.completions.create(**kwargs)
-        return self._normalize_openrouter_response(resp.model_dump())
+        target = self._resolve_remote_target(model)
+        return self._chat_remote(target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature)
 
     def vision_query(
         self,

@@ -1,4 +1,4 @@
-# Ouroboros v4.6.0 — Architecture & Reference
+# Ouroboros v4.7.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -20,7 +20,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
   ├── web/                     ← Web UI (SPA with ES modules in web/modules/)
   │
   ├── supervisor/              ← Background thread inside server.py
-  │   ├── message_bus.py       ← Queue-based message bus (LocalChatBridge)
+  │   ├── message_bus.py       ← Queue-based message bus + Telegram bridge (LocalChatBridge)
   │   ├── workers.py           ← Multiprocessing worker pool (fork/spawn by platform)
   │   ├── state.py             ← Persistent state (state.json) with file locking
   │   ├── queue.py             ← Task queue management (PENDING/RUNNING lists)
@@ -36,7 +36,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
       ├── loop_tool_execution.py ← Tool dispatch and tool-result handling
       ├── pricing.py           ← Model pricing, cost estimation, usage events
-      ├── llm.py               ← OpenRouter API client
+      ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru)
+      ├── model_catalog_api.py ← Optional provider model catalog endpoint
       ├── safety.py            ← Dual-layer LLM security supervisor
       ├── consciousness.py     ← Background thinking loop (with progress emission)
       ├── consolidator.py      ← Block-wise dialogue consolidation (dialogue_blocks.json)
@@ -47,9 +48,11 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── local_model_api.py   ← Local model HTTP endpoints
       ├── local_model_autostart.py ← Local model startup helper
       ├── review.py            ← Code collection, complexity metrics, full-codebase review
+      ├── onboarding_wizard.py ← Multi-step first-run wizard HTML + validation
       ├── owner_inject.py      ← Per-task user message mailbox (compat module name)
       ├── reflection.py        ← Execution reflection and pattern capture
-      ├── server_runtime.py    ← Server startup and WebSocket liveness helpers
+      ├── server_history_api.py ← Chat history + cost breakdown endpoints
+      ├── server_runtime.py    ← Server startup/onboarding and WebSocket liveness helpers
       ├── tool_policy.py       ← Tool access policy and gating
       ├── utils.py             ← Shared utilities
       ├── world_profiler.py    ← System profile generator (WORLD.md)
@@ -66,7 +69,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
    - Starts `server.py` as a subprocess via embedded Python
    - Shows PyWebView window pointed at `http://127.0.0.1:8765`
    - Monitors subprocess; restarts on exit code 42 (restart signal)
-   - First-run wizard (PyWebView HTML page for API key entry)
+  - First-run wizard (PyWebView HTML quick-start for OpenRouter/local setup)
    - **Graceful shutdown with orphan cleanup** (see Shutdown section below)
 
 2. **server.py** — self-editable inner server. Can be modified by the agent.
@@ -132,8 +135,8 @@ launcher.py main()
   ├── check_git()               → Show "install git" wizard if missing
   ├── bootstrap_repo()          → Copy workspace to ~/Ouroboros/repo/ (first run)
   │                               OR sync core files (subsequent runs)
-  ├── _run_first_run_wizard()   → Show API key wizard if no settings.json
-  │                               (PyWebView HTML page with key + budget + model fields)
+  ├── _run_first_run_wizard()   → Show multi-step setup wizard if no runnable config
+  │                               (provider keys → model confirmation → runtime summary)
   │                               Saves to ~/Ouroboros/data/settings.json
   ├── agent_lifecycle_loop()    → Background thread: start/monitor server.py
   └── webview.start()           → Open PyWebView window at http://127.0.0.1:8765
@@ -141,9 +144,15 @@ launcher.py main()
 
 ### First-run wizard
 
-Shown when `settings.json` does not exist or has no `OPENROUTER_API_KEY`.
-Fields: OpenRouter API Key (required), Total Budget ($), Main Model.
-On save: writes `settings.json`, closes wizard, proceeds to main app.
+Shown when `settings.json` does not contain any supported remote provider key and has no
+`LOCAL_MODEL_SOURCE`.
+
+- Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, or local-model-source settings skip the wizard automatically.
+- The wizard is multi-step and provider-aware: it allows entering all relevant keys up front, then forces a model-confirmation step before save.
+- The wizard blocks progression if nothing runnable is configured.
+- When OpenRouter is absent and official OpenAI is the only configured remote runtime, untouched default lane values are auto-remapped to `openai::gpt-5.2` / `openai::gpt-4.1` so first-run startup does not strand the app on OpenRouter-only defaults.
+- OpenAI-compatible and Cloud.ru remain explicit model-selection flows from the full Settings page because there is no single safe universal default model ID for those providers.
+- Closing the wizard without saving is non-fatal: the main app still launches and the user can finish configuration in Settings.
 
 ### Core file sync (`_sync_core_files`)
 
@@ -163,12 +172,14 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 `web/app.js` is the thin orchestrator (~90 lines) that imports from `web/modules/`:
 - `ws.js` — WebSocket connection manager
 - `utils.js` — shared utilities (markdown rendering, escapeHtml, matrix rain)
-- `chat.js` — chat page with message rendering
+- `chat.js` — chat page with message rendering, live task card, and compact runtime controls
 - `dashboard.js` — dashboard with controls and polling
-- `logs.js` — log viewer with category filters
+- `logs.js` — log viewer with category filters and grouped task cards
+- `log_events.js` — shared event summarization/grouping helpers used by Chat and Logs
 - `files.js` — file browser, preview, uploads, and editor
 - `evolution.js` — evolution chart (Chart.js)
 - `settings.js` — settings form with local model management
+- `settings_controls.js` — searchable model pickers + segmented effort controls
 - `costs.js` — cost breakdown tables
 - `versions.js` — version management and rollback
 - `about.js` — about page
@@ -177,18 +188,24 @@ Navigation is a left sidebar with 9 pages.
 
 ### 3.1 Chat
 
-- **Status badge** (top-right): "Online" (green) / "Thinking..." (amber pulse) / "Reconnecting..." (red).
-  Driven by WebSocket connection state and typing events.
+- **Status badge** (top-right): "Online" (green) / "Thinking..." / "Working..." (amber pulse) / "Reconnecting..." (red).
+  Driven by WebSocket connection state, typing events, and live task state.
+- **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic`, duplicated from Dashboard for quick task-side access.
 - **Message input**: textarea + send button. Shift+Enter for newline, Enter to send.
+- **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea.
 - **Messages**: user bubbles (right, blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown.
+- **Multi-user visibility**: user messages are now session-aware. The current browser session stays labeled as `You`; other Web UI sessions render as `WebUI (<session>)`; Telegram-origin messages render with their Telegram sender label.
 - **Timestamps**: smart relative formatting (today: "HH:MM", yesterday: "Yesterday, HH:MM", older: "Mon DD, HH:MM"). Shown on hover.
-- **Progress messages**: background consciousness thinking shown as dimmed bubbles with 💬 prefix.
+- **Live task card**: reasoning/progress/tool chatter no longer spams the transcript as many assistant bubbles.
+  Chat listens to `log_event`/task events plus progress messages and collapses them into one expandable task card with a timeline of steps.
 - **System summaries**: `direction="system"` entries from `chat.jsonl` are shown in the same timeline with a 📋 label instead of being hidden or treated as user text.
 - **Typing indicator**: animated "thinking dots" bubble appears when the agent is processing.
 - **Persistence**: chat history loaded from server on page load (`/api/chat/history`), survives app restarts. Fallback to sessionStorage.
+- **Duplicate-bubble prevention**: queued local user bubbles carry a `client_message_id`; echoed WebSocket/history messages with the same id are merged instead of duplicated.
 - **Empty-chat init**: if neither server history nor sessionStorage has messages, the UI shows a transient assistant bubble: `Ouroboros has awakened`. This is visual-only and is not written to chat history.
-- Messages sent via WebSocket `{type: "chat", content: text}`.
-- Responses arrive via WebSocket `{type: "chat", role: "assistant", content: text, ts: "ISO"}`. On page-load history sync, `/api/chat/history` can also return `role: "system"` entries for internal summaries.
+- **Telegram bridge**: Web UI initiated chats can be mirrored into the bound Telegram chat, Telegram text input is injected back into the same live chat timeline, and Telegram photos are bridged as image-aware user messages (including while a direct-chat turn is already running).
+- Messages sent via WebSocket `{type: "chat", content: text, sender_session_id: "uuid"}`.
+- Responses arrive via WebSocket `{type: "chat", role, content, ts, source?, sender_label?, sender_session_id?, client_message_id?}` and `{type: "photo", role, image_base64, mime, caption?, ts, source?, sender_label?}`. On page-load history sync, `/api/chat/history` can also return `role: "system"` entries for internal summaries plus metadata for multi-user reconstruction.
 - Supports slash commands: `/status`, `/evolve`, `/review`, `/bg`, `/restart`, `/panic`.
 
 ### 3.2 Files
@@ -199,8 +216,11 @@ Navigation is a left sidebar with 9 pages.
 - **Write safety**: unsaved text edits are guarded on folder switches, file switches, page navigation, and browser refresh.
 - **Root policy**: localhost requests fall back to the current user's home directory when no root is configured.
   Network/Docker access requires an explicit `OUROBOROS_FILE_BROWSER_DEFAULT` directory.
-- **Network policy**: non-loopback browser/API access is protected by `OUROBOROS_NETWORK_PASSWORD`.
-  `/api/health` remains public for health checks; the rest of the app requires auth when the password is configured.
+- **Network policy**: `OUROBOROS_NETWORK_PASSWORD` is optional. When configured, non-loopback browser/API access is gated.
+  When omitted, the full HTTP/WebSocket surface remains reachable by design. `/api/health` always stays public.
+- **Symlink policy**: entries are constrained lexically to the configured root, but symlink targets may resolve outside that root intentionally.
+  External symlink paths support list/read/download/content/write/mkdir/upload/copy/move/delete. Root-delete protection still applies only to the configured root itself.
+- **Transfer semantics**: copy/move of symlink entries preserves the link object; writing through a symlink-backed file edits the target content.
 - **Bounds**: directory listings are capped, previews are bounded to a text/byte limit, and uploads reject oversized payloads.
 
 ### 3.3 Dashboard
@@ -216,23 +236,33 @@ Navigation is a left sidebar with 9 pages.
 
 ### 3.4 Settings
 
-- **API Keys**: OpenRouter (required), OpenAI (optional, for web search), Anthropic (optional),
-  OpenAI Base URL (optional), and Network Password (optional).
-  Keys are displayed as masked values (e.g., `sk-or-v1...`).
-  Only overwritten on save if user enters a new value (not containing `...`).
+- **Tabbed layout**: `Providers`, `Models`, `Runtime`, `Integrations`, `Advanced`.
+- **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
+- **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
+  Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
 - **Models**: Main, Code, Light, Fallback.
-- **Reasoning Effort**: Four separate dropdowns for task/chat, evolution, review, and consciousness.
+- **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. Failures are non-fatal and surfaced as inline warnings.
+- **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote model lanes.
+- **Provider prefixes**:
+  - OpenRouter model values stay unprefixed (`anthropic/claude-opus-4.6`).
+  - OpenAI model values use `openai::...`.
+  - OpenAI-compatible model values use `openai-compatible::...`.
+  - Cloud.ru model values use `cloudru::...`.
+- **Reasoning Effort**: Four segmented controls for task/chat, evolution, review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
   `OUROBOROS_EFFORT_CONSCIOUSNESS`. Loading falls back to legacy `OUROBOROS_INITIAL_REASONING_EFFORT`
   for task/chat when the new key is absent.
-- **Review Models**: Comma-separated OpenRouter model IDs for pre-commit review.
+- **Review Models**: Comma-separated remote model IDs for pre-commit review.
   Backed by `OUROBOROS_REVIEW_MODELS`.
+- **OpenAI-only review fallback**: if official OpenAI is the only configured remote runtime and the review list is invalid/underspecified, review falls back to the main model repeated three times.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
 - **Runtime**: Max Workers, Budget ($), Tool Timeout, Soft/Hard Timeout.
+- **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status.
+- **Telegram**: Bot Token, primary chat id, legacy allowed chat ids. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
 - **Save Settings** button → POST `/api/settings`. Applies to env immediately.
-  Budget changes take effect immediately; model/worker changes need restart.
+  Budget changes take effect immediately; provider/runtime changes may still require restart.
 - **Reset All Data** button (Danger Zone) → POST `/api/reset`.
   Deletes: state/, memory/, logs/, archive/, settings.json.
   Keeps: repo/ (agent code).
@@ -244,9 +274,9 @@ Navigation is a left sidebar with 9 pages.
   Toggle on/off to filter log entries.
 - **Clear** button: clears the in-memory log view (not files on disk).
 - Log entries arrive via WebSocket `{type: "log", data: event}`.
-- The page renders a live timeline: timestamp, category, phase badge, readable summary,
-  metadata pills, and optional body text.
-- Each row has a **Raw** toggle that expands the original JSON payload.
+- The page renders a live timeline: standalone system/error entries stay as rows, while task/LLM/tool/progress events with a shared `task_id` collapse into grouped task cards with an expandable internal timeline.
+- Chat and Logs share the same event summarization logic from `log_events.js`, so a task phase is described the same way in both places.
+- Each standalone row or grouped task card has a **Raw** toggle that expands the latest original JSON payload.
 - New live-only timeline events cover task start, context building, LLM round start/finish,
   tool start/finish/timeout, and compact task heartbeats during long waits.
 - Repeated startup/system events such as verification bursts are compacted in the UI.
@@ -293,8 +323,8 @@ Navigation is a left sidebar with 9 pages.
 ## 4. Server API Endpoints
 
 If `OUROBOROS_NETWORK_PASSWORD` is configured, non-loopback HTTP/WebSocket access requires
-authentication. `/api/health`, `/auth/login`, and `/auth/logout` remain reachable without an
-existing session.
+authentication. If the password is blank, non-loopback access stays open by design.
+`/api/health`, `/auth/login`, and `/auth/logout` remain reachable without an existing session.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -312,6 +342,7 @@ existing session.
 | POST | `/api/files/upload` | Multipart upload into current Files directory |
 | GET | `/api/settings` | Current settings with masked API keys |
 | POST | `/api/settings` | Update settings (partial update, only provided keys) |
+| GET | `/api/model-catalog` | Optional provider model catalog (OpenRouter/OpenAI/compatible/Cloud.ru) |
 | POST | `/api/command` | Send a slash command `{cmd: "/status"}` |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
 | GET | `/api/git/log` | Recent commits + tags + current branch/sha |
@@ -332,13 +363,14 @@ existing session.
 ### WebSocket protocol
 
 **Client → Server:**
-- `{type: "chat", content: "text"}` — send chat message
+- `{type: "chat", content: "text", sender_session_id: "uuid", client_message_id?: "msg-..."}` — send chat message
 - `{type: "command", cmd: "/status"}` — send slash command
 
 **Server → Client:**
-- `{type: "chat", role: "assistant", content: "text"}` — agent response
+- `{type: "chat", role, content, ts, source?, sender_label?, sender_session_id?, client_message_id?, telegram_chat_id?}` — user/assistant/system chat payloads
 - `{type: "log", data: {type, ts, ...}}` — real-time log event
 - `{type: "typing", action: "typing"}` — typing indicator (show animation)
+- `{type: "photo", image_base64, mime, caption, ts}` — assistant image/photo payload
 
 ---
 
@@ -533,11 +565,18 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| OPENROUTER_API_KEY | "" | Required. Main LLM API key |
-| OPENAI_API_KEY | "" | Optional. For web_search tool |
-| OPENAI_BASE_URL | "" | Optional. Base URL for OpenAI-compatible web search backend |
+| OPENROUTER_API_KEY | "" | Optional. Default multi-model router key |
+| OPENAI_API_KEY | "" | Optional. Official OpenAI provider key (runtime + web search) |
+| OPENAI_BASE_URL | "" | Optional legacy OpenAI-compatible base URL fallback |
+| OPENAI_COMPATIBLE_API_KEY | "" | Optional. Dedicated OpenAI-compatible provider key |
+| OPENAI_COMPATIBLE_BASE_URL | "" | Optional. Dedicated OpenAI-compatible provider base URL |
+| CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Optional. Cloud.ru Foundation Models provider key |
+| CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru provider base URL |
 | ANTHROPIC_API_KEY | "" | Optional. For Claude Code CLI |
-| OUROBOROS_NETWORK_PASSWORD | "" | Optional on localhost, required for non-loopback access |
+| TELEGRAM_BOT_TOKEN | "" | Optional. Enables Telegram bridge polling/sending |
+| TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
+| TELEGRAM_ALLOWED_CHAT_IDS | "" | Optional legacy fallback list of Telegram chat ids |
+| OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables non-loopback auth gate when set |
 | OUROBOROS_MODEL | anthropic/claude-opus-4.6 | Main reasoning model |
 | OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
 | OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |

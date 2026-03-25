@@ -26,3 +26,15 @@ def test_new_file_discard_and_context_menu_clamp_regressions():
     assert "createNewFile({ force: true })" in source
     assert "window.innerWidth - rect.width" in source
     assert "window.innerHeight - rect.height" in source
+
+
+def test_files_layout_uses_internal_scroll_contract():
+    css = _read("web/style.css")
+
+    assert "flex: 1;" in css
+    assert ".files-layout {" in css
+    assert ".files-sidebar {" in css
+    assert "min-height: 0;" in css
+    assert "overflow: hidden;" in css
+    assert ".files-list {" in css
+    assert "overscroll-behavior: contain;" in css

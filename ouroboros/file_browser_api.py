@@ -70,11 +70,11 @@ def _get_file_browser_root(request: Request) -> pathlib.Path:
 def _resolve_target(request: Request, rel_path: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     root_dir = _get_file_browser_root(request)
     requested = root_dir / safe_relpath(rel_path or ".")
-    resolved = requested.resolve(strict=False)
     try:
-        resolved.relative_to(root_dir)
+        requested.relative_to(root_dir)
     except ValueError as exc:
         raise ValueError("Path escapes file browser root.") from exc
+    resolved = requested.resolve(strict=False)
     return root_dir, requested, resolved
 
 
@@ -121,22 +121,20 @@ def _guess_media_type(path: pathlib.Path) -> str:
 
 def _entry_within_root(entry: pathlib.Path, root_dir: pathlib.Path) -> bool:
     try:
-        entry.resolve(strict=False).relative_to(root_dir)
+        entry.relative_to(root_dir)
         return True
     except Exception:
         return False
 
 
-def _tree_contains_symlink(path: pathlib.Path) -> bool:
-    if not path.is_dir():
-        return False
-    try:
-        for candidate in path.rglob("*"):
-            if candidate.is_symlink():
-                return True
-    except Exception:
-        return True
-    return False
+def _copy_path(source: pathlib.Path, destination: pathlib.Path) -> None:
+    if source.is_symlink():
+        destination.symlink_to(os.readlink(source), target_is_directory=source.is_dir())
+        return
+    if source.is_dir():
+        shutil.copytree(source, destination, symlinks=True)
+        return
+    shutil.copy2(source, destination)
 
 
 def _relative_path(root_dir: pathlib.Path, path: pathlib.Path) -> str:
@@ -340,21 +338,22 @@ async def api_files_write(request: Request) -> JSONResponse:
                 "size": int(target.stat().st_size),
             })
 
-        if target.is_symlink():
-            return JSONResponse({"error": "Symlink-backed files cannot be edited."}, status_code=400)
         if not target.is_file():
             return JSONResponse({"error": f"Not a file: {rel_path}"}, status_code=400)
         if target.suffix.lower() in _IMAGE_PREVIEW_EXTENSIONS or not _guess_text_file(target):
             return JSONResponse({"error": "Only text files can be edited in the browser."}, status_code=400)
 
-        tmp_target = target.with_name(f".{target.name}.editing")
-        try:
-            tmp_target.write_text(content, encoding="utf-8")
-            tmp_target.replace(target)
-        finally:
-            if tmp_target.exists():
-                with suppress(Exception):
-                    tmp_target.unlink()
+        if target.is_symlink():
+            target.write_text(content, encoding="utf-8")
+        else:
+            tmp_target = target.with_name(f".{target.name}.editing")
+            try:
+                tmp_target.write_text(content, encoding="utf-8")
+                tmp_target.replace(target)
+            finally:
+                if tmp_target.exists():
+                    with suppress(Exception):
+                        tmp_target.unlink()
 
         rel = _relative_path(root_dir, target)
         return JSONResponse({
@@ -415,8 +414,8 @@ async def api_files_delete(request: Request) -> JSONResponse:
         if not rel_path:
             return JSONResponse({"error": "Missing path."}, status_code=400)
 
-        root_dir, target, resolved = _resolve_target(request, rel_path)
-        if target == root_dir or resolved == root_dir:
+        root_dir, target, _ = _resolve_target(request, rel_path)
+        if target == root_dir:
             return JSONResponse({"error": "Refusing to delete the configured root directory."}, status_code=400)
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
@@ -456,9 +455,9 @@ async def api_files_transfer(request: Request) -> JSONResponse:
         if mode not in {"copy", "move"}:
             return JSONResponse({"error": "Invalid mode. Expected copy or move."}, status_code=400)
 
-        root_dir, source, source_resolved = _resolve_target(request, source_rel)
+        root_dir, source, _ = _resolve_target(request, source_rel)
         _, dest_dir, _ = _resolve_target(request, dest_rel)
-        if source == root_dir or source_resolved == root_dir:
+        if source == root_dir:
             return JSONResponse({"error": "Refusing to move or copy the configured root directory."}, status_code=400)
         if not source.exists():
             return JSONResponse({"error": f"Path not found: {source_rel}"}, status_code=404)
@@ -466,32 +465,25 @@ async def api_files_transfer(request: Request) -> JSONResponse:
             return JSONResponse({"error": f"Path not found: {dest_rel}"}, status_code=404)
         if not dest_dir.is_dir():
             return JSONResponse({"error": f"Not a directory: {dest_rel}"}, status_code=400)
-        if source.is_symlink():
-            return JSONResponse({"error": "Copy/move of symlink entries is not supported."}, status_code=400)
-        if source.is_dir() and _tree_contains_symlink(source):
-            return JSONResponse({"error": "Copy/move of directories containing symlinks is not supported."}, status_code=400)
 
         destination = dest_dir / source.name
         if destination.exists():
             return JSONResponse({"error": f"Path already exists: {destination.name}"}, status_code=409)
         try:
-            destination.resolve(strict=False).relative_to(root_dir)
+            destination.relative_to(root_dir)
         except ValueError:
             return JSONResponse({"error": "Destination escapes file browser root."}, status_code=400)
 
-        if source.is_dir():
+        if source.is_dir() and not source.is_symlink():
             try:
-                destination.resolve(strict=False).relative_to(source.resolve())
+                destination.relative_to(source)
             except ValueError:
                 pass
             else:
                 return JSONResponse({"error": "Cannot move or copy a directory into itself."}, status_code=400)
 
         if mode == "copy":
-            if source.is_dir():
-                shutil.copytree(source, destination)
-            else:
-                shutil.copy2(source, destination)
+            _copy_path(source, destination)
         else:
             shutil.move(str(source), str(destination))
 

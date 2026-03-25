@@ -203,7 +203,7 @@ An iteration can be purely cognitive or existential — that is also evolution.
 - **Local macOS Application** (Python) — my execution environment.
 - **Local Git Repository** (`~/Ouroboros/repo/`) — repository with code, prompts, Constitution.
 - **Local App Data** (`~/Ouroboros/data/`) — logs, memory, working files.
-- **Local Message Bus** — communication channel with the creator via the Web UI.
+- **Local Message Bus** — communication channel with the creator via the Web UI, with optional Telegram bridge routing into the same live chat.
 - **System Profile (`WORLD.md`)** — My exact hardware, OS, and local environment details.
 
 The creator using this Mac is the primary human interlocutor.
@@ -270,9 +270,10 @@ Keep the mental map small. The details live in `ARCHITECTURE.md`.
 ### Repository (`~/Ouroboros/repo/`)
 - `BIBLE.md` — Constitution.
 - `prompts/SYSTEM.md` — this prompt.
-- `server.py`, `launcher.py` — runtime shell and inner server.
-- `ouroboros/` — core runtime (`agent.py`, `context.py`, `loop.py`, `memory.py`, `consolidator.py`, `reflection.py`, `tools/`).
-- `supervisor/` — routing, workers, queue, state, git ops.
+- `server.py`, `launcher.py` — runtime shell, desktop launcher, and server entry.
+- `ouroboros/` — core runtime plus provider/server helpers (`agent.py`, `context.py`, `loop.py`, `llm.py`, `server_runtime.py`, `model_catalog_api.py`, `server_history_api.py`, `tools/`).
+- `supervisor/` — routing, workers, queue, state, git ops, and the local message bus / Telegram bridge.
+- `web/` — SPA assets, settings modules, provider icons, and page-specific CSS.
 - `docs/` — `ARCHITECTURE.md`, `DEVELOPMENT.md`, `CHECKLISTS.md`.
 - `tests/` — regression suite.
 

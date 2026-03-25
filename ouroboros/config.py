@@ -41,7 +41,14 @@ SETTINGS_DEFAULTS = {
     "OPENROUTER_API_KEY": "",
     "OPENAI_API_KEY": "",
     "OPENAI_BASE_URL": "",
+    "OPENAI_COMPATIBLE_API_KEY": "",
+    "OPENAI_COMPATIBLE_BASE_URL": "",
+    "CLOUDRU_FOUNDATION_MODELS_API_KEY": "",
+    "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://foundation-models.api.cloud.ru/v1",
     "ANTHROPIC_API_KEY": "",
+    "TELEGRAM_BOT_TOKEN": "",
+    "TELEGRAM_CHAT_ID": "",
+    "TELEGRAM_ALLOWED_CHAT_IDS": "",
     "OUROBOROS_NETWORK_PASSWORD": "",
     "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
     "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
@@ -58,7 +65,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_BG_WAKEUP_MAX": 7200,
     "OUROBOROS_EVO_COST_THRESHOLD": 0.10,
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
-    # Pre-commit review: comma-separated list of OpenRouter model IDs
+    # Pre-commit review: comma-separated provider-tagged model list
     "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
@@ -85,6 +92,28 @@ SETTINGS_DEFAULTS = {
 }
 
 _VALID_EFFORTS = ("none", "low", "medium", "high")
+_OPENAI_ONLY_REVIEW_RUNS = 3
+
+
+def _parse_model_list(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _migrate_openai_review_model(model: str) -> str:
+    text = str(model or "").strip()
+    if text.startswith("openai/"):
+        return f"openai::{text[len('openai/'):]}"
+    return text
+
+
+def _is_official_openai_only_env() -> bool:
+    return (
+        bool(str(os.environ.get("OPENAI_API_KEY", "") or "").strip())
+        and not bool(str(os.environ.get("OPENROUTER_API_KEY", "") or "").strip())
+        and not bool(str(os.environ.get("OPENAI_BASE_URL", "") or "").strip())
+        and not bool(str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip())
+        and not bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
+    )
 
 
 def resolve_effort(task_type: str) -> str:
@@ -113,7 +142,18 @@ def get_review_models() -> list[str]:
     """Return the configured pre-commit review model list."""
     default_str = SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"]
     models_str = os.environ.get("OUROBOROS_REVIEW_MODELS", default_str) or default_str
-    return [m.strip() for m in models_str.split(",") if m.strip()]
+    models = _parse_model_list(models_str)
+    if not _is_official_openai_only_env():
+        return models
+
+    main_model = str(os.environ.get("OUROBOROS_MODEL", SETTINGS_DEFAULTS["OUROBOROS_MODEL"]) or "").strip()
+    if not main_model.startswith("openai::"):
+        return models
+
+    migrated = [_migrate_openai_review_model(model) for model in models]
+    if not migrated or len(migrated) < 2 or any(not model.startswith("openai::") for model in migrated):
+        return [main_model] * _OPENAI_ONLY_REVIEW_RUNS
+    return migrated
 
 
 def get_review_enforcement() -> str:
@@ -193,7 +233,11 @@ def save_settings(settings: dict) -> None:
 def apply_settings_to_env(settings: dict) -> None:
     """Push settings into environment variables for supervisor modules."""
     env_keys = [
-        "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+        "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL",
+        "CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALLOWED_CHAT_IDS",
         "OUROBOROS_NETWORK_PASSWORD",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_FALLBACK", "CLAUDE_CODE_MODEL",
