@@ -1,12 +1,13 @@
 """
 Ouroboros — LLM client.
 
-The only module that communicates with LLM APIs (OpenRouter + optional local).
+The only module that communicates with LLM APIs (OpenRouter, direct providers, + optional local).
 Contract: chat(), default_model(), available_models(), add_usage().
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -14,6 +15,8 @@ import re
 import time
 import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from ouroboros.provider_models import normalize_anthropic_model_id
 
 log = logging.getLogger(__name__)
 
@@ -237,6 +240,7 @@ class LLMClient:
         model_name = str(model or "").strip()
         for prefix, provider in (
             ("openai::", "openai"),
+            ("anthropic::", "anthropic"),
             ("cloudru::", "cloudru"),
             ("openai-compatible::", "openai-compatible"),
             ("openrouter::", "openrouter"),
@@ -251,6 +255,8 @@ class LLMClient:
             return resolved_model
         if provider == "openai":
             return f"openai/{resolved_model}"
+        if provider == "anthropic":
+            return f"anthropic/{resolved_model}"
         if provider == "cloudru":
             return f"cloudru/{resolved_model}"
         return f"openai-compatible/{resolved_model}"
@@ -266,6 +272,19 @@ class LLMClient:
                 "usage_model": usage_model,
                 "api_key": os.environ.get("OPENAI_API_KEY", ""),
                 "base_url": "https://api.openai.com/v1",
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "anthropic":
+            resolved_model = normalize_anthropic_model_id(resolved_model)
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": self._qualified_model_name(provider, resolved_model),
+                "api_key": os.environ.get("ANTHROPIC_API_KEY", ""),
+                "base_url": "https://api.anthropic.com/v1",
                 "default_headers": {},
                 "supports_openrouter_extensions": False,
                 "supports_generation_cost": False,
@@ -466,6 +485,17 @@ class LLMClient:
         if tools:
             raise ValueError("chat_async does not support tool calls")
         target = self._resolve_remote_target(model)
+        if target.get("provider") == "anthropic":
+            return await asyncio.to_thread(
+                self._chat_anthropic,
+                target,
+                messages,
+                tools,
+                reasoning_effort,
+                max_tokens,
+                tool_choice,
+                temperature,
+            )
         client = self._get_async_remote_client(target)
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
@@ -739,6 +769,286 @@ class LLMClient:
                     log.info("Retry-truncated system message to %d chars (ratio=%.2f)", new_len, ratio)
                 return
 
+    @staticmethod
+    def _stringify_anthropic_content(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    @staticmethod
+    def _coalesce_anthropic_message(
+        messages: List[Dict[str, Any]],
+        role: str,
+        content: List[Dict[str, Any]],
+    ) -> None:
+        if not content:
+            return
+        if messages and messages[-1].get("role") == role and isinstance(messages[-1].get("content"), list):
+            messages[-1]["content"].extend(content)
+            return
+        messages.append({"role": role, "content": list(content)})
+
+    @staticmethod
+    def _anthropic_image_block(image_url: str) -> Optional[Dict[str, Any]]:
+        url = str(image_url or "").strip()
+        if not url:
+            return None
+        if url.startswith("data:") and ";base64," in url:
+            header, data = url.split(",", 1)
+            mime = header[5:].split(";", 1)[0] or "image/png"
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": data,
+                },
+            }
+        return {
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": url,
+            },
+        }
+
+    def _anthropic_blocks_from_content(self, content: Any) -> List[Dict[str, Any]]:
+        if content is None:
+            return []
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content else []
+        if not isinstance(content, list):
+            text = self._stringify_anthropic_content(content)
+            return [{"type": "text", "text": text}] if text else []
+
+        blocks: List[Dict[str, Any]] = []
+        for block in content:
+            if isinstance(block, str):
+                if block:
+                    blocks.append({"type": "text", "text": block})
+                continue
+            if not isinstance(block, dict):
+                text = self._stringify_anthropic_content(block)
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                continue
+
+            block_type = str(block.get("type") or "").strip()
+            if block_type in {"text", "input_text", "output_text"}:
+                text = str(block.get("text") or "")
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                continue
+            if block_type == "image_url":
+                image_url = str((block.get("image_url") or {}).get("url") or "")
+                image_block = self._anthropic_image_block(image_url)
+                if image_block:
+                    blocks.append(image_block)
+                continue
+            if block.get("text"):
+                blocks.append({"type": "text", "text": str(block.get("text") or "")})
+        return blocks
+
+    def _build_anthropic_messages(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        system_parts: List[str] = []
+        anthropic_messages: List[Dict[str, Any]] = []
+
+        for msg in messages:
+            role = str(msg.get("role") or "").strip().lower()
+            if role == "system":
+                for block in self._anthropic_blocks_from_content(msg.get("content")):
+                    if block.get("type") == "text" and block.get("text"):
+                        system_parts.append(str(block.get("text") or ""))
+                continue
+
+            if role == "user":
+                self._coalesce_anthropic_message(
+                    anthropic_messages,
+                    "user",
+                    self._anthropic_blocks_from_content(msg.get("content")),
+                )
+                continue
+
+            if role == "assistant":
+                assistant_blocks = self._anthropic_blocks_from_content(msg.get("content"))
+                for tool_call in msg.get("tool_calls") or []:
+                    function = tool_call.get("function") or {}
+                    raw_args = function.get("arguments")
+                    parsed_args: Any = {}
+                    if isinstance(raw_args, str):
+                        try:
+                            parsed_args = json.loads(raw_args) if raw_args.strip() else {}
+                        except Exception:
+                            parsed_args = {"raw": raw_args}
+                    elif raw_args is not None:
+                        parsed_args = raw_args
+                    if not isinstance(parsed_args, dict):
+                        parsed_args = {"value": parsed_args}
+                    assistant_blocks.append({
+                        "type": "tool_use",
+                        "id": str(tool_call.get("id") or ""),
+                        "name": str(function.get("name") or ""),
+                        "input": parsed_args,
+                    })
+                self._coalesce_anthropic_message(anthropic_messages, "assistant", assistant_blocks)
+                continue
+
+            if role == "tool":
+                tool_use_id = str(msg.get("tool_call_id") or "")
+                if not tool_use_id:
+                    continue
+                self._coalesce_anthropic_message(
+                    anthropic_messages,
+                    "user",
+                    [{
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": self._stringify_anthropic_content(msg.get("content")),
+                    }],
+                )
+
+        return "\n\n".join(part for part in system_parts if part).strip(), anthropic_messages
+
+    @staticmethod
+    def _build_anthropic_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        anthropic_tools: List[Dict[str, Any]] = []
+        for tool in tools or []:
+            function = tool.get("function") or {}
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            anthropic_tools.append({
+                "name": name,
+                "description": str(function.get("description") or ""),
+                "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
+            })
+        return anthropic_tools
+
+    @staticmethod
+    def _build_anthropic_tool_choice(tool_choice: Any) -> Optional[Dict[str, Any]]:
+        if not tool_choice or tool_choice == "auto":
+            return None
+        if tool_choice in {"required", "any"}:
+            return {"type": "any"}
+        if tool_choice == "none":
+            return {"type": "none"}
+        if isinstance(tool_choice, dict):
+            function = tool_choice.get("function") or {}
+            name = str(function.get("name") or "").strip()
+            if name:
+                return {"type": "tool", "name": name}
+        if isinstance(tool_choice, str):
+            return {"type": "tool", "name": tool_choice}
+        return None
+
+    def _normalize_anthropic_response(
+        self,
+        resp_dict: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        content_blocks = resp_dict.get("content") or []
+        text_parts: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "").strip()
+            if block_type == "text":
+                text = str(block.get("text") or "")
+                if text:
+                    text_parts.append(text)
+            elif block_type == "tool_use":
+                tool_calls.append({
+                    "id": str(block.get("id") or ""),
+                    "type": "function",
+                    "function": {
+                        "name": str(block.get("name") or ""),
+                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                    },
+                })
+
+        raw_usage = resp_dict.get("usage") or {}
+        usage: Dict[str, Any] = {
+            "prompt_tokens": int(raw_usage.get("input_tokens") or 0),
+            "completion_tokens": int(raw_usage.get("output_tokens") or 0),
+            "cached_tokens": int(raw_usage.get("cache_read_input_tokens") or 0),
+            "cache_write_tokens": int(raw_usage.get("cache_creation_input_tokens") or 0),
+            "provider": "anthropic",
+            "resolved_model": str(target.get("usage_model") or target.get("resolved_model") or ""),
+        }
+        if usage["prompt_tokens"] or usage["completion_tokens"]:
+            from ouroboros.pricing import estimate_cost
+
+            estimated_cost = estimate_cost(
+                usage["resolved_model"],
+                usage["prompt_tokens"],
+                usage["completion_tokens"],
+                usage["cached_tokens"],
+                usage["cache_write_tokens"],
+            )
+            if estimated_cost:
+                usage["cost"] = estimated_cost
+
+        message: Dict[str, Any] = {
+            "role": "assistant",
+            "content": "".join(text_parts),
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return message, usage
+
+    def _chat_anthropic(
+        self,
+        target: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        reasoning_effort: str,
+        max_tokens: int,
+        tool_choice: str,
+        temperature: Optional[float] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        import requests
+
+        del reasoning_effort  # Anthropic direct works without an extra effort payload here.
+
+        system, anthropic_messages = self._build_anthropic_messages(messages)
+        payload: Dict[str, Any] = {
+            "model": str(target.get("resolved_model") or ""),
+            "messages": anthropic_messages,
+            "max_tokens": max_tokens,
+        }
+        if system:
+            payload["system"] = system
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+        anthropic_tools = self._build_anthropic_tools(tools)
+        if anthropic_tools:
+            payload["tools"] = anthropic_tools
+            anthropic_tool_choice = self._build_anthropic_tool_choice(tool_choice)
+            if anthropic_tool_choice:
+                payload["tool_choice"] = anthropic_tool_choice
+
+        response = requests.post(
+            f"{str(target.get('base_url') or '').rstrip('/')}/messages",
+            headers={
+                "x-api-key": str(target.get("api_key") or ""),
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        )
+        response.raise_for_status()
+        return self._normalize_anthropic_response(response.json(), target)
+
     def _build_remote_kwargs(
         self,
         target: Dict[str, Any],
@@ -750,11 +1060,14 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]],
     ) -> Dict[str, Any]:
         resolved_model = str(target.get("resolved_model") or "")
+        token_limit_key = "max_tokens"
+        if str(target.get("provider") or "") == "openai" and resolved_model.startswith("gpt-5"):
+            token_limit_key = "max_completion_tokens"
         if not target.get("supports_openrouter_extensions"):
             kwargs: Dict[str, Any] = {
                 "model": resolved_model,
                 "messages": messages,
-                "max_tokens": max_tokens,
+                token_limit_key: max_tokens,
             }
             if temperature is not None:
                 kwargs["temperature"] = temperature
@@ -859,6 +1172,10 @@ class LLMClient:
         temperature: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send a chat request to the resolved remote provider."""
+        if target.get("provider") == "anthropic":
+            return self._chat_anthropic(
+                target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature
+            )
         client = self._get_remote_client(target)
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools

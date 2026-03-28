@@ -109,7 +109,7 @@ export function renderSettingsPage() {
                                 label: 'OpenAI API Key',
                                 placeholder: 'sk-...',
                             })}</div>
-                            <div class="settings-inline-note">Use model values like <code>openai::gpt-5.2</code> in the Models tab to route lanes here. If OpenRouter is absent and the shipped defaults are still untouched, Ouroboros now auto-remaps them to official OpenAI defaults.</div>
+                            <div class="settings-inline-note">Use model values like <code>openai::gpt-5.4</code> in the Models tab to route lanes here. If OpenRouter is absent and the shipped defaults are still untouched, Ouroboros now auto-remaps them to official OpenAI defaults.</div>
                         `,
                     })}
                     ${providerCard({
@@ -157,7 +157,7 @@ export function renderSettingsPage() {
                         id: 'anthropic',
                         title: 'Anthropic',
                         icon: '/static/providers/anthropic.svg',
-                        hint: 'Existing Claude CLI flow only',
+                        hint: 'Direct runtime plus Claude tooling',
                         body: `
                             <div class="form-row">${secretField({
                                 id: 's-anthropic',
@@ -165,7 +165,7 @@ export function renderSettingsPage() {
                                 label: 'Anthropic API Key',
                                 placeholder: 'sk-ant-...',
                             })}</div>
-                            <div class="settings-inline-note">This does not create a separate remote runtime provider. It stays scoped to the existing Claude/CLI integration.</div>
+                            <div class="settings-inline-note">Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route lanes directly through Anthropic. Claude tooling still reuses this key.</div>
                         `,
                     })}
                     <div class="form-section compact">
@@ -222,7 +222,7 @@ export function renderSettingsPage() {
                             <div class="form-field">
                                 <label>Pre-commit Review Models</label>
                                 <input id="s-review-models" placeholder="model1,model2,model3">
-                                <div class="settings-inline-note">Comma-separated review models. In OpenAI-only mode, review automatically falls back to repeated runs of the current main model.</div>
+                                <div class="settings-inline-note">Comma-separated review models. In direct-provider-only mode, review automatically falls back to repeated runs of the current main model when this list still points elsewhere.</div>
                             </div>
                         </div>
                         <div class="form-row">

@@ -1,11 +1,12 @@
 const FALLBACK_MODEL_ITEMS = [
+    { value: 'anthropic::claude-opus-4-6', label: 'Official Anthropic' },
+    { value: 'anthropic::claude-sonnet-4-6', label: 'Official Anthropic' },
     { value: 'anthropic/claude-opus-4.6', label: 'Anthropic via OpenRouter' },
     { value: 'anthropic/claude-sonnet-4.6', label: 'Anthropic via OpenRouter' },
     { value: 'google/gemini-3.1-pro-preview', label: 'Google via OpenRouter' },
     { value: 'google/gemini-3-flash-preview', label: 'Google via OpenRouter' },
-    { value: 'openai/gpt-5.2', label: 'OpenAI via OpenRouter' },
     { value: 'openai/gpt-5.4', label: 'OpenAI via OpenRouter' },
-    { value: 'openai::gpt-5.2', label: 'Official OpenAI' },
+    { value: 'openai::gpt-5.4', label: 'Official OpenAI' },
     { value: 'openai::gpt-4.1', label: 'Official OpenAI' },
 ];
 

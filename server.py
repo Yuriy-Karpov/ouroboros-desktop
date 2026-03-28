@@ -69,6 +69,17 @@ log = logging.getLogger("server")
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
 _restart_requested = threading.Event()
+_LAUNCHER_MANAGED = str(os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "") or "").strip() == "1"
+_SECRET_SETTING_KEYS = {
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_COMPATIBLE_API_KEY",
+    "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "GITHUB_TOKEN",
+    "OUROBOROS_NETWORK_PASSWORD",
+}
 
 # ---------------------------------------------------------------------------
 # WebSocket connections manager
@@ -116,6 +127,37 @@ def broadcast_ws_sync(msg: dict) -> None:
         asyncio.run_coroutine_threadsafe(broadcast_ws(msg), loop)
     except RuntimeError:
         pass
+
+
+def _mask_secret_value(value: Any) -> str:
+    text = str(value or "")
+    return text[:8] + "..." if len(text) > 8 else "***"
+
+
+def _looks_masked_secret(value: Any) -> bool:
+    text = str(value or "").strip()
+    return text == "***" or text.endswith("...")
+
+
+def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
+    merged = {k: v for k, v in current.items()}
+    for key in _SETTINGS_DEFAULTS:
+        if key not in body:
+            continue
+        if key in _SECRET_SETTING_KEYS and _looks_masked_secret(body[key]) and merged.get(key):
+            continue
+        merged[key] = body[key]
+    return merged
+
+
+def _restart_current_process(host: str, port: int) -> None:
+    env = os.environ.copy()
+    env["OUROBOROS_SERVER_HOST"] = str(host)
+    env["OUROBOROS_SERVER_PORT"] = str(port)
+    env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
+    argv = [sys.executable, *sys.argv]
+    log.info("Re-executing direct server mode on %s:%d", host, port)
+    os.execvpe(sys.executable, argv, env)
 
 
 # ---------------------------------------------------------------------------
@@ -633,28 +675,16 @@ async def api_state(request: Request) -> JSONResponse:
 async def api_settings_get(request: Request) -> JSONResponse:
     settings, _, _ = apply_runtime_provider_defaults(load_settings())
     safe = {k: v for k, v in settings.items()}
-    for key in (
-        "OPENROUTER_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENAI_COMPATIBLE_API_KEY",
-        "CLOUDRU_FOUNDATION_MODELS_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "TELEGRAM_BOT_TOKEN",
-        "GITHUB_TOKEN",
-        "OUROBOROS_NETWORK_PASSWORD",
-    ):
+    for key in _SECRET_SETTING_KEYS:
         if safe.get(key):
-            safe[key] = safe[key][:8] + "..." if len(safe[key]) > 8 else "***"
+            safe[key] = _mask_secret_value(safe[key])
     return JSONResponse(safe)
 
 
 async def api_settings_post(request: Request) -> JSONResponse:
     try:
         body = await request.json()
-        current = load_settings()
-        for key in _SETTINGS_DEFAULTS:
-            if key in body:
-                current[key] = body[key]
+        current = _merge_settings_payload(load_settings(), body)
         current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
         save_settings(current)
         _apply_settings_to_env(current)
@@ -662,7 +692,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
         warnings = []
         if provider_defaults_changed:
             warnings.append(
-                "Normalized official OpenAI-only routing because OpenRouter is not configured."
+                "Normalized direct-provider routing because OpenRouter is not configured for the active provider."
             )
         try:
             from supervisor.message_bus import get_bridge
@@ -966,6 +996,8 @@ def main() -> int:
                 force_kill_pid(child.pid)
             except (ProcessLookupError, PermissionError):
                 pass
+        if not _LAUNCHER_MANAGED:
+            _restart_current_process(args.host, actual_port)
         # Hard exit — sys.exit() can hang if threads/children are stuck
         os._exit(RESTART_EXIT_CODE)
 

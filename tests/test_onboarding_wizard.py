@@ -13,8 +13,8 @@ def _base_payload() -> dict:
         "LOCAL_MODEL_N_GPU_LAYERS": -1,
         "LOCAL_MODEL_CHAT_FORMAT": "",
         "LOCAL_ROUTING_MODE": "cloud",
-        "OUROBOROS_MODEL": "openai::gpt-5.2",
-        "OUROBOROS_MODEL_CODE": "openai::gpt-5.2",
+        "OUROBOROS_MODEL": "openai::gpt-5.4",
+        "OUROBOROS_MODEL_CODE": "openai::gpt-5.4",
         "OUROBOROS_MODEL_LIGHT": "openai::gpt-4.1",
         "OUROBOROS_MODEL_FALLBACK": "openai::gpt-4.1",
     }
@@ -24,7 +24,7 @@ def test_prepare_onboarding_settings_requires_runnable_config():
     prepared, error = prepare_onboarding_settings(_base_payload(), {})
 
     assert prepared == {}
-    assert "Configure OpenRouter, OpenAI, or a local model" in error
+    assert "Configure OpenRouter, OpenAI, Anthropic, or a local model" in error
 
 
 def test_prepare_onboarding_settings_accepts_openai_only_setup():
@@ -35,8 +35,23 @@ def test_prepare_onboarding_settings_accepts_openai_only_setup():
 
     assert error is None
     assert prepared["OPENAI_API_KEY"] == "sk-openai-1234567890"
-    assert prepared["OUROBOROS_MODEL"] == "openai::gpt-5.2"
+    assert prepared["OUROBOROS_MODEL"] == "openai::gpt-5.4"
     assert prepared["TOTAL_BUDGET"] == 10.0
+
+
+def test_prepare_onboarding_settings_accepts_anthropic_only_setup():
+    payload = _base_payload()
+    payload["ANTHROPIC_API_KEY"] = "sk-ant-1234567890"
+    payload["OUROBOROS_MODEL"] = "anthropic::claude-opus-4-6"
+    payload["OUROBOROS_MODEL_CODE"] = "anthropic::claude-opus-4-6"
+    payload["OUROBOROS_MODEL_LIGHT"] = "anthropic::claude-sonnet-4-6"
+    payload["OUROBOROS_MODEL_FALLBACK"] = "anthropic::claude-sonnet-4-6"
+
+    prepared, error = prepare_onboarding_settings(payload, {})
+
+    assert error is None
+    assert prepared["ANTHROPIC_API_KEY"] == "sk-ant-1234567890"
+    assert prepared["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-6"
 
 
 def test_prepare_onboarding_settings_sets_all_local_routes():
@@ -59,4 +74,13 @@ def test_build_onboarding_html_contains_multistep_markers():
 
     assert "STEP_ORDER = [\"providers\", \"models\", \"runtime\", \"summary\"]" in html
     assert "Confirm every lane" in html
-    assert "openai::gpt-5.2" in html
+    assert "openai::gpt-5.4" in html
+    assert "anthropic::claude-sonnet-4-6" in html
+
+
+def test_build_onboarding_html_keeps_manual_profile_selection_available():
+    html = build_onboarding_html({})
+
+    assert "function hasProfileAccess(profile)" in html
+    assert "const nothingConfigured = !hasCloudProvider() && !hasLocalModel();" in html
+    assert "if (selected && (hasProfileAccess(selected) || nothingConfigured))" in html

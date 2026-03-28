@@ -182,6 +182,7 @@ export function initSettings({ state }) {
         const restartSensitiveKeys = [
             'OPENROUTER_API_KEY',
             'OPENAI_API_KEY',
+            'ANTHROPIC_API_KEY',
             'OPENAI_COMPATIBLE_API_KEY',
             'CLOUDRU_FOUNDATION_MODELS_API_KEY',
             'TELEGRAM_BOT_TOKEN',

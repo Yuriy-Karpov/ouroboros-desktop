@@ -115,6 +115,35 @@ def _fetch_openai_compatible_model_catalog(
     return models
 
 
+def _fetch_anthropic_model_catalog(api_key: str) -> list[dict[str, str]]:
+    response = requests.get(
+        "https://api.anthropic.com/v1/models",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json()
+    raw_models = data.get("data", []) or []
+
+    models: list[dict[str, str]] = []
+    for item in raw_models:
+        model_id = str(item.get("id", "") or "").strip()
+        if not model_id:
+            continue
+        models.append(
+            _build_model_catalog_entry(
+                "anthropic",
+                "Anthropic",
+                model_id,
+                str(item.get("display_name", "") or item.get("name", "") or "").strip() or model_id,
+            )
+        )
+    return models
+
+
 def _provider_specs(settings: dict) -> list[tuple[str, Callable[[], list[dict[str, str]]]]]:
     specs: list[tuple[str, Callable[[], list[dict[str, str]]]]] = []
 
@@ -133,6 +162,10 @@ def _provider_specs(settings: dict) -> list[tuple[str, Callable[[], list[dict[st
                 "https://api.openai.com/v1",
             ),
         ))
+
+    anthropic_api_key = str(settings.get("ANTHROPIC_API_KEY", "") or "").strip()
+    if anthropic_api_key:
+        specs.append(("anthropic", lambda: _fetch_anthropic_model_catalog(anthropic_api_key)))
 
     compatible_api_key = str(settings.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
     compatible_base_url = str(settings.get("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip()

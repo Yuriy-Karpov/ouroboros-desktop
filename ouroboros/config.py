@@ -16,18 +16,19 @@ from typing import Optional
 
 from ouroboros.compat import pid_lock_acquire as _compat_pid_lock_acquire
 from ouroboros.compat import pid_lock_release as _compat_pid_lock_release
+from ouroboros.provider_models import migrate_model_value
 
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 HOME = pathlib.Path.home()
-APP_ROOT = HOME / "Ouroboros"
-REPO_DIR = APP_ROOT / "repo"
-DATA_DIR = APP_ROOT / "data"
-SETTINGS_PATH = DATA_DIR / "settings.json"
-PID_FILE = APP_ROOT / "ouroboros.pid"
-PORT_FILE = DATA_DIR / "state" / "server_port"
+APP_ROOT = pathlib.Path(os.environ.get("OUROBOROS_APP_ROOT", HOME / "Ouroboros"))
+REPO_DIR = pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", APP_ROOT / "repo"))
+DATA_DIR = pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR", APP_ROOT / "data"))
+SETTINGS_PATH = pathlib.Path(os.environ.get("OUROBOROS_SETTINGS_PATH", DATA_DIR / "settings.json"))
+PID_FILE = pathlib.Path(os.environ.get("OUROBOROS_PID_FILE", APP_ROOT / "ouroboros.pid"))
+PORT_FILE = pathlib.Path(os.environ.get("OUROBOROS_PORT_FILE", DATA_DIR / "state" / "server_port"))
 
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
@@ -92,28 +93,27 @@ SETTINGS_DEFAULTS = {
 }
 
 _VALID_EFFORTS = ("none", "low", "medium", "high")
-_OPENAI_ONLY_REVIEW_RUNS = 3
+_DIRECT_PROVIDER_REVIEW_RUNS = 3
 
 
 def _parse_model_list(value: str) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
-def _migrate_openai_review_model(model: str) -> str:
-    text = str(model or "").strip()
-    if text.startswith("openai/"):
-        return f"openai::{text[len('openai/'):]}"
-    return text
-
-
-def _is_official_openai_only_env() -> bool:
-    return (
-        bool(str(os.environ.get("OPENAI_API_KEY", "") or "").strip())
-        and not bool(str(os.environ.get("OPENROUTER_API_KEY", "") or "").strip())
-        and not bool(str(os.environ.get("OPENAI_BASE_URL", "") or "").strip())
-        and not bool(str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip())
-        and not bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
-    )
+def _exclusive_direct_remote_provider_env() -> str:
+    has_openrouter = bool(str(os.environ.get("OPENROUTER_API_KEY", "") or "").strip())
+    has_openai = bool(str(os.environ.get("OPENAI_API_KEY", "") or "").strip())
+    has_anthropic = bool(str(os.environ.get("ANTHROPIC_API_KEY", "") or "").strip())
+    has_legacy_base = bool(str(os.environ.get("OPENAI_BASE_URL", "") or "").strip())
+    has_compatible = bool(str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip())
+    has_cloudru = bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
+    if has_openrouter or has_legacy_base or has_compatible or has_cloudru:
+        return ""
+    if has_openai and not has_anthropic:
+        return "openai"
+    if has_anthropic and not has_openai:
+        return "anthropic"
+    return ""
 
 
 def resolve_effort(task_type: str) -> str:
@@ -143,16 +143,19 @@ def get_review_models() -> list[str]:
     default_str = SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"]
     models_str = os.environ.get("OUROBOROS_REVIEW_MODELS", default_str) or default_str
     models = _parse_model_list(models_str)
-    if not _is_official_openai_only_env():
+    provider = _exclusive_direct_remote_provider_env()
+    if not provider:
         return models
 
     main_model = str(os.environ.get("OUROBOROS_MODEL", SETTINGS_DEFAULTS["OUROBOROS_MODEL"]) or "").strip()
-    if not main_model.startswith("openai::"):
+    main_model = migrate_model_value(provider, main_model)
+    provider_prefix = f"{provider}::"
+    if not main_model.startswith(provider_prefix):
         return models
 
-    migrated = [_migrate_openai_review_model(model) for model in models]
-    if not migrated or len(migrated) < 2 or any(not model.startswith("openai::") for model in migrated):
-        return [main_model] * _OPENAI_ONLY_REVIEW_RUNS
+    migrated = [migrate_model_value(provider, model) for model in models]
+    if not migrated or len(migrated) < 2 or any(not model.startswith(provider_prefix) for model in migrated):
+        return [main_model] * _DIRECT_PROVIDER_REVIEW_RUNS
     return migrated
 
 
@@ -200,18 +203,52 @@ def _release_settings_lock(fd: Optional[int]) -> None:
         pass
 
 
+def _coerce_setting_value(key: str, value):
+    default = SETTINGS_DEFAULTS.get(key)
+    if isinstance(default, bool):
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(default, int) and not isinstance(default, bool):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, float):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+    return str(value or "")
+
+
 # ---------------------------------------------------------------------------
 # Load / Save
 # ---------------------------------------------------------------------------
 def load_settings() -> dict:
     fd = _acquire_settings_lock()
     try:
+        loaded: dict = {}
         if SETTINGS_PATH.exists():
             try:
-                return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+                raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    loaded = {
+                        key: _coerce_setting_value(key, value) if key in SETTINGS_DEFAULTS else value
+                        for key, value in raw.items()
+                    }
             except Exception:
                 pass
-        return dict(SETTINGS_DEFAULTS)
+        settings = dict(SETTINGS_DEFAULTS)
+        settings.update(loaded)
+        for key in SETTINGS_DEFAULTS:
+            raw_env = os.environ.get(key)
+            if raw_env is None or raw_env == "":
+                continue
+            if key in loaded and settings.get(key) not in {None, ""}:
+                continue
+            settings[key] = _coerce_setting_value(key, raw_env)
+        return settings
     finally:
         _release_settings_lock(fd)
 

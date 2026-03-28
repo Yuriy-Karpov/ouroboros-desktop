@@ -6,6 +6,7 @@ import json
 from typing import Any, Dict, Tuple
 
 from ouroboros.config import SETTINGS_DEFAULTS
+from ouroboros.provider_models import ANTHROPIC_DIRECT_DEFAULTS, OPENAI_DIRECT_DEFAULTS
 
 
 _OPENROUTER_MODEL_DEFAULTS = {
@@ -14,12 +15,8 @@ _OPENROUTER_MODEL_DEFAULTS = {
     "light": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]),
     "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACK"]),
 }
-_OPENAI_MODEL_DEFAULTS = {
-    "main": "openai::gpt-5.2",
-    "code": "openai::gpt-5.2",
-    "light": "openai::gpt-4.1",
-    "fallback": "openai::gpt-4.1",
-}
+_OPENAI_MODEL_DEFAULTS = dict(OPENAI_DIRECT_DEFAULTS)
+_ANTHROPIC_MODEL_DEFAULTS = dict(ANTHROPIC_DIRECT_DEFAULTS)
 _LOCAL_PRESETS: Dict[str, Dict[str, Any]] = {
     "qwen25-7b": {
         "label": "Qwen2.5-7B Instruct Q3_K_M",
@@ -46,11 +43,12 @@ _LOCAL_PRESETS: Dict[str, Dict[str, Any]] = {
 _MODEL_SUGGESTIONS = [
     "anthropic/claude-opus-4.6",
     "anthropic/claude-sonnet-4.6",
+    "anthropic::claude-opus-4-6",
+    "anthropic::claude-sonnet-4-6",
     "google/gemini-3.1-pro-preview",
     "google/gemini-3-flash-preview",
-    "openai/gpt-5.2",
     "openai/gpt-5.4",
-    "openai::gpt-5.2",
+    "openai::gpt-5.4",
     "openai::gpt-4.1",
     "openai-compatible::meta-llama/compatible",
     "cloudru::giga-model",
@@ -81,6 +79,8 @@ def _derive_provider_profile(settings: dict) -> str:
         return "openrouter"
     if _string(settings.get("OPENAI_API_KEY")):
         return "openai"
+    if _string(settings.get("ANTHROPIC_API_KEY")):
+        return "anthropic"
     if _string(settings.get("LOCAL_MODEL_SOURCE")):
         return "local"
     return "openrouter"
@@ -99,7 +99,11 @@ def _derive_local_routing_mode(settings: dict) -> str:
 
 
 def _initial_models(settings: dict, provider_profile: str) -> dict:
-    defaults = _OPENAI_MODEL_DEFAULTS if provider_profile == "openai" else _OPENROUTER_MODEL_DEFAULTS
+    defaults = _OPENROUTER_MODEL_DEFAULTS
+    if provider_profile == "openai":
+        defaults = _OPENAI_MODEL_DEFAULTS
+    elif provider_profile == "anthropic":
+        defaults = _ANTHROPIC_MODEL_DEFAULTS
     return {
         "main": _string(settings.get("OUROBOROS_MODEL")) or defaults["main"],
         "code": _string(settings.get("OUROBOROS_MODEL_CODE")) or defaults["code"],
@@ -134,6 +138,7 @@ def build_onboarding_html(settings: dict) -> str:
         .replace("__INITIAL_STATE__", json.dumps(initial_state, ensure_ascii=True))
         .replace("__OPENROUTER_DEFAULTS__", json.dumps(_OPENROUTER_MODEL_DEFAULTS, ensure_ascii=True))
         .replace("__OPENAI_DEFAULTS__", json.dumps(_OPENAI_MODEL_DEFAULTS, ensure_ascii=True))
+        .replace("__ANTHROPIC_DEFAULTS__", json.dumps(_ANTHROPIC_MODEL_DEFAULTS, ensure_ascii=True))
         .replace("__LOCAL_PRESETS__", json.dumps(_LOCAL_PRESETS, ensure_ascii=True))
         .replace("__MODEL_SUGGESTIONS__", json.dumps(_MODEL_SUGGESTIONS, ensure_ascii=True))
     )
@@ -156,8 +161,8 @@ def prepare_onboarding_settings(data: dict, current_settings: dict) -> Tuple[dic
         return {}, "Anthropic API key looks too short."
 
     has_local = bool(local_source)
-    if not openrouter_key and not openai_key and not has_local:
-        return {}, "Configure OpenRouter, OpenAI, or a local model before continuing."
+    if not openrouter_key and not openai_key and not anthropic_key and not has_local:
+        return {}, "Configure OpenRouter, OpenAI, Anthropic, or a local model before continuing."
 
     if has_local and "/" in local_source and not local_source.startswith(("/", "~")) and not local_filename:
         return {}, "Local HuggingFace sources need a GGUF filename."
@@ -572,6 +577,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
     const MODEL_DEFAULTS = {
       openrouter: __OPENROUTER_DEFAULTS__,
       openai: __OPENAI_DEFAULTS__,
+      anthropic: __ANTHROPIC_DEFAULTS__,
       local: __OPENROUTER_DEFAULTS__,
     };
     const LOCAL_PRESETS = __LOCAL_PRESETS__;
@@ -585,13 +591,13 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       },
       models: {
         title: "Confirm every lane",
-        copy: "This step is mandatory. Visible defaults prevent the old trap where OpenAI-only setups silently kept Anthropic or OpenRouter-shaped model values.",
-        footer: "Keep the defaults if they match your plan, or edit any lane now. Plain openai/... still means OpenRouter-style routing; official OpenAI is openai::..."
+        copy: "This step is mandatory. Visible defaults prevent the old trap where direct-provider setups silently kept OpenRouter-shaped model values.",
+        footer: "Keep the defaults if they match your plan, or edit any lane now. Plain openai/... or anthropic/... still means OpenRouter-style routing; direct providers use openai::... and anthropic::..."
       },
       runtime: {
         title: "Optional runtime details",
-        copy: "Adjust budget, local model tuning, and optional Anthropic support. Skip this step if the defaults already look right.",
-        footer: "Anthropic stays optional here because it is not required for the main desktop runtime path."
+        copy: "Adjust budget and local model tuning. Skip this step if the defaults already look right.",
+        footer: "Provider keys and lane routing are already locked in from the earlier steps."
       },
       summary: {
         title: "Review before launch",
@@ -615,7 +621,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function hasCloudProvider() {
-      return trim(state.openrouterKey).length >= 10 || trim(state.openaiKey).length >= 10;
+      return trim(state.openrouterKey).length >= 10 || trim(state.openaiKey).length >= 10 || trim(state.anthropicKey).length >= 10;
     }
 
     function hasLocalModel() {
@@ -660,17 +666,45 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       }
     }
 
-    function inferProviderProfile() {
+    function hasProfileAccess(profile) {
+      if (profile === "openrouter") {
+        return trim(state.openrouterKey).length >= 10;
+      }
+      if (profile === "openai") {
+        return trim(state.openaiKey).length >= 10;
+      }
+      if (profile === "anthropic") {
+        return trim(state.anthropicKey).length >= 10;
+      }
+      if (profile === "local") {
+        return hasLocalModel();
+      }
+      return false;
+    }
+
+    function detectProviderProfile() {
       if (trim(state.openrouterKey).length >= 10) {
         return "openrouter";
       }
       if (trim(state.openaiKey).length >= 10) {
         return "openai";
       }
+      if (trim(state.anthropicKey).length >= 10) {
+        return "anthropic";
+      }
       if (hasLocalModel()) {
         return "local";
       }
-      return state.providerProfile || "openrouter";
+      return "openrouter";
+    }
+
+    function inferProviderProfile() {
+      const selected = trim(state.providerProfile);
+      const nothingConfigured = !hasCloudProvider() && !hasLocalModel();
+      if (selected && (hasProfileAccess(selected) || nothingConfigured)) {
+        return selected;
+      }
+      return detectProviderProfile();
     }
 
     function applyModelDefaults(force) {
@@ -704,16 +738,20 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
     function validateProvidersStep() {
       const hasOpenRouter = trim(state.openrouterKey).length >= 10;
       const hasOpenAI = trim(state.openaiKey).length >= 10;
+      const hasAnthropic = trim(state.anthropicKey).length >= 10;
       const localSource = trim(state.localSource);
       const localFilename = trim(state.localFilename);
-      if (!hasOpenRouter && !hasOpenAI && !localSource) {
-        return "Add OpenRouter, OpenAI, or a local model before continuing.";
+      if (!hasOpenRouter && !hasOpenAI && !hasAnthropic && !localSource) {
+        return "Add OpenRouter, OpenAI, Anthropic, or a local model before continuing.";
       }
       if (trim(state.openrouterKey) && trim(state.openrouterKey).length < 10) {
         return "OpenRouter API key looks too short.";
       }
       if (trim(state.openaiKey) && trim(state.openaiKey).length < 10) {
         return "OpenAI API key looks too short.";
+      }
+      if (trim(state.anthropicKey) && trim(state.anthropicKey).length < 10) {
+        return "Anthropic API key looks too short.";
       }
       if (localSource && localSource.includes("/") && !isLocalFilesystemSource(localSource) && !localFilename) {
         return "HuggingFace local sources need a GGUF filename.";
@@ -729,9 +767,6 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function validateRuntimeStep() {
-      if (trim(state.anthropicKey) && trim(state.anthropicKey).length < 10) {
-        return "Anthropic API key looks too short.";
-      }
       if (!Number.isFinite(Number(state.budget)) || Number(state.budget) <= 0) {
         return "Budget must be greater than zero.";
       }
@@ -788,7 +823,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       const providers = [];
       if (trim(state.openrouterKey)) providers.push("OpenRouter");
       if (trim(state.openaiKey)) providers.push("OpenAI");
-      if (trim(state.anthropicKey)) providers.push("Anthropic (advanced)");
+      if (trim(state.anthropicKey)) providers.push("Anthropic");
       if (hasLocalModel()) providers.push("Local model");
       const localRoute = hasLocalModel()
         ? (state.localRoutingMode === "all" ? "all lanes local" : state.localRoutingMode === "fallback" ? "fallback lane local" : "cloud lanes only")
@@ -838,7 +873,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
             <input id="local-chat-format" value="${escapeHtml(state.localChatFormat)}" placeholder="Leave empty for auto-detect">
           </div>
         </div>
-      ` : `<div class="empty-state">No local model is configured yet, so the optional runtime section only needs budget and advanced Anthropic details.</div>`;
+      ` : `<div class="empty-state">No local model is configured yet, so the optional runtime section only needs budget confirmation.</div>`;
       const providersStep = `
         <div class="step-header">
           <div>
@@ -848,13 +883,14 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
           <div class="pill-row">
             <button class="preset-pill ${providerProfile === "openrouter" ? "active" : ""}" data-profile="openrouter" type="button">OpenRouter default</button>
             <button class="preset-pill ${providerProfile === "openai" ? "active" : ""}" data-profile="openai" type="button">OpenAI only</button>
+            <button class="preset-pill ${providerProfile === "anthropic" ? "active" : ""}" data-profile="anthropic" type="button">Anthropic only</button>
             <button class="preset-pill ${providerProfile === "local" ? "active" : ""}" data-profile="local" type="button">Local-first</button>
           </div>
         </div>
         <div class="grid two">
           <div class="panel-card">
             <h3>Cloud providers</h3>
-            <p>Paste every key you want to configure now. OpenRouter remains the broadest multi-provider router. OpenAI-only mode uses official <code>openai::...</code> model values on the next step.</p>
+            <p>Paste every key you want to configure now. OpenRouter remains the broadest multi-provider router. Direct OpenAI and direct Anthropic profiles prefill official <code>openai::...</code> and <code>anthropic::...</code> lanes on the next step.</p>
           </div>
           <div class="panel-card">
             <h3>Local model</h3>
@@ -876,7 +912,15 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
               <button class="field-clear" data-clear="openai-key" type="button">Clear</button>
             </div>
             <input id="openai-key" type="password" placeholder="sk-..." value="${escapeHtml(state.openaiKey)}">
-            <div class="field-note">Official OpenAI runtime. The next step will visibly prefill <code>openai::...</code> lanes when this is the only cloud provider.</div>
+            <div class="field-note">Official OpenAI runtime. The next step visibly prefills <code>openai::...</code> lanes when this is the only direct cloud provider.</div>
+          </div>
+          <div class="field">
+            <div class="field-label-row">
+              <label for="anthropic-key">Anthropic API Key</label>
+              <button class="field-clear" data-clear="anthropic-key" type="button">Clear</button>
+            </div>
+            <input id="anthropic-key" type="password" placeholder="sk-ant-..." value="${escapeHtml(state.anthropicKey)}">
+            <div class="field-note">Official Anthropic runtime and Claude tooling support. The next step prefills direct <code>anthropic::...</code> lanes when this is the only direct cloud provider.</div>
           </div>
           <div class="field">
             <div class="field-label-row">
@@ -925,11 +969,12 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
           <div class="pill-row">
             <button class="preset-pill ${providerProfile === "openrouter" ? "active" : ""}" data-profile="openrouter" type="button">Apply OpenRouter defaults</button>
             <button class="preset-pill ${providerProfile === "openai" ? "active" : ""}" data-profile="openai" type="button">Apply OpenAI defaults</button>
+            <button class="preset-pill ${providerProfile === "anthropic" ? "active" : ""}" data-profile="anthropic" type="button">Apply Anthropic defaults</button>
           </div>
         </div>
         <div class="panel-card">
           <h3>Current profile</h3>
-          <p>${providerProfile === "openai" ? "OpenAI-only mode detected. These defaults are explicit and official." : providerProfile === "local" ? "Local-first mode detected. The values below are still visible for clarity; local routing is selected separately." : "OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.2 continue to route through OpenRouter."}</p>
+          <p>${providerProfile === "openai" ? "OpenAI-only mode detected. These defaults are explicit and official." : providerProfile === "anthropic" ? "Anthropic-only mode detected. These defaults are explicit and official." : providerProfile === "local" ? "Local-first mode detected. The values below are still visible for clarity; local routing is selected separately." : "OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.4 or anthropic/claude-sonnet-4.6 continue to route through OpenRouter."}</p>
         </div>
         <div class="panel-card">
           <h3>Local routing</h3>
@@ -962,7 +1007,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="field-note">Fallback and resilience path.</div>
           </div>
         </div>
-        <div class="inline-note">Official OpenAI is written as <code>openai::gpt-5.2</code>. Plain <code>openai/gpt-5.2</code> stays OpenRouter-style by design.</div>
+        <div class="inline-note">Direct providers use <code>openai::gpt-5.4</code> and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays OpenRouter-style by design.</div>
         <datalist id="model-suggestions">${suggestionOptions}</datalist>
       `;
       const runtimeStep = `
@@ -982,15 +1027,8 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
           </div>
           <div class="panel-card">
-            <h3>Anthropic (optional)</h3>
-            <p>This remains advanced and optional in onboarding. It is useful for existing Claude Code flows but not required for the main desktop runtime.</p>
-            <div class="field" style="margin-top: 14px;">
-              <div class="field-label-row">
-                <label for="anthropic-key">Anthropic API Key</label>
-                <button class="field-clear" data-clear="anthropic-key" type="button">Clear</button>
-              </div>
-              <input id="anthropic-key" type="password" placeholder="sk-ant-..." value="${escapeHtml(state.anthropicKey)}">
-            </div>
+            <h3>Provider snapshot</h3>
+            <p>Keys and lane routing are already locked in. This step is only for budget and optional local runtime tuning.</p>
           </div>
         </div>
         ${localAdvanced}
@@ -1040,7 +1078,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
           <div class="wizard-header">
             <div>
               <h1 class="wizard-title">Ouroboros</h1>
-              <p class="wizard-subtitle">Desktop-first onboarding with explicit provider semantics, visible model defaults, and a stable path for OpenAI-only, OpenRouter, and local-first setups.</p>
+              <p class="wizard-subtitle">Desktop-first onboarding with explicit provider semantics, visible model defaults, and a stable path for OpenAI-only, Anthropic-only, OpenRouter, and local-first setups.</p>
             </div>
             <div class="wizard-badge">Step ${idx + 1} of ${STEP_ORDER.length}</div>
           </div>
@@ -1087,12 +1125,14 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
     function bindProviderStep() {
       const openrouterInput = document.getElementById("openrouter-key");
       const openaiInput = document.getElementById("openai-key");
+      const anthropicInput = document.getElementById("anthropic-key");
       const localPreset = document.getElementById("local-preset");
       const localSource = document.getElementById("local-source");
       const localFilename = document.getElementById("local-filename");
       const budget = document.getElementById("budget");
       openrouterInput.addEventListener("input", () => { state.openrouterKey = openrouterInput.value; state.error = ""; });
       openaiInput.addEventListener("input", () => { state.openaiKey = openaiInput.value; state.error = ""; });
+      anthropicInput.addEventListener("input", () => { state.anthropicKey = anthropicInput.value; state.error = ""; });
       localPreset.addEventListener("change", () => { applyPresetSelection(localPreset.value); state.error = ""; render(); });
       localSource.addEventListener("input", () => { state.localSource = localSource.value; state.localPreset = state.localPreset || "custom"; state.error = ""; });
       localFilename.addEventListener("input", () => { state.localFilename = localFilename.value; state.localPreset = state.localPreset || "custom"; state.error = ""; });
@@ -1134,8 +1174,6 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
         state.budget = event.target.value;
         state.error = "";
       });
-      const anthropic = document.getElementById("anthropic-key");
-      anthropic.addEventListener("input", () => { state.anthropicKey = anthropic.value; state.error = ""; });
       if (document.getElementById("local-context")) {
         document.getElementById("local-context").addEventListener("input", (event) => {
           state.localContextLength = event.target.value;

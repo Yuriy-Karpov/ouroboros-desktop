@@ -102,6 +102,9 @@ class TestInferApiKeyType:
     def test_openai_double_colon_is_official_openai(self):
         assert infer_api_key_type("openai::gpt-5.2") == "openai"
 
+    def test_anthropic_double_colon_is_direct_anthropic(self):
+        assert infer_api_key_type("anthropic::claude-sonnet-4-6") == "anthropic"
+
     def test_unknown_defaults_openrouter(self):
         assert infer_api_key_type("some-random-model") == "openrouter"
 
@@ -121,6 +124,10 @@ class TestInferModelCategory:
     def test_matches_openai_double_colon_against_resolved_usage_name(self):
         with patch.dict(os.environ, {"OUROBOROS_MODEL": "openai::gpt-5.2"}):
             assert infer_model_category("openai/gpt-5.2") == "main"
+
+    def test_matches_anthropic_double_colon_against_normalized_usage_name(self):
+        with patch.dict(os.environ, {"OUROBOROS_MODEL": "anthropic::claude-sonnet-4.6"}):
+            assert infer_model_category("anthropic/claude-sonnet-4-6") == "main"
 
     def test_no_match_returns_other(self):
         with patch.dict(os.environ, {}, clear=True):

@@ -36,6 +36,13 @@ _call_llm_with_retry = call_llm_with_retry
 log = logging.getLogger(__name__)
 
 
+def _provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
+    detail = " ".join(str(accumulated_usage.get("_last_llm_error") or "").split()).strip()
+    if not detail:
+        return ""
+    return f" Last provider error: {detail}"
+
+
 def _handle_text_response(
     content: Optional[str],
     llm_trace: Dict[str, Any],
@@ -373,7 +380,7 @@ def run_llm_loop(
                     local_tag = " (local)" if active_use_local else ""
                     return (
                         f"⚠️ Failed to get a response from model {active_model}{local_tag} after {max_retries} attempts. "
-                        f"No viable fallback model configured. "
+                        f"No viable fallback model configured.{_provider_failure_hint(accumulated_usage)} "
                         f"If background consciousness is running, it will retry when the provider recovers."
                     ), accumulated_usage, llm_trace
 
@@ -390,7 +397,7 @@ def run_llm_loop(
                 if msg is None:
                     return (
                         f"⚠️ All models are down. Primary ({active_model}{primary_tag}) and fallback ({fallback_model}{fallback_tag}) "
-                        f"both returned no response. Stopping. "
+                        f"both returned no response. Stopping.{_provider_failure_hint(accumulated_usage)} "
                         f"Background consciousness will attempt recovery when the provider is back."
                     ), accumulated_usage, llm_trace
 

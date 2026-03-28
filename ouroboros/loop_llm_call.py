@@ -35,6 +35,15 @@ def _emit_live_log(event_queue: Optional[queue.Queue], payload: Dict[str, Any]) 
         log.debug("Failed to emit live LLM log event", exc_info=True)
 
 
+def _short_error_text(value: Any, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
 def call_llm_with_retry(
     llm: LLMClient,
     messages: List[Dict[str, Any]],
@@ -78,7 +87,7 @@ def call_llm_with_retry(
                 kwargs["tools"] = tools
             resp_msg, usage = llm.chat(**kwargs)
             msg = resp_msg
-            add_usage(accumulated_usage, usage)
+            accumulated_usage.pop("_last_llm_error", None)
 
             cost = float(usage.get("cost") or 0)
             display_model = str(usage.get("resolved_model") or model)
@@ -94,6 +103,8 @@ def call_llm_with_retry(
                     int(usage.get("cached_tokens") or 0),
                     int(usage.get("cache_write_tokens") or 0),
                 )
+            usage["cost"] = cost
+            add_usage(accumulated_usage, usage)
 
             category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
             emit_llm_usage_event(
@@ -138,6 +149,7 @@ def call_llm_with_retry(
                     "raw_tool_calls": repr(tool_calls)[:500] if tool_calls else None,
                     "finish_reason": finish_reason,
                 })
+                accumulated_usage["_last_llm_error"] = _short_error_text(log_msg)
 
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -197,6 +209,7 @@ def call_llm_with_retry(
                 "round": round_idx, "attempt": attempt + 1,
                 "model": model, "error": repr(e),
             })
+            accumulated_usage["_last_llm_error"] = _short_error_text(repr(e))
             if isinstance(e, LocalContextTooLargeError):
                 append_jsonl(drive_logs / "events.jsonl", {
                     "ts": utc_now_iso(),

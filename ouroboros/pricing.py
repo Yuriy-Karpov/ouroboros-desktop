@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import logging
 
+from ouroboros.provider_models import normalize_model_identity
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -21,9 +22,11 @@ log = logging.getLogger(__name__)
 # Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
 MODEL_PRICING_STATIC = {
     "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
+    "anthropic/claude-opus-4-6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),
+    "anthropic/claude-sonnet-4-6": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.5": (3.0, 0.30, 15.0),
     "openai/o3": (2.0, 0.50, 8.0),
     "openai/o3-pro": (20.0, 1.0, 80.0),
@@ -112,14 +115,7 @@ def _normalize_model_name(model: str) -> str:
 
 
 def _normalize_model_identity(model: str) -> str:
-    normalized = _normalize_model_name(model)
-    if normalized.startswith("openai::"):
-        return f"openai/{normalized[len('openai::'):]}"
-    if normalized.startswith("openai-compatible::"):
-        return f"openai-compatible/{normalized[len('openai-compatible::'):]}"
-    if normalized.startswith("cloudru::"):
-        return f"cloudru/{normalized[len('cloudru::'):]}"
-    return normalized
+    return normalize_model_identity(_normalize_model_name(model))
 
 
 def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
@@ -130,6 +126,8 @@ def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
     raw_model = _normalize_model_name(model)
     if raw_model.startswith("openai::"):
         return "openai"
+    if raw_model.startswith("anthropic::"):
+        return "anthropic"
     if raw_model.startswith("openai-compatible::"):
         return "openai-compatible"
     if raw_model.startswith("cloudru::"):
