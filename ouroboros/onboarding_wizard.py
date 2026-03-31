@@ -49,7 +49,7 @@ _MODEL_SUGGESTIONS = [
     "google/gemini-3-flash-preview",
     "openai/gpt-5.4",
     "openai::gpt-5.4",
-    "openai::gpt-4.1",
+    "openai::gpt-5.4-mini",
     "openai-compatible::meta-llama/compatible",
     "cloudru::giga-model",
 ]
@@ -582,22 +582,17 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
     };
     const LOCAL_PRESETS = __LOCAL_PRESETS__;
     const MODEL_SUGGESTIONS = __MODEL_SUGGESTIONS__;
-    const STEP_ORDER = ["providers", "models", "runtime", "summary"];
+    const STEP_ORDER = ["providers", "models", "summary"];
     const STEP_META = {
       providers: {
-        title: "Connect providers",
-        copy: "Add every key you want to use now. You can continue only after at least one runnable provider or local model is configured.",
-        footer: "Ultra-fast path: choose a profile, paste one key, then confirm visible model defaults on the next step."
+        title: "Choose a setup path",
+        copy: "Pick the path you want now, then fill only the fields that matter for that path. You can switch paths at any time before launch.",
+        footer: "Choose one path, configure it fully, then review the visible defaults before launch."
       },
       models: {
-        title: "Confirm every lane",
-        copy: "This step is mandatory. Visible defaults prevent the old trap where direct-provider setups silently kept OpenRouter-shaped model values.",
-        footer: "Keep the defaults if they match your plan, or edit any lane now. Plain openai/... or anthropic/... still means OpenRouter-style routing; direct providers use openai::... and anthropic::..."
-      },
-      runtime: {
-        title: "Optional runtime details",
-        copy: "Adjust budget and local model tuning. Skip this step if the defaults already look right.",
-        footer: "Provider keys and lane routing are already locked in from the earlier steps."
+        title: "Review model lanes",
+        copy: "Check the visible defaults for the selected path, then edit any lane you want before launch.",
+        footer: "Plain openai/... or anthropic/... stays OpenRouter-style. Direct providers use openai::... and anthropic::..."
       },
       summary: {
         title: "Review before launch",
@@ -640,9 +635,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
         state.localFilename = "";
         state.localContextLength = 16384;
         state.localChatFormat = "";
-        if (!hasCloudProvider()) {
-          state.localRoutingMode = "cloud";
-        }
+        state.localRoutingMode = "cloud";
         return;
       }
       if (presetId === "custom") {
@@ -659,27 +652,11 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       state.localFilename = preset.filename;
       state.localContextLength = preset.context_length;
       state.localChatFormat = preset.chat_format || "";
-      if (state.providerProfile === "local") {
+      if (activeProviderProfile() === "local") {
         state.localRoutingMode = "all";
       } else if (state.localRoutingMode === "cloud") {
         state.localRoutingMode = "fallback";
       }
-    }
-
-    function hasProfileAccess(profile) {
-      if (profile === "openrouter") {
-        return trim(state.openrouterKey).length >= 10;
-      }
-      if (profile === "openai") {
-        return trim(state.openaiKey).length >= 10;
-      }
-      if (profile === "anthropic") {
-        return trim(state.anthropicKey).length >= 10;
-      }
-      if (profile === "local") {
-        return hasLocalModel();
-      }
-      return false;
     }
 
     function detectProviderProfile() {
@@ -698,20 +675,33 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       return "openrouter";
     }
 
-    function inferProviderProfile() {
-      const selected = trim(state.providerProfile);
-      const nothingConfigured = !hasCloudProvider() && !hasLocalModel();
-      if (selected && (hasProfileAccess(selected) || nothingConfigured)) {
-        return selected;
-      }
-      return detectProviderProfile();
+    function activeProviderProfile() {
+      return trim(state.providerProfile) || detectProviderProfile();
+    }
+
+    function profileLabel(profile) {
+      if (profile === "openai") return "OpenAI";
+      if (profile === "anthropic") return "Anthropic";
+      if (profile === "local") return "Local-first";
+      return "OpenRouter";
+    }
+
+    function nextButtonShouldBeDisabled() {
+      if (state.saving) return true;
+      if (state.currentStep === "summary") return false;
+      return Boolean(validateCurrentStep());
+    }
+
+    function syncCurrentStepActionState() {
+      const next = document.getElementById("next-btn");
+      if (next) next.disabled = nextButtonShouldBeDisabled();
     }
 
     function applyModelDefaults(force) {
       if (state.modelsDirty && !force) {
         return;
       }
-      const profile = inferProviderProfile();
+      const profile = activeProviderProfile();
       state.providerProfile = profile;
       const defaults = MODEL_DEFAULTS[profile] || MODEL_DEFAULTS.openrouter;
       state.mainModel = defaults.main;
@@ -736,25 +726,38 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function validateProvidersStep() {
-      const hasOpenRouter = trim(state.openrouterKey).length >= 10;
-      const hasOpenAI = trim(state.openaiKey).length >= 10;
-      const hasAnthropic = trim(state.anthropicKey).length >= 10;
+      const profile = activeProviderProfile();
+      const openrouterKey = trim(state.openrouterKey);
+      const openaiKey = trim(state.openaiKey);
+      const anthropicKey = trim(state.anthropicKey);
       const localSource = trim(state.localSource);
       const localFilename = trim(state.localFilename);
-      if (!hasOpenRouter && !hasOpenAI && !hasAnthropic && !localSource) {
-        return "Add OpenRouter, OpenAI, Anthropic, or a local model before continuing.";
+      if (profile === "openrouter") {
+        if (!openrouterKey) return "Paste an OpenRouter API key to continue.";
+        if (openrouterKey.length < 10) return "OpenRouter API key looks too short.";
       }
-      if (trim(state.openrouterKey) && trim(state.openrouterKey).length < 10) {
-        return "OpenRouter API key looks too short.";
+      if (profile === "openai") {
+        if (!openaiKey) return "Paste an OpenAI API key to continue.";
+        if (openaiKey.length < 10) return "OpenAI API key looks too short.";
       }
-      if (trim(state.openaiKey) && trim(state.openaiKey).length < 10) {
-        return "OpenAI API key looks too short.";
+      if (profile === "anthropic") {
+        if (!anthropicKey) return "Paste an Anthropic API key to continue.";
+        if (anthropicKey.length < 10) return "Anthropic API key looks too short.";
       }
-      if (trim(state.anthropicKey) && trim(state.anthropicKey).length < 10) {
-        return "Anthropic API key looks too short.";
+      if (profile === "local") {
+        if (!localSource) return "Choose a local preset or enter a local model source to continue.";
+        if (localSource.includes("/") && !isLocalFilesystemSource(localSource) && !localFilename) {
+          return "Local HuggingFace sources need a GGUF filename.";
+        }
+        if (!Number.isInteger(Number(state.localContextLength)) || Number(state.localContextLength) <= 0) {
+          return "Local context length must be a positive integer.";
+        }
+        if (!Number.isInteger(Number(state.localGpuLayers))) {
+          return "Local GPU layers must be an integer.";
+        }
       }
-      if (localSource && localSource.includes("/") && !isLocalFilesystemSource(localSource) && !localFilename) {
-        return "HuggingFace local sources need a GGUF filename.";
+      if (!Number.isFinite(Number(state.budget)) || Number(state.budget) <= 0) {
+        return "Budget must be greater than zero.";
       }
       return "";
     }
@@ -766,28 +769,12 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       return "";
     }
 
-    function validateRuntimeStep() {
-      if (!Number.isFinite(Number(state.budget)) || Number(state.budget) <= 0) {
-        return "Budget must be greater than zero.";
-      }
-      if (hasLocalModel() && (!Number.isInteger(Number(state.localContextLength)) || Number(state.localContextLength) <= 0)) {
-        return "Local context length must be a positive integer.";
-      }
-      if (!Number.isInteger(Number(state.localGpuLayers))) {
-        return "Local GPU layers must be an integer.";
-      }
-      return "";
-    }
-
     function validateCurrentStep() {
       if (state.currentStep === "providers") {
         return validateProvidersStep();
       }
       if (state.currentStep === "models") {
         return validateModelsStep();
-      }
-      if (state.currentStep === "runtime") {
-        return validateRuntimeStep();
       }
       return "";
     }
@@ -820,32 +807,42 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function summaryRows() {
-      const providers = [];
-      if (trim(state.openrouterKey)) providers.push("OpenRouter");
-      if (trim(state.openaiKey)) providers.push("OpenAI");
-      if (trim(state.anthropicKey)) providers.push("Anthropic");
-      if (hasLocalModel()) providers.push("Local model");
-      const localRoute = hasLocalModel()
-        ? (state.localRoutingMode === "all" ? "all lanes local" : state.localRoutingMode === "fallback" ? "fallback lane local" : "cloud lanes only")
-        : "disabled";
-      const localSourceLabel = hasLocalModel()
-        ? `${trim(state.localSource)}${trim(state.localFilename) ? " / " + trim(state.localFilename) : ""}`
-        : "not configured";
-      return [
-        ["Providers", providers.length ? providers.join(", ") : "none"],
+      const selectedProfile = activeProviderProfile();
+      const rows = [
+        ["Setup path", profileLabel(selectedProfile)],
         ["Main", trim(state.mainModel)],
         ["Code", trim(state.codeModel)],
         ["Light", trim(state.lightModel)],
         ["Fallback", trim(state.fallbackModel)],
-        ["Local routing", localRoute],
-        ["Local source", localSourceLabel],
         ["Budget", `$${Number(state.budget || 0).toFixed(2)}`],
       ];
+      if (selectedProfile === "openrouter") {
+        rows.splice(1, 0, ["OpenRouter", trim(state.openrouterKey) ? "configured" : "missing"]);
+      }
+      if (selectedProfile === "openai") {
+        rows.splice(1, 0, ["OpenAI", trim(state.openaiKey) ? "configured" : "missing"]);
+      }
+      if (selectedProfile === "anthropic") {
+        rows.splice(1, 0, ["Anthropic", trim(state.anthropicKey) ? "configured" : "missing"]);
+      }
+      if (selectedProfile === "local") {
+        const localRoute = hasLocalModel()
+        ? (state.localRoutingMode === "all" ? "all lanes local" : state.localRoutingMode === "fallback" ? "fallback lane local" : "cloud lanes only")
+        : "disabled";
+        const localSourceLabel = hasLocalModel()
+          ? `${trim(state.localSource)}${trim(state.localFilename) ? " / " + trim(state.localFilename) : ""}`
+          : "not configured";
+        rows.splice(1, 0,
+          ["Local source", localSourceLabel],
+          ["Local routing", localRoute],
+        );
+      }
+      return rows;
     }
 
     function renderStepContent() {
       const meta = STEP_META[state.currentStep];
-      const providerProfile = inferProviderProfile();
+      const selectedProfile = activeProviderProfile();
       const suggestionOptions = MODEL_SUGGESTIONS.map((model) => `<option value="${escapeHtml(model)}"></option>`).join("");
       const summary = summaryRows().map(([label, value]) => `
         <div class="summary-kv">
@@ -853,10 +850,10 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
           <span>${escapeHtml(value)}</span>
         </div>
       `).join("");
-      const localAdvanced = hasLocalModel() ? `
+      const localAdvanced = selectedProfile === "local" ? `
         <div class="grid two">
           <div class="field">
-            <div class="field-label-row"><label for="local-context">Local Context Length</label></div>
+            <div class="field-label-row"><label for="local-context">Context Length</label></div>
             <input id="local-context" type="number" min="2048" step="1024" value="${escapeHtml(state.localContextLength)}">
             <div class="field-note">Used when the embedded llama.cpp server starts.</div>
           </div>
@@ -873,7 +870,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
             <input id="local-chat-format" value="${escapeHtml(state.localChatFormat)}" placeholder="Leave empty for auto-detect">
           </div>
         </div>
-      ` : `<div class="empty-state">No local model is configured yet, so the optional runtime section only needs budget confirmation.</div>`;
+      ` : "";
       const providersStep = `
         <div class="step-header">
           <div>
@@ -881,82 +878,103 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
             <p class="step-copy">${escapeHtml(meta.copy)}</p>
           </div>
           <div class="pill-row">
-            <button class="preset-pill ${providerProfile === "openrouter" ? "active" : ""}" data-profile="openrouter" type="button">OpenRouter default</button>
-            <button class="preset-pill ${providerProfile === "openai" ? "active" : ""}" data-profile="openai" type="button">OpenAI only</button>
-            <button class="preset-pill ${providerProfile === "anthropic" ? "active" : ""}" data-profile="anthropic" type="button">Anthropic only</button>
-            <button class="preset-pill ${providerProfile === "local" ? "active" : ""}" data-profile="local" type="button">Local-first</button>
+            <button class="preset-pill ${selectedProfile === "openrouter" ? "active" : ""}" data-profile="openrouter" type="button">OpenRouter</button>
+            <button class="preset-pill ${selectedProfile === "openai" ? "active" : ""}" data-profile="openai" type="button">OpenAI</button>
+            <button class="preset-pill ${selectedProfile === "anthropic" ? "active" : ""}" data-profile="anthropic" type="button">Anthropic</button>
+            <button class="preset-pill ${selectedProfile === "local" ? "active" : ""}" data-profile="local" type="button">Local-first</button>
           </div>
         </div>
-        <div class="grid two">
-          <div class="panel-card">
-            <h3>Cloud providers</h3>
-            <p>Paste every key you want to configure now. OpenRouter remains the broadest multi-provider router. Direct OpenAI and direct Anthropic profiles prefill official <code>openai::...</code> and <code>anthropic::...</code> lanes on the next step.</p>
-          </div>
-          <div class="panel-card">
-            <h3>Local model</h3>
-            <p>You can start with cloud, local, or both. If you configure a local preset now, the next step lets you choose whether it should power only fallback or every lane.</p>
-          </div>
+        <div class="panel-card">
+          <h3>${escapeHtml(profileLabel(selectedProfile))}</h3>
+          <p>${selectedProfile === "openrouter"
+            ? "Best path when you want one router for Anthropic, OpenAI, Google, and other provider families."
+            : selectedProfile === "openai"
+              ? "Official OpenAI runtime with explicit openai:: lane defaults and no local-model fields in the way."
+              : selectedProfile === "anthropic"
+                ? "Official Anthropic runtime with explicit anthropic:: lane defaults and no unrelated provider copy."
+                : "Local-first setup with preset selection, routing mode, and llama.cpp runtime details on the same step."}</p>
         </div>
         <div class="field-grid">
-          <div class="field">
-            <div class="field-label-row">
-              <label for="openrouter-key">OpenRouter API Key</label>
-              <button class="field-clear" data-clear="openrouter-key" type="button">Clear</button>
+          ${selectedProfile === "openrouter" ? `
+            <div class="field" style="grid-column: 1 / -1;">
+              <div class="field-label-row">
+                <label for="openrouter-key">OpenRouter API Key</label>
+                <button class="field-clear" data-clear="openrouter-key" type="button">Clear</button>
+              </div>
+              <input id="openrouter-key" type="password" placeholder="sk-or-v1-..." value="${escapeHtml(state.openrouterKey)}">
+              <div class="field-note">Recommended when you want Anthropic, Google, OpenAI, and others through one router.</div>
             </div>
-            <input id="openrouter-key" type="password" placeholder="sk-or-v1-..." value="${escapeHtml(state.openrouterKey)}">
-            <div class="field-note">Recommended when you want Anthropic, Google, OpenAI, and others through one router.</div>
-          </div>
-          <div class="field">
-            <div class="field-label-row">
-              <label for="openai-key">OpenAI API Key</label>
-              <button class="field-clear" data-clear="openai-key" type="button">Clear</button>
+          ` : ""}
+          ${selectedProfile === "openai" ? `
+            <div class="field" style="grid-column: 1 / -1;">
+              <div class="field-label-row">
+                <label for="openai-key">OpenAI API Key</label>
+                <button class="field-clear" data-clear="openai-key" type="button">Clear</button>
+              </div>
+              <input id="openai-key" type="password" placeholder="sk-..." value="${escapeHtml(state.openaiKey)}">
+              <div class="field-note">Official OpenAI runtime. The next step visibly prefills <code>openai::...</code> lanes.</div>
             </div>
-            <input id="openai-key" type="password" placeholder="sk-..." value="${escapeHtml(state.openaiKey)}">
-            <div class="field-note">Official OpenAI runtime. The next step visibly prefills <code>openai::...</code> lanes when this is the only direct cloud provider.</div>
-          </div>
-          <div class="field">
-            <div class="field-label-row">
-              <label for="anthropic-key">Anthropic API Key</label>
-              <button class="field-clear" data-clear="anthropic-key" type="button">Clear</button>
+          ` : ""}
+          ${selectedProfile === "anthropic" ? `
+            <div class="field" style="grid-column: 1 / -1;">
+              <div class="field-label-row">
+                <label for="anthropic-key">Anthropic API Key</label>
+                <button class="field-clear" data-clear="anthropic-key" type="button">Clear</button>
+              </div>
+              <input id="anthropic-key" type="password" placeholder="sk-ant-..." value="${escapeHtml(state.anthropicKey)}">
+              <div class="field-note">Official Anthropic runtime and Claude tooling support. The next step visibly prefills <code>anthropic::...</code> lanes.</div>
             </div>
-            <input id="anthropic-key" type="password" placeholder="sk-ant-..." value="${escapeHtml(state.anthropicKey)}">
-            <div class="field-note">Official Anthropic runtime and Claude tooling support. The next step prefills direct <code>anthropic::...</code> lanes when this is the only direct cloud provider.</div>
-          </div>
-          <div class="field">
-            <div class="field-label-row">
-              <label for="local-preset">Local Model Preset</label>
-              <button class="field-clear" data-clear="local-preset" type="button">Clear</button>
+          ` : ""}
+          ${selectedProfile === "local" ? `
+            <div class="field">
+              <div class="field-label-row">
+                <label for="local-preset">Local Model Preset</label>
+                <button class="field-clear" data-clear="local-preset" type="button">Clear</button>
+              </div>
+              <select id="local-preset">
+                <option value="" ${state.localPreset === "" ? "selected" : ""}>None</option>
+                <option value="qwen25-7b" ${state.localPreset === "qwen25-7b" ? "selected" : ""}>Qwen2.5-7B Instruct Q3_K_M</option>
+                <option value="qwen3-14b" ${state.localPreset === "qwen3-14b" ? "selected" : ""}>Qwen3-14B Instruct Q4_K_M</option>
+                <option value="qwen3-32b" ${state.localPreset === "qwen3-32b" ? "selected" : ""}>Qwen3-32B Instruct Q4_K_M</option>
+                <option value="custom" ${state.localPreset === "custom" ? "selected" : ""}>Custom source</option>
+              </select>
+              <div class="field-note">Choose a preset or switch to custom source details below.</div>
             </div>
-            <select id="local-preset">
-              <option value="" ${state.localPreset === "" ? "selected" : ""}>None</option>
-              <option value="qwen25-7b" ${state.localPreset === "qwen25-7b" ? "selected" : ""}>Qwen2.5-7B Instruct Q3_K_M</option>
-              <option value="qwen3-14b" ${state.localPreset === "qwen3-14b" ? "selected" : ""}>Qwen3-14B Instruct Q4_K_M</option>
-              <option value="qwen3-32b" ${state.localPreset === "qwen3-32b" ? "selected" : ""}>Qwen3-32B Instruct Q4_K_M</option>
-              <option value="custom" ${state.localPreset === "custom" ? "selected" : ""}>Custom source</option>
-            </select>
-            <div class="field-note">Local models can drive fallback only or all lanes later in this wizard.</div>
-          </div>
+            <div class="field">
+              <div class="field-label-row"><label>Local routing</label></div>
+              <div class="step-chip-row">
+                <button class="mode-pill ${state.localRoutingMode === "cloud" ? "active" : ""}" data-local-mode="cloud" type="button">Cloud only</button>
+                <button class="mode-pill ${state.localRoutingMode === "fallback" ? "active" : ""}" data-local-mode="fallback" type="button">Fallback local</button>
+                <button class="mode-pill ${state.localRoutingMode === "all" ? "active" : ""}" data-local-mode="all" type="button">All lanes local</button>
+              </div>
+              <div class="field-note">Control whether the local model powers only fallback or every lane.</div>
+            </div>
+            <div class="field" style="grid-column: 1 / -1;">
+              <div class="field-label-row">
+                <label for="local-source">Local Source</label>
+                <button class="field-clear" data-clear="local-source" type="button">Clear</button>
+              </div>
+              <input id="local-source" placeholder="Qwen/Qwen2.5-7B-Instruct-GGUF or /absolute/path/model.gguf" value="${escapeHtml(state.localSource)}">
+            </div>
+            <div class="field" style="grid-column: 1 / -1;">
+              <div class="field-label-row">
+                <label for="local-filename">GGUF Filename</label>
+                <button class="field-clear" data-clear="local-filename" type="button">Clear</button>
+              </div>
+              <input id="local-filename" placeholder="qwen2.5-7b-instruct-q3_k_m.gguf" value="${escapeHtml(state.localFilename)}">
+              <div class="field-note">Needed for HuggingFace repo IDs. Leave empty only when the source is an absolute local file path.</div>
+            </div>
+            <div class="field" style="grid-column: 1 / -1;">
+              <h3 style="margin: 0 0 8px; font-size: 14px;">Local runtime details</h3>
+              ${localAdvanced}
+            </div>
+          ` : ""}
           <div class="field">
             <div class="field-label-row">
               <label for="budget">Budget (USD)</label>
             </div>
             <input id="budget" type="number" min="1" step="1" value="${escapeHtml(state.budget)}">
             <div class="field-note">The global task budget can still be changed later in Settings.</div>
-          </div>
-          <div class="field" style="grid-column: 1 / -1;">
-            <div class="field-label-row">
-              <label for="local-source">Local Source</label>
-              <button class="field-clear" data-clear="local-source" type="button">Clear</button>
-            </div>
-            <input id="local-source" placeholder="Qwen/Qwen2.5-7B-Instruct-GGUF or /absolute/path/model.gguf" value="${escapeHtml(state.localSource)}">
-          </div>
-          <div class="field" style="grid-column: 1 / -1;">
-            <div class="field-label-row">
-              <label for="local-filename">GGUF Filename</label>
-              <button class="field-clear" data-clear="local-filename" type="button">Clear</button>
-            </div>
-            <input id="local-filename" placeholder="qwen2.5-7b-instruct-q3_k_m.gguf" value="${escapeHtml(state.localFilename)}">
-            <div class="field-note">Needed for HuggingFace repo IDs. Leave empty only when the source is an absolute local file path.</div>
           </div>
         </div>
       `;
@@ -966,24 +984,10 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
             <h2 class="step-title">${escapeHtml(meta.title)}</h2>
             <p class="step-copy">${escapeHtml(meta.copy)}</p>
           </div>
-          <div class="pill-row">
-            <button class="preset-pill ${providerProfile === "openrouter" ? "active" : ""}" data-profile="openrouter" type="button">Apply OpenRouter defaults</button>
-            <button class="preset-pill ${providerProfile === "openai" ? "active" : ""}" data-profile="openai" type="button">Apply OpenAI defaults</button>
-            <button class="preset-pill ${providerProfile === "anthropic" ? "active" : ""}" data-profile="anthropic" type="button">Apply Anthropic defaults</button>
-          </div>
         </div>
         <div class="panel-card">
           <h3>Current profile</h3>
-          <p>${providerProfile === "openai" ? "OpenAI-only mode detected. These defaults are explicit and official." : providerProfile === "anthropic" ? "Anthropic-only mode detected. These defaults are explicit and official." : providerProfile === "local" ? "Local-first mode detected. The values below are still visible for clarity; local routing is selected separately." : "OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.4 or anthropic/claude-sonnet-4.6 continue to route through OpenRouter."}</p>
-        </div>
-        <div class="panel-card">
-          <h3>Local routing</h3>
-          <p>${hasLocalModel() ? "Choose whether the configured local model should power no lanes, only fallback, or every lane." : "No local model configured. Add one on the previous step if you want local routing choices here."}</p>
-          <div class="step-chip-row" style="margin-top: 12px;">
-            <button class="mode-pill ${state.localRoutingMode === "cloud" ? "active" : ""}" data-local-mode="cloud" type="button" ${hasLocalModel() ? "" : "disabled"}>Cloud only</button>
-            <button class="mode-pill ${state.localRoutingMode === "fallback" ? "active" : ""}" data-local-mode="fallback" type="button" ${hasLocalModel() ? "" : "disabled"}>Fallback local</button>
-            <button class="mode-pill ${state.localRoutingMode === "all" ? "active" : ""}" data-local-mode="all" type="button" ${hasLocalModel() ? "" : "disabled"}>All lanes local</button>
-          </div>
+          <p>${selectedProfile === "openai" ? "OpenAI-only mode selected. These defaults are explicit and official." : selectedProfile === "anthropic" ? "Anthropic-only mode selected. These defaults are explicit and official." : selectedProfile === "local" ? "Local-first mode selected. The local routing choice is already configured, but cloud lane values stay visible here for review." : "OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.4 or anthropic/claude-sonnet-4.6 continue to route through OpenRouter."}</p>
         </div>
         <div class="grid two">
           <div class="field">
@@ -1010,29 +1014,6 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="inline-note">Direct providers use <code>openai::gpt-5.4</code> and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays OpenRouter-style by design.</div>
         <datalist id="model-suggestions">${suggestionOptions}</datalist>
       `;
-      const runtimeStep = `
-        <div class="step-header">
-          <div>
-            <h2 class="step-title">${escapeHtml(meta.title)}</h2>
-            <p class="step-copy">${escapeHtml(meta.copy)}</p>
-          </div>
-        </div>
-        <div class="grid two">
-          <div class="panel-card">
-            <h3>Budget</h3>
-            <p>Keep the launch budget conservative if you want safer first runs on a fresh install.</p>
-            <div class="field" style="margin-top: 14px;">
-              <div class="field-label-row"><label for="runtime-budget">Total Budget</label></div>
-              <input id="runtime-budget" type="number" min="1" step="1" value="${escapeHtml(state.budget)}">
-            </div>
-          </div>
-          <div class="panel-card">
-            <h3>Provider snapshot</h3>
-            <p>Keys and lane routing are already locked in. This step is only for budget and optional local runtime tuning.</p>
-          </div>
-        </div>
-        ${localAdvanced}
-      `;
       const summaryStep = `
         <div class="step-header">
           <div>
@@ -1047,7 +1028,6 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       return {
         providers: providersStep,
         models: modelsStep,
-        runtime: runtimeStep,
         summary: summaryStep,
       }[state.currentStep];
     }
@@ -1072,13 +1052,13 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       const idx = STEP_ORDER.indexOf(state.currentStep);
       const nextLabel = state.currentStep === "summary"
         ? (state.saving ? "Saving..." : "Start Ouroboros")
-        : (state.currentStep === "runtime" ? "Review summary" : "Continue");
+        : (state.currentStep === "models" ? "Review summary" : "Continue");
       root.innerHTML = `
         <div class="wizard-shell">
           <div class="wizard-header">
             <div>
               <h1 class="wizard-title">Ouroboros</h1>
-              <p class="wizard-subtitle">Desktop-first onboarding with explicit provider semantics, visible model defaults, and a stable path for OpenAI-only, Anthropic-only, OpenRouter, and local-first setups.</p>
+              <p class="wizard-subtitle">Desktop-first onboarding with a simpler, reversible setup path selector and visible model defaults before launch.</p>
             </div>
             <div class="wizard-badge">Step ${idx + 1} of ${STEP_ORDER.length}</div>
           </div>
@@ -1089,8 +1069,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
               <div class="footer-copy">${escapeHtml(meta.footer)}</div>
               <div class="footer-actions">
                 <button class="btn secondary" id="back-btn" type="button" ${idx === 0 || state.saving ? "disabled" : ""}>Back</button>
-                ${state.currentStep === "runtime" ? `<button class="btn secondary" id="skip-runtime-btn" type="button" ${state.saving ? "disabled" : ""}>Skip optional step</button>` : ""}
-                <button class="btn primary" id="next-btn" type="button" ${state.saving ? "disabled" : ""}>${escapeHtml(nextLabel)}</button>
+                <button class="btn primary" id="next-btn" type="button" ${nextButtonShouldBeDisabled() ? "disabled" : ""}>${escapeHtml(nextLabel)}</button>
               </div>
             </div>
             <div class="wizard-error">${escapeHtml(state.error)}</div>
@@ -1111,7 +1090,7 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
             state.localPreset = "";
             state.localSource = "";
             state.localFilename = "";
-            state.localRoutingMode = hasCloudProvider() ? "cloud" : "cloud";
+            state.localRoutingMode = "cloud";
           }
           if (target === "local-source") state.localSource = "";
           if (target === "local-filename") state.localFilename = "";
@@ -1129,17 +1108,31 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       const localPreset = document.getElementById("local-preset");
       const localSource = document.getElementById("local-source");
       const localFilename = document.getElementById("local-filename");
+      const localContext = document.getElementById("local-context");
+      const localGpuLayers = document.getElementById("local-gpu-layers");
+      const localChatFormat = document.getElementById("local-chat-format");
       const budget = document.getElementById("budget");
-      openrouterInput.addEventListener("input", () => { state.openrouterKey = openrouterInput.value; state.error = ""; });
-      openaiInput.addEventListener("input", () => { state.openaiKey = openaiInput.value; state.error = ""; });
-      anthropicInput.addEventListener("input", () => { state.anthropicKey = anthropicInput.value; state.error = ""; });
-      localPreset.addEventListener("change", () => { applyPresetSelection(localPreset.value); state.error = ""; render(); });
-      localSource.addEventListener("input", () => { state.localSource = localSource.value; state.localPreset = state.localPreset || "custom"; state.error = ""; });
-      localFilename.addEventListener("input", () => { state.localFilename = localFilename.value; state.localPreset = state.localPreset || "custom"; state.error = ""; });
-      budget.addEventListener("input", () => { state.budget = budget.value; state.error = ""; });
+      if (openrouterInput) openrouterInput.addEventListener("input", () => { state.openrouterKey = openrouterInput.value; state.error = ""; syncCurrentStepActionState(); });
+      if (openaiInput) openaiInput.addEventListener("input", () => { state.openaiKey = openaiInput.value; state.error = ""; syncCurrentStepActionState(); });
+      if (anthropicInput) anthropicInput.addEventListener("input", () => { state.anthropicKey = anthropicInput.value; state.error = ""; syncCurrentStepActionState(); });
+      if (localPreset) localPreset.addEventListener("change", () => { applyPresetSelection(localPreset.value); state.error = ""; render(); });
+      if (localSource) localSource.addEventListener("input", () => { state.localSource = localSource.value; state.localPreset = state.localPreset || "custom"; state.error = ""; syncCurrentStepActionState(); });
+      if (localFilename) localFilename.addEventListener("input", () => { state.localFilename = localFilename.value; state.localPreset = state.localPreset || "custom"; state.error = ""; syncCurrentStepActionState(); });
+      if (localContext) localContext.addEventListener("input", () => { state.localContextLength = localContext.value; state.error = ""; syncCurrentStepActionState(); });
+      if (localGpuLayers) localGpuLayers.addEventListener("input", () => { state.localGpuLayers = localGpuLayers.value; state.error = ""; syncCurrentStepActionState(); });
+      if (localChatFormat) localChatFormat.addEventListener("input", () => { state.localChatFormat = localChatFormat.value; state.error = ""; syncCurrentStepActionState(); });
+      if (budget) budget.addEventListener("input", () => { state.budget = budget.value; state.error = ""; syncCurrentStepActionState(); });
       root.querySelectorAll("[data-profile]").forEach((button) => {
         button.addEventListener("click", () => setProviderProfile(button.getAttribute("data-profile")));
       });
+      root.querySelectorAll("[data-local-mode]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.localRoutingMode = button.getAttribute("data-local-mode");
+          state.error = "";
+          render();
+        });
+      });
+      syncCurrentStepActionState();
     }
 
     function bindModelsStep() {
@@ -1155,50 +1148,17 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
           state[key] = input.value;
           state.modelsDirty = true;
           state.error = "";
+          syncCurrentStepActionState();
         });
       });
-      root.querySelectorAll("[data-profile]").forEach((button) => {
-        button.addEventListener("click", () => setProviderProfile(button.getAttribute("data-profile")));
-      });
-      root.querySelectorAll("[data-local-mode]").forEach((button) => {
-        button.addEventListener("click", () => {
-          state.localRoutingMode = button.getAttribute("data-local-mode");
-          state.error = "";
-          render();
-        });
-      });
-    }
-
-    function bindRuntimeStep() {
-      document.getElementById("runtime-budget").addEventListener("input", (event) => {
-        state.budget = event.target.value;
-        state.error = "";
-      });
-      if (document.getElementById("local-context")) {
-        document.getElementById("local-context").addEventListener("input", (event) => {
-          state.localContextLength = event.target.value;
-          state.error = "";
-        });
-      }
-      if (document.getElementById("local-gpu-layers")) {
-        document.getElementById("local-gpu-layers").addEventListener("input", (event) => {
-          state.localGpuLayers = event.target.value;
-          state.error = "";
-        });
-      }
-      if (document.getElementById("local-chat-format")) {
-        document.getElementById("local-chat-format").addEventListener("input", (event) => {
-          state.localChatFormat = event.target.value;
-          state.error = "";
-        });
-      }
+      syncCurrentStepActionState();
     }
 
     async function saveWizard() {
       const providersError = validateProvidersStep();
       const modelsError = validateModelsStep();
-      const runtimeError = validateRuntimeStep();
-      state.error = providersError || modelsError || runtimeError;
+      const selectedProfile = activeProviderProfile();
+      state.error = providersError || modelsError;
       if (state.error) {
         render();
         return;
@@ -1207,16 +1167,16 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
       state.error = "";
       render();
       const payload = {
-        OPENROUTER_API_KEY: trim(state.openrouterKey),
-        OPENAI_API_KEY: trim(state.openaiKey),
-        ANTHROPIC_API_KEY: trim(state.anthropicKey),
+        OPENROUTER_API_KEY: selectedProfile === "openrouter" ? trim(state.openrouterKey) : "",
+        OPENAI_API_KEY: selectedProfile === "openai" ? trim(state.openaiKey) : "",
+        ANTHROPIC_API_KEY: selectedProfile === "anthropic" ? trim(state.anthropicKey) : "",
         TOTAL_BUDGET: Number(state.budget || 0),
-        LOCAL_MODEL_SOURCE: trim(state.localSource),
-        LOCAL_MODEL_FILENAME: trim(state.localFilename),
-        LOCAL_MODEL_CONTEXT_LENGTH: Number(state.localContextLength || 0),
-        LOCAL_MODEL_N_GPU_LAYERS: Number(state.localGpuLayers || 0),
-        LOCAL_MODEL_CHAT_FORMAT: trim(state.localChatFormat),
-        LOCAL_ROUTING_MODE: state.localRoutingMode,
+        LOCAL_MODEL_SOURCE: selectedProfile === "local" ? trim(state.localSource) : "",
+        LOCAL_MODEL_FILENAME: selectedProfile === "local" ? trim(state.localFilename) : "",
+        LOCAL_MODEL_CONTEXT_LENGTH: selectedProfile === "local" ? Number(state.localContextLength || 0) : 16384,
+        LOCAL_MODEL_N_GPU_LAYERS: selectedProfile === "local" ? Number(state.localGpuLayers || 0) : -1,
+        LOCAL_MODEL_CHAT_FORMAT: selectedProfile === "local" ? trim(state.localChatFormat) : "",
+        LOCAL_ROUTING_MODE: selectedProfile === "local" ? state.localRoutingMode : "cloud",
         OUROBOROS_MODEL: trim(state.mainModel),
         OUROBOROS_MODEL_CODE: trim(state.codeModel),
         OUROBOROS_MODEL_LIGHT: trim(state.lightModel),
@@ -1250,20 +1210,9 @@ _WIZARD_HTML_TEMPLATE = """<!DOCTYPE html>
           }
         });
       }
-      const skipRuntime = document.getElementById("skip-runtime-btn");
-      if (skipRuntime) {
-        skipRuntime.addEventListener("click", () => {
-          const runtimeError = validateRuntimeStep();
-          state.error = runtimeError;
-          if (!runtimeError) {
-            state.currentStep = "summary";
-          }
-          render();
-        });
-      }
       if (state.currentStep === "providers") bindProviderStep();
       if (state.currentStep === "models") bindModelsStep();
-      if (state.currentStep === "runtime") bindRuntimeStep();
+      syncCurrentStepActionState();
     }
 
     applyModelDefaults(false);

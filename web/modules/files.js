@@ -16,6 +16,14 @@ function iconForEntry(entry) {
     return entry.type === 'dir' ? '▸' : '•';
 }
 
+function defaultDirectoryMeta() {
+    return 'Browse folders, preview/edit text files, upload, download, copy, and move files here. This is a file manager, not a chat attachment picker.';
+}
+
+function defaultDirectoryContent() {
+    return 'Open a folder or file from the left panel to browse, preview, or edit its contents.';
+}
+
 export function initFiles({ state: appState, setBeforePageLeave } = {}) {
     const page = document.createElement('div');
     page.id = 'page-files';
@@ -45,14 +53,14 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
             <section class="files-preview">
                 <div class="files-preview-header">
                     <div>
-                        <div id="files-preview-path" class="files-preview-path">Select a file</div>
-                        <div id="files-preview-meta" class="files-preview-meta">Drag files here to upload. Right-click a file for download.</div>
+                        <div id="files-preview-path" class="files-preview-path">Files</div>
+                        <div id="files-preview-meta" class="files-preview-meta">${defaultDirectoryMeta()}</div>
                     </div>
                     <div class="files-preview-actions">
                         <button class="btn btn-primary" id="files-save" hidden disabled>Save</button>
                     </div>
                 </div>
-                <div id="files-preview-content" class="files-preview-content">Choose a directory or file from the left panel.</div>
+                <div id="files-preview-content" class="files-preview-content">${defaultDirectoryContent()}</div>
             </section>
             <div class="files-drop-overlay" aria-hidden="true">
                 <div class="files-drop-card">Drop files to upload into the current folder</div>
@@ -327,11 +335,12 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         listEntries.forEach((entry) => {
             const button = document.createElement('button');
             const selected = state.selectedPath === entry.path;
+            button.type = 'button';
             button.className = `files-entry ${entry.isParentLink ? 'parent-link' : ''} ${selected ? 'selected' : ''}`;
             button.innerHTML = `
                 <span class="files-entry-icon">${iconForEntry(entry)}</span>
                 <span class="files-entry-name">${escapeHtml(entry.name)}</span>
-                <span class="files-entry-meta">${entry.isParentLink ? 'up' : (entry.type === 'file' ? formatFileSize(entry.size) : 'dir')}</span>
+                <span class="files-entry-meta">${entry.isParentLink ? 'up' : (entry.type === 'file' ? formatFileSize(entry.size) : 'open')}</span>
             `;
             button.addEventListener('contextmenu', (event) => {
                 if (entry.isParentLink) return;
@@ -403,8 +412,8 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         if (!state.selectedPath || state.selectedType === 'dir') {
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
-                meta: data.truncated ? 'Directory listing truncated.' : '',
-                content: '',
+                meta: data.truncated ? 'Directory listing truncated.' : defaultDirectoryMeta(),
+                content: defaultDirectoryContent(),
             });
         }
     }

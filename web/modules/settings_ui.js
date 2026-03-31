@@ -39,7 +39,12 @@ function laneCard({ title, copy, inputId, toggleId, defaultValue }) {
                 <label class="local-toggle"><input type="checkbox" id="${toggleId}"> Local</label>
             </div>
             <div class="model-picker" data-model-picker>
-                <input id="${inputId}" list="settings-model-catalog" value="${defaultValue}">
+                <input
+                    id="${inputId}"
+                    value="${defaultValue}"
+                    autocomplete="off"
+                    spellcheck="false"
+                >
                 <div class="model-picker-results" hidden></div>
             </div>
         </div>
@@ -190,7 +195,6 @@ export function renderSettingsPage() {
                             <button type="button" class="settings-ghost-btn" id="btn-refresh-model-catalog">Refresh Model Catalog</button>
                             <span id="settings-model-catalog-status" class="settings-inline-status">Model catalog is optional and failure-tolerant.</span>
                         </div>
-                        <datalist id="settings-model-catalog"></datalist>
                         <div class="settings-lane-grid">
                             ${laneCard({ title: 'Main', copy: 'Primary reasoning lane.', inputId: 's-model', toggleId: 's-local-main', defaultValue: 'anthropic/claude-opus-4.6' })}
                             ${laneCard({ title: 'Code', copy: 'Tool-heavy coding lane.', inputId: 's-model-code', toggleId: 's-local-code', defaultValue: 'anthropic/claude-opus-4.6' })}

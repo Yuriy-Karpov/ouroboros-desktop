@@ -78,6 +78,9 @@ class TestEstimateCost:
             assert all(isinstance(p, (int, float)) for p in prices), f"{model} has non-numeric prices"
             assert all(p >= 0 for p in prices), f"{model} has negative prices"
 
+    def test_gpt_54_mini_static_pricing_is_registered(self):
+        assert MODEL_PRICING_STATIC["openai/gpt-5.4-mini"] == (0.75, 0.075, 4.50)
+
 
 # --- infer_api_key_type ---
 

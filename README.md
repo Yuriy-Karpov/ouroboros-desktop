@@ -35,7 +35,7 @@ Not a coding assistant. A digital being with a constitution, background consciou
   <img src="assets/setup.png" width="500" alt="Drag Ouroboros.app to install">
 </p>
 
-On first launch, right-click → **Open** (Gatekeeper bypass). The desktop wizard is now multi-step: provider keys first, mandatory model confirmation second, runtime summary last. It allows OpenRouter, official OpenAI, and local-model setup from the same flow, refuses to continue if nothing runnable is configured, and applies provider-aware defaults so a single OpenAI key does not leave Anthropic/OpenRouter-only lane values behind. When OpenRouter is absent and the lane models are still untouched defaults, Ouroboros auto-remaps them to official OpenAI defaults. The broader multi-provider setup (OpenAI-compatible, Cloud.ru, Telegram bridge) remains available in **Settings**. Existing supported provider settings skip the wizard automatically.
+On first launch, right-click → **Open** (Gatekeeper bypass). The desktop wizard is now multi-step: choose a setup path first, review visible model lanes second, and confirm the final summary last. It allows OpenRouter, official OpenAI, Anthropic, and local-first setup from the same reversible flow, refuses to continue if the selected path is incomplete, and applies provider-aware defaults so a single OpenAI key does not leave Anthropic/OpenRouter-only lane values behind. When OpenRouter is absent and the lane models are still untouched defaults, Ouroboros auto-remaps them to official OpenAI defaults. The broader multi-provider setup (OpenAI-compatible, Cloud.ru, Telegram bridge) remains available in **Settings**. Existing supported provider settings skip the wizard automatically.
 
 ---
 
@@ -111,12 +111,12 @@ network-exposed runs, set `OUROBOROS_FILE_BROWSER_DEFAULT` to an explicit direct
 Settings now exposes tabbed provider cards for:
 
 - **OpenRouter** — default multi-model router
-- **OpenAI** — official OpenAI API (use model values like `openai::gpt-5.2`)
+- **OpenAI** — official OpenAI API (use model values like `openai::gpt-5.4`)
 - **OpenAI Compatible** — any custom OpenAI-style endpoint (use `openai-compatible::...`)
 - **Cloud.ru Foundation Models** — Cloud.ru OpenAI-compatible runtime (use `cloudru::...`)
 - **Anthropic** — kept for the existing Claude CLI flow, not a separate remote runtime
 
-If OpenRouter is not configured and only official OpenAI is present, untouched default lane values are auto-remapped to `openai::gpt-5.2` / `openai::gpt-4.1` so the desktop first-run path does not strand the app on OpenRouter-only defaults.
+If OpenRouter is not configured and only official OpenAI is present, untouched default lane values are auto-remapped to `openai::gpt-5.4` / `openai::gpt-5.4-mini` so the desktop first-run path does not strand the app on OpenRouter-only defaults.
 
 The Settings page also includes:
 
@@ -369,7 +369,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 4.7.0 | 2026-03-22 | Provider-and-UI overhaul release: add multi-provider model routing (OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru), official-OpenAI auto-default migration plus OpenAI-only review fallback, multi-step onboarding with mandatory model confirmation, desktop-first Settings redesign with searchable model pickers and explicit secret clearing, Telegram bridge with bidirectional text/actions/photos/chat binding, one expandable live task card in Chat, grouped task cards in Logs, and intentional external-symlink full CRUD semantics in the Files tab while preserving explicit network root and root-delete protection. |
+| 4.7.0 | 2026-03-22 | Provider-and-UI overhaul release: add multi-provider model routing (OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru), official-OpenAI auto-default migration plus OpenAI-only review fallback, multi-step onboarding with reversible setup-path selection and visible model review, desktop-first Settings redesign with searchable model pickers and explicit secret clearing, Telegram bridge with bidirectional text/actions/photos/chat binding, one expandable live task card in Chat, grouped task cards in Logs, and intentional external-symlink full CRUD semantics in the Files tab while preserving explicit network root and root-delete protection. |
 | 4.6.0 | 2026-03-22 | Files and network runtime release: add the Web UI Files tab with extracted backend routes, bounded preview/upload behavior, root-delete protection, encoded image preview URLs, and safer path containment; add minimal password gate for non-localhost browser/API access; add source/docker host+port entrypoint support with repo-shaped Docker runtime and explicit file-root configuration for network mode. |
 | 4.5.0 | 2026-03-19 | Context quality and prompt discipline release: fix provenance — system summaries now correctly marked as system, not user, across memory, consolidation, server API, and chat UI (amber system bubbles); restore execution reflections (task_reflections.jsonl) in live LLM context; move Health Invariants to the top of dynamic context block (both task and consciousness paths); task-scope recent progress/tools/events when task_id is available; harden run_shell against literal $VAR env-ref misuse in argv; add Claude CLI first-run retry and structured error classification; full SYSTEM.md editorial rewrite — terminology normalized to 'creator', new Methodology Check / Anti-Reactivity / Diagnostics Discipline / Knowledge Retrieval Triggers sections, stronger Health Invariant reactions, compressed inventory sections. 12 files changed, new regression tests. |
 | 4.4.0 | 2026-03-19 | Safe editing release: `str_replace_editor` tool for surgical edits to existing files, `repo_write` shrink guard blocks accidental truncation of tracked files (>30% shrinkage), full task lifecycle statuses (failed/interrupted/cancelled) with honest status tracking, rescue snapshot discoverability via health invariants, `provider_incomplete_response` classification for OpenRouter glitches, default review enforcement changed to advisory, fix progress bubble opacity and duplicate emoji. |

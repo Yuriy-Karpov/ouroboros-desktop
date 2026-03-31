@@ -5,8 +5,8 @@ from __future__ import annotations
 OPENAI_DIRECT_DEFAULTS = {
     "main": "openai::gpt-5.4",
     "code": "openai::gpt-5.4",
-    "light": "openai::gpt-4.1",
-    "fallback": "openai::gpt-4.1",
+    "light": "openai::gpt-5.4-mini",
+    "fallback": "openai::gpt-5.4-mini",
 }
 
 ANTHROPIC_DIRECT_DEFAULTS = {

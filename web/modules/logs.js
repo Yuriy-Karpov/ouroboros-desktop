@@ -38,6 +38,14 @@ export function initLogs({ ws, state }) {
 
     const filtersDiv = page.querySelector('#log-filters');
     const logEntries = page.querySelector('#log-entries');
+    const logsNavBtn = document.querySelector('.nav-btn[data-page="logs"]');
+
+    function scrollToLatest() {
+        if (state.activePage !== 'logs') return;
+        requestAnimationFrame(() => {
+            logEntries.scrollTop = logEntries.scrollHeight;
+        });
+    }
 
     function updateVisibility(entry) {
         entry.style.display = state.activeFilters[entry.dataset.category] ? '' : 'none';
@@ -53,6 +61,7 @@ export function initLogs({ ws, state }) {
                 state.activeFilters[key] = !state.activeFilters[key];
                 chip.classList.toggle('active');
                 logEntries.querySelectorAll('.log-entry').forEach(updateVisibility);
+                scrollToLatest();
             });
             filtersDiv.appendChild(chip);
         });
@@ -74,19 +83,22 @@ export function initLogs({ ws, state }) {
         return `<div class="log-meta">${meta.map((item) => `<span class="log-pill">${escapeHtml(item)}</span>`).join('')}</div>`;
     }
 
-    function bindRawToggle(entry) {
-        const rawToggle = entry.querySelector('.log-raw-toggle');
-        const rawEl = entry.querySelector('.log-raw');
-        if (!rawToggle || !rawEl) return;
-        rawToggle.addEventListener('click', () => {
-            const isHidden = rawEl.hasAttribute('hidden');
-            if (isHidden) {
-                rawEl.removeAttribute('hidden');
-                rawToggle.textContent = 'Hide raw';
-            } else {
-                rawEl.setAttribute('hidden', '');
-                rawToggle.textContent = 'Raw';
-            }
+    function bindRawToggle(root) {
+        root.querySelectorAll('.log-raw-toggle').forEach((rawToggle) => {
+            if (rawToggle.dataset.bound === '1') return;
+            const rawEl = rawToggle.parentElement?.nextElementSibling;
+            if (!rawEl || !rawEl.classList.contains('log-raw')) return;
+            rawToggle.dataset.bound = '1';
+            rawToggle.addEventListener('click', () => {
+                const isHidden = rawEl.hasAttribute('hidden');
+                if (isHidden) {
+                    rawEl.removeAttribute('hidden');
+                    rawToggle.textContent = 'Hide raw';
+                } else {
+                    rawEl.setAttribute('hidden', '');
+                    rawToggle.textContent = 'Raw';
+                }
+            });
         });
     }
 
@@ -153,7 +165,7 @@ export function initLogs({ ws, state }) {
         }
 
         trimEntries();
-        if (state.activeFilters[cat]) logEntries.scrollTop = logEntries.scrollHeight;
+        if (state.activeFilters[cat]) scrollToLatest();
     }
 
     function createTaskGroupCard(groupId, category) {
@@ -173,13 +185,8 @@ export function initLogs({ ws, state }) {
             <details class="log-task-details">
                 <summary>Timeline</summary>
                 <div class="log-task-timeline" data-task-timeline></div>
-                <div class="log-actions">
-                    <button class="log-raw-toggle" type="button">Raw</button>
-                </div>
-                <pre class="log-raw" hidden data-task-raw></pre>
             </details>
         `;
-        bindRawToggle(entry);
         const record = {
             entry,
             ts: entry.querySelector('[data-task-ts]'),
@@ -189,7 +196,6 @@ export function initLogs({ ws, state }) {
             count: entry.querySelector('[data-task-count]'),
             summary: entry.querySelector('[data-task-summary]'),
             timeline: entry.querySelector('[data-task-timeline]'),
-            raw: entry.querySelector('[data-task-raw]'),
             events: 0,
             category,
             recent: [],
@@ -209,8 +215,13 @@ export function initLogs({ ws, state }) {
                 </div>
                 ${metaPills(item.meta)}
                 ${item.body ? `<div class="log-body">${escapeHtml(item.body)}</div>` : ''}
+                <div class="log-actions">
+                    <button class="log-raw-toggle" type="button">Raw</button>
+                </div>
+                <pre class="log-raw" hidden>${escapeHtml(item.raw || '')}</pre>
             </div>
         `).join('');
+        bindRawToggle(record.timeline);
     }
 
     function updateTaskGroupCard(evt) {
@@ -243,13 +254,15 @@ export function initLogs({ ws, state }) {
             groupId === 'bg-consciousness' ? 'background' : `task=${groupId}`,
             ...view.meta,
         ]);
-        record.raw.textContent = prettyLogEvent(evt);
 
         const last = record.recent[record.recent.length - 1];
         const dedupeKey = duplicateLogEventKey(evt);
         if (last && last.dupKey && last.dupKey === dedupeKey) {
             last.count += 1;
             last.ts = ts;
+            last.meta = view.meta;
+            last.body = view.body;
+            last.raw = prettyLogEvent(evt);
         } else {
             record.recent.push({
                 ts,
@@ -257,6 +270,7 @@ export function initLogs({ ws, state }) {
                 headline: view.headline || 'Task event',
                 meta: view.meta,
                 body: view.body,
+                raw: prettyLogEvent(evt),
                 count: 1,
                 dupKey: dedupeKey,
             });
@@ -267,7 +281,7 @@ export function initLogs({ ws, state }) {
         updateVisibility(record.entry);
         logEntries.appendChild(record.entry);
         trimEntries();
-        if (state.activeFilters[category]) logEntries.scrollTop = logEntries.scrollHeight;
+        if (state.activeFilters[category]) scrollToLatest();
     }
 
     function addLogEntry(evt) {
@@ -288,5 +302,9 @@ export function initLogs({ ws, state }) {
         duplicateState.clear();
         taskGroups.clear();
         logEntries.innerHTML = '';
+    });
+
+    logsNavBtn?.addEventListener('click', () => {
+        scrollToLatest();
     });
 }

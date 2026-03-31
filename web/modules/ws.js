@@ -16,7 +16,7 @@ export class WS {
         this._lastSha = null;
         this._lastMessageAt = 0;
         this._reconnectTimer = null;
-        this._reloadFallbackTimer = null;
+        this._uiRecoveryTimer = null;
         this._watchdogTimer = null;
         this._pendingMessages = [];
         this._nextClientMessageId = 1;
@@ -34,10 +34,10 @@ export class WS {
         }
     }
 
-    _clearReloadFallbackTimer() {
-        if (this._reloadFallbackTimer) {
-            clearTimeout(this._reloadFallbackTimer);
-            this._reloadFallbackTimer = null;
+    _clearUiRecoveryTimer() {
+        if (this._uiRecoveryTimer) {
+            clearTimeout(this._uiRecoveryTimer);
+            this._uiRecoveryTimer = null;
         }
     }
 
@@ -46,6 +46,34 @@ export class WS {
             clearInterval(this._watchdogTimer);
             this._watchdogTimer = null;
         }
+    }
+
+    _freshWindowUrl(reason = '') {
+        const url = new URL(window.location.href);
+        url.searchParams.set('_ouro_refresh', String(Date.now()));
+        if (reason) url.searchParams.set('_ouro_reason', reason);
+        return url.toString();
+    }
+
+    _refreshWindow(reason = '') {
+        window.location.replace(this._freshWindowUrl(reason));
+    }
+
+    _scheduleUiRecovery(reason, delay = 15000) {
+        if (this._uiRecoveryTimer) return;
+        this._uiRecoveryTimer = setTimeout(async () => {
+            this._uiRecoveryTimer = null;
+            try {
+                const resp = await fetch('/api/state', { cache: 'no-store' });
+                if (resp.ok) {
+                    this._refreshWindow(reason);
+                    return;
+                }
+            } catch {}
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                this._scheduleUiRecovery(reason, Math.min(Math.round(delay * 1.5), 30000));
+            }
+        }, delay);
     }
 
     _startWatchdog(socket) {
@@ -61,10 +89,7 @@ export class WS {
     _scheduleReconnect() {
         if (this._reconnectTimer) return;
         document.getElementById('reconnect-overlay')?.classList.add('visible');
-        if (!this._reloadFallbackTimer) {
-            // Safety net for stuck embedded-webview reconnect states.
-            this._reloadFallbackTimer = setTimeout(() => location.reload(), 15000);
-        }
+        this._scheduleUiRecovery('socket-disconnect', 15000);
         const delay = this.reconnectDelay;
         this._reconnectTimer = setTimeout(() => {
             this._reconnectTimer = null;
@@ -76,7 +101,7 @@ export class WS {
     _refreshStateAfterOpen(previouslyConnected) {
         fetch('/api/state', { cache: 'no-store' }).then(r => r.json()).then(d => {
             if (previouslyConnected && this._lastSha && d.sha && d.sha !== this._lastSha) {
-                location.reload();
+                this._refreshWindow('sha-change');
                 return;
             }
             this._lastSha = d.sha || this._lastSha;
@@ -130,7 +155,7 @@ export class WS {
             this._wasConnected = true;
             this._lastMessageAt = Date.now();
             this._clearReconnectTimer();
-            this._clearReloadFallbackTimer();
+            this._clearUiRecoveryTimer();
             this.reconnectDelay = 1000;
             this._startWatchdog(socket);
             this.emit('open');

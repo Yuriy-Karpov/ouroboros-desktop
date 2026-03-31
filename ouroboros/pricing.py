@@ -32,6 +32,7 @@ MODEL_PRICING_STATIC = {
     "openai/o3-pro": (20.0, 1.0, 80.0),
     "openai/o4-mini": (1.10, 0.275, 4.40),
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
+    "openai/gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
     "openai/gpt-5.3-codex": (1.75, 0.175, 14.0),

@@ -28,6 +28,13 @@ _DIRECT_PROVIDER_AUTO_DEFAULTS = {
         "OUROBOROS_MODEL_FALLBACK": ANTHROPIC_DIRECT_DEFAULTS["fallback"],
     },
 }
+_DIRECT_PROVIDER_LEGACY_DEFAULTS = {
+    "openai": {
+        "OUROBOROS_MODEL_LIGHT": {"openai::gpt-4.1"},
+        "OUROBOROS_MODEL_FALLBACK": {"openai::gpt-4.1"},
+    },
+    "anthropic": {},
+}
 _MODEL_LANE_KEYS = tuple(_DIRECT_PROVIDER_AUTO_DEFAULTS["openai"].keys())
 _DIRECT_PROVIDER_REVIEW_RUNS = 3
 
@@ -135,7 +142,8 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
         current = migrate_model_value(provider, raw_current)
         default = _setting_text(SETTINGS_DEFAULTS, key)
         auto_value = provider_defaults[key]
-        next_value = auto_value if current in {"", default} else current
+        legacy_defaults = _DIRECT_PROVIDER_LEGACY_DEFAULTS.get(provider, {}).get(key, set())
+        next_value = auto_value if current in {"", default, *legacy_defaults} else current
         if next_value != raw_current:
             normalized[key] = next_value
             changed_keys.append(key)

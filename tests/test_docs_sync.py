@@ -14,7 +14,8 @@ def test_readme_mentions_multistep_wizard_and_live_task_ui():
     readme = _read("README.md")
 
     assert "wizard is now multi-step" in readme
-    assert "mandatory model confirmation" in readme
+    assert "choose a setup path first" in readme
+    assert "review visible model lanes second" in readme
     assert "Focused Task UX" in readme
     assert "live task card" in readme
 

@@ -71,10 +71,11 @@ def _ensure_browser(ctx: ToolContext):
     in ctx.browser_state — no module-level globals."""
     bs = ctx.browser_state
     current_thread_id = threading.get_ident()
+    stored_thread_id = getattr(bs, "_thread_id", None)
 
-    if bs._thread_id is not None and bs._thread_id != current_thread_id:
+    if stored_thread_id is not None and stored_thread_id != current_thread_id:
         log.info("Thread switch detected (old=%s, new=%s). Tearing down browser for this context.",
-                 bs._thread_id, current_thread_id)
+                 stored_thread_id, current_thread_id)
         cleanup_browser(ctx)
 
     if bs.browser is not None:
@@ -90,7 +91,7 @@ def _ensure_browser(ctx: ToolContext):
     if bs.pw_instance is None:
         from playwright.sync_api import sync_playwright
         bs.pw_instance = sync_playwright().start()
-        bs._thread_id = current_thread_id
+        setattr(bs, "_thread_id", current_thread_id)
         log.info("Created Playwright instance in thread %s", current_thread_id)
 
     bs.browser = bs.pw_instance.chromium.launch(
@@ -141,7 +142,7 @@ def cleanup_browser(ctx: ToolContext) -> None:
     bs.page = None
     bs.browser = None
     bs.pw_instance = None
-    bs._thread_id = None
+    setattr(bs, "_thread_id", None)
 
 
 def _is_infrastructure_error(obj: Any) -> bool:

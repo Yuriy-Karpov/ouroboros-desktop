@@ -7,7 +7,7 @@ const FALLBACK_MODEL_ITEMS = [
     { value: 'google/gemini-3-flash-preview', label: 'Google via OpenRouter' },
     { value: 'openai/gpt-5.4', label: 'OpenAI via OpenRouter' },
     { value: 'openai::gpt-5.4', label: 'Official OpenAI' },
-    { value: 'openai::gpt-4.1', label: 'Official OpenAI' },
+    { value: 'openai::gpt-5.4-mini', label: 'Official OpenAI' },
 ];
 
 let modelCatalogItems = FALLBACK_MODEL_ITEMS.slice();
@@ -133,9 +133,14 @@ export function bindModelPickers(root) {
     });
 
     document.addEventListener('click', (event) => {
-        if (!root.contains(event.target)) return;
-        const picker = event.target.closest('[data-model-picker]');
-        if (!picker) closeAll();
+        const picker = event.target instanceof Element
+            ? event.target.closest('[data-model-picker]')
+            : null;
+        if (!picker) {
+            closeAll();
+            return;
+        }
+        closeAll(picker);
     });
 
     document.addEventListener('settings-model-catalog:updated', (event) => {

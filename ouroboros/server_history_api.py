@@ -114,6 +114,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                             "sender_label": str(entry.get("sender_label", "")),
                             "sender_session_id": str(entry.get("sender_session_id", "")),
                             "client_message_id": str(entry.get("client_message_id", "")),
+                            "task_id": str(entry.get("task_id", "")),
                             "telegram_chat_id": int(entry.get("telegram_chat_id") or 0),
                         })
             except Exception as exc:
@@ -140,6 +141,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                             "ts": str(entry.get("ts", "")),
                             "is_progress": True,
                             "markdown": str(entry.get("format", "")).lower() == "markdown",
+                            "task_id": str(entry.get("task_id", "")),
                         })
             except Exception as exc:
                 log.warning("Failed to read progress log: %s", exc)

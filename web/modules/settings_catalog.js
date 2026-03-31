@@ -12,13 +12,14 @@ function broadcastCatalog(items) {
 
 function fillCatalogDatalist(items) {
     const list = document.getElementById('settings-model-catalog');
-    if (!list) return;
-    list.innerHTML = '';
-    for (const item of items) {
-        const option = document.createElement('option');
-        option.value = item.value || item.id || '';
-        option.label = item.label || item.provider || '';
-        list.appendChild(option);
+    if (list) {
+        list.innerHTML = '';
+        for (const item of items) {
+            const option = document.createElement('option');
+            option.value = item.value || item.id || '';
+            option.label = item.label || item.provider || '';
+            list.appendChild(option);
+        }
     }
     broadcastCatalog(items);
 }

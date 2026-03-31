@@ -136,7 +136,7 @@ launcher.py main()
   ├── bootstrap_repo()          → Copy workspace to ~/Ouroboros/repo/ (first run)
   │                               OR sync core files (subsequent runs)
   ├── _run_first_run_wizard()   → Show multi-step setup wizard if no runnable config
-  │                               (provider keys → model confirmation → runtime summary)
+  │                               (setup path → model review → launch summary)
   │                               Saves to ~/Ouroboros/data/settings.json
   ├── agent_lifecycle_loop()    → Background thread: start/monitor server.py
   └── webview.start()           → Open PyWebView window at http://127.0.0.1:8765
@@ -148,9 +148,9 @@ Shown when `settings.json` does not contain any supported remote provider key an
 `LOCAL_MODEL_SOURCE`.
 
 - Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, or local-model-source settings skip the wizard automatically.
-- The wizard is multi-step and provider-aware: it allows entering all relevant keys up front, then forces a model-confirmation step before save.
+- The wizard is multi-step and provider-aware: it starts with a reversible setup-path selector, then shows visible model defaults for review before save.
 - The wizard blocks progression if nothing runnable is configured.
-- When OpenRouter is absent and official OpenAI is the only configured remote runtime, untouched default lane values are auto-remapped to `openai::gpt-5.2` / `openai::gpt-4.1` so first-run startup does not strand the app on OpenRouter-only defaults.
+- When OpenRouter is absent and official OpenAI is the only configured remote runtime, untouched default lane values are auto-remapped to `openai::gpt-5.4` / `openai::gpt-5.4-mini` so first-run startup does not strand the app on OpenRouter-only defaults.
 - OpenAI-compatible and Cloud.ru remain explicit model-selection flows from the full Settings page because there is no single safe universal default model ID for those providers.
 - Closing the wizard without saving is non-fatal: the main app still launches and the user can finish configuration in Settings.
 

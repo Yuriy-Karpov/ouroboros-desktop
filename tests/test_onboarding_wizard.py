@@ -15,8 +15,8 @@ def _base_payload() -> dict:
         "LOCAL_ROUTING_MODE": "cloud",
         "OUROBOROS_MODEL": "openai::gpt-5.4",
         "OUROBOROS_MODEL_CODE": "openai::gpt-5.4",
-        "OUROBOROS_MODEL_LIGHT": "openai::gpt-4.1",
-        "OUROBOROS_MODEL_FALLBACK": "openai::gpt-4.1",
+        "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.4-mini",
+        "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.4-mini",
     }
 
 
@@ -72,15 +72,21 @@ def test_prepare_onboarding_settings_sets_all_local_routes():
 def test_build_onboarding_html_contains_multistep_markers():
     html = build_onboarding_html({})
 
-    assert "STEP_ORDER = [\"providers\", \"models\", \"runtime\", \"summary\"]" in html
-    assert "Confirm every lane" in html
+    assert "STEP_ORDER = [\"providers\", \"models\", \"summary\"]" in html
+    assert "Choose a setup path" in html
+    assert "Review model lanes" in html
     assert "openai::gpt-5.4" in html
+    assert "openai::gpt-5.4-mini" in html
     assert "anthropic::claude-sonnet-4-6" in html
+    assert "Skip optional step" not in html
 
 
 def test_build_onboarding_html_keeps_manual_profile_selection_available():
     html = build_onboarding_html({})
 
-    assert "function hasProfileAccess(profile)" in html
-    assert "const nothingConfigured = !hasCloudProvider() && !hasLocalModel();" in html
-    assert "if (selected && (hasProfileAccess(selected) || nothingConfigured))" in html
+    assert "function activeProviderProfile()" in html
+    assert "function profileLabel(profile)" in html
+    assert "function nextButtonShouldBeDisabled()" in html
+    assert "function syncCurrentStepActionState()" in html
+    assert "selectedProfile === \"local\" ? trim(state.localSource) : \"\"" in html
+    assert "LOCAL_ROUTING_MODE: selectedProfile === \"local\" ? state.localRoutingMode : \"cloud\"" in html

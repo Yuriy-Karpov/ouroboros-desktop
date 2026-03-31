@@ -86,43 +86,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     let historyLoaded = false;
     let historySyncPromise = null;
     let welcomeShown = false;
-    const liveCard = document.createElement('details');
-    liveCard.id = 'chat-live-card';
-    liveCard.className = 'chat-live-card';
-    liveCard.hidden = true;
-    liveCard.innerHTML = `
-        <summary>
-            <div class="chat-live-summary">
-                <div class="chat-live-summary-main">
-                    <span class="chat-live-phase working" data-live-phase>Working</span>
-                    <span class="chat-live-title" data-live-title>Waiting for work</span>
-                </div>
-                <div class="chat-live-summary-side">
-                    <span class="chat-live-count" data-live-count hidden>2 notes</span>
-                    <span class="chat-live-toggle" data-live-toggle>Show details</span>
-                    <svg class="chat-live-chevron" width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                        <path d="M5 7.5 10 12.5 15 7.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path>
-                    </svg>
-                </div>
-            </div>
-            <div class="chat-live-meta" data-live-meta></div>
-        </summary>
-        <div class="chat-live-timeline" data-live-timeline></div>
-    `;
-    const liveCardPhase = liveCard.querySelector('[data-live-phase]');
-    const liveCardTitle = liveCard.querySelector('[data-live-title]');
-    const liveCardCount = liveCard.querySelector('[data-live-count]');
-    const liveCardMeta = liveCard.querySelector('[data-live-meta]');
-    const liveCardToggle = liveCard.querySelector('[data-live-toggle]');
-    const liveCardTimeline = liveCard.querySelector('[data-live-timeline]');
-    const liveCardState = {
-        groupId: '',
-        updates: 0,
-        finished: false,
-        items: [],
-        lastHumanHeadline: '',
-    };
-    liveCard.addEventListener('toggle', syncLiveCardToggle);
+    const liveCardRecords = new Map();
+    let activeLiveGroupId = '';
+    let historySyncTimer = null;
 
     function buildMessageKey(role, text, timestamp, opts = {}) {
         if (opts.clientMessageId) return `client|${opts.clientMessageId}`;
@@ -134,6 +100,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             opts.source || '',
             opts.senderLabel || '',
             opts.senderSessionId || '',
+            opts.taskId || '',
             timestamp,
             text,
         ].join('|');
@@ -226,32 +193,75 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
-    function resetLiveCard(groupId) {
-        liveCardState.groupId = groupId || '';
-        liveCardState.updates = 0;
-        liveCardState.finished = false;
-        liveCardState.items = [];
-        liveCardState.lastHumanHeadline = '';
-        liveCardTitle.textContent = 'Working...';
-        liveCardPhase.dataset.phase = 'working';
-        liveCardPhase.textContent = 'Working';
-        liveCardPhase.className = 'chat-live-phase working';
-        liveCardCount.hidden = true;
-        liveCardCount.textContent = '0 notes';
-        liveCardMeta.innerHTML = '';
-        liveCardTimeline.innerHTML = '';
-        liveCard.open = false;
-        liveCard.dataset.finished = '0';
-        syncLiveCardToggle();
+    function createLiveCardRecord(groupId = '') {
+        const normalizedGroupId = groupId || `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const root = document.createElement('details');
+        root.className = 'chat-live-card';
+        root.dataset.finished = '0';
+        root.innerHTML = `
+            <summary>
+                <div class="chat-live-summary">
+                    <div class="chat-live-summary-main">
+                        <span class="chat-live-phase working" data-live-phase>Working</span>
+                        <span class="chat-live-title" data-live-title>Waiting for work</span>
+                    </div>
+                    <div class="chat-live-summary-side">
+                        <span class="chat-live-count" data-live-count hidden>2 notes</span>
+                        <span class="chat-live-toggle" data-live-toggle>Show details</span>
+                        <svg class="chat-live-chevron" width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                            <path d="M5 7.5 10 12.5 15 7.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path>
+                        </svg>
+                    </div>
+                </div>
+                <div class="chat-live-meta" data-live-meta></div>
+            </summary>
+            <div class="chat-live-timeline" data-live-timeline></div>
+        `;
+        const record = {
+            groupId: normalizedGroupId,
+            root,
+            phaseEl: root.querySelector('[data-live-phase]'),
+            titleEl: root.querySelector('[data-live-title]'),
+            countEl: root.querySelector('[data-live-count]'),
+            metaEl: root.querySelector('[data-live-meta]'),
+            toggleEl: root.querySelector('[data-live-toggle]'),
+            timelineEl: root.querySelector('[data-live-timeline]'),
+            updates: 0,
+            finished: false,
+            items: [],
+            lastHumanHeadline: '',
+        };
+        root.addEventListener('toggle', () => syncLiveCardToggle(record));
+        liveCardRecords.set(normalizedGroupId, record);
+        resetLiveCardRecord(record);
+        return record;
     }
 
-    function ensureLiveCardVisible() {
-        if (liveCard.hidden) {
-            liveCard.hidden = false;
-            insertMessageNode(liveCard);
-            return;
-        }
-        insertMessageNode(liveCard);
+    function getLiveCardRecord(groupId = '') {
+        const normalizedGroupId = groupId || activeLiveGroupId || 'chat';
+        return liveCardRecords.get(normalizedGroupId) || createLiveCardRecord(normalizedGroupId);
+    }
+
+    function resetLiveCardRecord(record) {
+        record.updates = 0;
+        record.finished = false;
+        record.items = [];
+        record.lastHumanHeadline = '';
+        record.titleEl.textContent = 'Working...';
+        record.phaseEl.dataset.phase = 'working';
+        record.phaseEl.textContent = 'Working';
+        record.phaseEl.className = 'chat-live-phase working';
+        record.countEl.hidden = true;
+        record.countEl.textContent = '0 notes';
+        record.metaEl.innerHTML = '';
+        record.timelineEl.innerHTML = '';
+        record.root.open = false;
+        record.root.dataset.finished = '0';
+        syncLiveCardToggle(record);
+    }
+
+    function ensureLiveCardVisible(record) {
+        insertMessageNode(record.root);
     }
 
     function formatLiveCardPhaseLabel(phase) {
@@ -263,13 +273,13 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         return phase.charAt(0).toUpperCase() + phase.slice(1);
     }
 
-    function syncLiveCardToggle() {
-        if (!liveCardToggle) return;
-        liveCardToggle.textContent = liveCard.open ? 'Hide details' : 'Show details';
+    function syncLiveCardToggle(record) {
+        if (!record?.toggleEl) return;
+        record.toggleEl.textContent = record.root.open ? 'Hide details' : 'Show details';
     }
 
-    function renderLiveCardTimeline() {
-        liveCardTimeline.innerHTML = liveCardState.items.map((item) => `
+    function renderLiveCardTimeline(record) {
+        record.timelineEl.innerHTML = record.items.map((item) => `
             <div class="chat-live-line ${item.phase || 'working'}">
                 <div class="chat-live-line-head">
                     <span class="chat-live-line-title">${escapeHtml(item.headline)}</span>
@@ -281,48 +291,57 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         `).join('');
     }
 
+    function scheduleHistorySync() {
+        if (historySyncTimer) clearTimeout(historySyncTimer);
+        historySyncTimer = setTimeout(() => {
+            historySyncTimer = null;
+            syncHistory({ includeUser: false }).catch(() => {});
+        }, 700);
+    }
+
     function applyLiveCardState(summary, groupId, ts, dedupeKey = '') {
-        const nextGroupId = groupId || liveCardState.groupId || 'active';
-        if (liveCardState.groupId && liveCardState.groupId !== nextGroupId) {
-            resetLiveCard(nextGroupId);
-        } else if (!liveCardState.groupId) {
-            resetLiveCard(nextGroupId);
+        const nextGroupId = groupId || activeLiveGroupId || 'active';
+        const record = getLiveCardRecord(nextGroupId);
+        const nextPhase = summary.phase || '';
+        if (record.finished && !['done', 'error', 'timeout'].includes(nextPhase)) {
+            resetLiveCardRecord(record);
         }
 
-        ensureLiveCardVisible();
-        liveCardState.updates += 1;
-        liveCardState.finished = ['done', 'error', 'timeout'].includes(summary.phase || '');
-        liveCard.dataset.finished = liveCardState.finished ? '1' : '0';
+        activeLiveGroupId = nextGroupId;
+        ensureLiveCardVisible(record);
+        record.updates += 1;
+        record.finished = ['done', 'error', 'timeout'].includes(nextPhase);
+        record.root.dataset.finished = record.finished ? '1' : '0';
         const headline = summary.headline || 'Working...';
         if (summary.human && headline) {
-            liveCardState.lastHumanHeadline = headline;
+            record.lastHumanHeadline = headline;
         }
 
         const shouldPromote =
             Boolean(summary.promote)
-            || !liveCardState.lastHumanHeadline
-            || liveCardState.finished;
+            || !record.lastHumanHeadline
+            || record.finished;
         const activeHeadline = shouldPromote
             ? headline
-            : (liveCardState.lastHumanHeadline || headline);
-        const activePhase = liveCardState.finished
+            : (record.lastHumanHeadline || headline);
+        const activePhase = record.finished
             ? (summary.phase || 'done')
-            : (shouldPromote ? (summary.phase || 'working') : (liveCardPhase.dataset.phase || 'working'));
+            : (shouldPromote ? (summary.phase || 'working') : (record.phaseEl.dataset.phase || 'working'));
 
-        liveCardPhase.dataset.phase = activePhase;
-        liveCardPhase.textContent = formatLiveCardPhaseLabel(activePhase);
-        liveCardPhase.className = `chat-live-phase ${activePhase}`;
-        liveCardTitle.textContent = activeHeadline;
+        record.phaseEl.dataset.phase = activePhase;
+        record.phaseEl.textContent = formatLiveCardPhaseLabel(activePhase);
+        record.phaseEl.className = `chat-live-phase ${activePhase}`;
+        record.titleEl.textContent = activeHeadline;
 
         const syntheticKey = summary.dedupeKey || dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
         const shouldRenderLine = summary.visible !== false && Boolean(headline || summary.body);
         if (shouldRenderLine) {
-            const last = liveCardState.items[liveCardState.items.length - 1];
+            const last = record.items[record.items.length - 1];
             if (last && last.dedupeKey === syntheticKey) {
                 last.count += 1;
                 last.ts = ts || last.ts;
             } else {
-                liveCardState.items.push({
+                record.items.push({
                     phase: summary.phase || 'working',
                     headline: headline || 'Update',
                     body: summary.body || '',
@@ -330,37 +349,83 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     count: 1,
                     dedupeKey: syntheticKey,
                 });
-                if (liveCardState.items.length > 20) liveCardState.items.shift();
+                if (record.items.length > 20) record.items.shift();
             }
         }
-        liveCardCount.hidden = liveCardState.items.length < 2;
-        liveCardCount.textContent = `${liveCardState.items.length} notes`;
-        liveCardMeta.innerHTML = [
+        record.countEl.hidden = record.items.length < 2;
+        record.countEl.textContent = `${record.items.length} notes`;
+        record.metaEl.innerHTML = [
             nextGroupId === 'bg-consciousness' ? 'Background thinking' : '',
             ts ? `Latest ${ts}` : '',
         ].filter(Boolean).map((item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`).join('');
-        renderLiveCardTimeline();
-        insertMessageNode(liveCard);
+        renderLiveCardTimeline(record);
+        insertMessageNode(record.root);
         hideTypingIndicatorOnly();
-        if (liveCardState.finished) {
+        if (record.finished) {
+            record.root.open = false;
+            syncLiveCardToggle(record);
+            scheduleHistorySync();
             setStatus(summary.phase === 'error' || summary.phase === 'timeout' ? 'error' : 'online', summary.phase === 'error' || summary.phase === 'timeout' ? 'Attention' : 'Online');
         } else {
             setStatus('thinking', 'Working...');
         }
     }
 
+    function finishLiveCard(groupId = '', phase = '') {
+        const record = groupId
+            ? liveCardRecords.get(groupId)
+            : (activeLiveGroupId ? liveCardRecords.get(activeLiveGroupId) : null);
+        if (!record) return;
+        record.finished = true;
+        record.root.dataset.finished = '1';
+        const activePhase = ['error', 'timeout'].includes(phase)
+            ? phase
+            : (['error', 'timeout'].includes(record.phaseEl.dataset.phase || '') ? record.phaseEl.dataset.phase : 'done');
+        record.phaseEl.dataset.phase = activePhase;
+        record.phaseEl.textContent = formatLiveCardPhaseLabel(activePhase);
+        record.phaseEl.className = `chat-live-phase ${activePhase}`;
+        record.root.open = false;
+        syncLiveCardToggle(record);
+        if (activeLiveGroupId === record.groupId) activeLiveGroupId = '';
+        scheduleHistorySync();
+    }
+
+    function appendTaskSummaryToLiveCard(msg) {
+        const taskId = msg?.task_id || activeLiveGroupId || 'chat';
+        const text = msg?.content || msg?.text || '';
+        if (!text) {
+            finishLiveCard(taskId, 'done');
+            return;
+        }
+        applyLiveCardState(
+            {
+                phase: 'done',
+                headline: 'Finished task',
+                body: text,
+                human: true,
+                promote: true,
+                dedupeKey: `task_summary|${text}`,
+            },
+            taskId,
+            normalizeLogTs(msg.ts || new Date().toISOString()),
+            `task_summary|${text}`,
+        );
+        finishLiveCard(taskId, 'done');
+    }
+
     function updateLiveCardFromProgressMessage(msg) {
+        const taskId = msg?.task_id || activeLiveGroupId || 'chat';
         const summary = summarizeChatLiveEvent({
             type: 'send_message',
             is_progress: true,
-            content: msg?.content || '',
-            text: msg?.content || '',
-            task_id: liveCardState.groupId || 'chat',
+            content: msg?.content || msg?.text || '',
+            text: msg?.content || msg?.text || '',
+            task_id: taskId,
         });
         if (!summary) return;
         applyLiveCardState(
             summary,
-            liveCardState.groupId || 'chat',
+            taskId,
             normalizeLogTs(msg.ts || new Date().toISOString()),
             summary.dedupeKey || '',
         );
@@ -372,7 +437,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (!summary) return;
         applyLiveCardState(
             summary,
-            getLogTaskGroupId(evt) || liveCardState.groupId || 'active',
+            getLogTaskGroupId(evt) || activeLiveGroupId || 'active',
             normalizeLogTs(evt.ts || evt.timestamp),
             summary.dedupeKey || '',
         );
@@ -386,6 +451,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         const senderSessionId = opts.senderSessionId || '';
         const source = opts.source || '';
         const systemType = opts.systemType || '';
+        const taskId = opts.taskId || '';
         const ts = timestamp || new Date().toISOString();
         const messageKey = buildMessageKey(role, text, ts, {
             clientMessageId,
@@ -394,6 +460,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             source,
             senderLabel,
             senderSessionId,
+            taskId,
         });
         if (messageKey && seenMessageKeys.has(messageKey)) return null;
 
@@ -408,6 +475,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 senderLabel,
                 senderSessionId,
                 clientMessageId,
+                taskId,
             });
             persistVisibleHistory();
         }
@@ -419,6 +487,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (clientMessageId) bubble.dataset.clientMessageId = clientMessageId;
         if (systemType) bubble.dataset.systemType = systemType;
         if (senderSessionId) bubble.dataset.senderSessionId = senderSessionId;
+        if (taskId) bubble.dataset.taskId = taskId;
 
         const sender = getSenderLabel(role, isProgress, systemType, { source, senderLabel, senderSessionId });
         const rendered = role === 'user' ? escapeHtml(text) : renderMarkdown(text);
@@ -465,13 +534,24 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 const messages = Array.isArray(data.messages) ? data.messages : [];
                 for (const msg of messages) {
                     if (!includeUser && msg.role === 'user') continue;
-                    if (msg.is_progress) continue;
+                    if (msg.is_progress) {
+                        updateLiveCardFromProgressMessage(msg);
+                        continue;
+                    }
+                    if (msg.system_type === 'task_summary') {
+                        appendTaskSummaryToLiveCard(msg);
+                        continue;
+                    }
+                    if (msg.role === 'assistant' || msg.role === 'system') {
+                        finishLiveCard(msg.task_id || activeLiveGroupId);
+                    }
                     addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, false, {
                         systemType: msg.system_type || '',
                         source: msg.source || '',
                         senderLabel: msg.sender_label || '',
                         senderSessionId: msg.sender_session_id || '',
                         clientMessageId: msg.client_message_id || '',
+                        taskId: msg.task_id || '',
                     });
                 }
                 historyLoaded = true;
@@ -497,6 +577,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     senderLabel: msg.senderLabel || '',
                     senderSessionId: msg.senderSessionId || '',
                     clientMessageId: msg.clientMessageId || '',
+                    taskId: msg.taskId || '',
                 });
             }
         } catch {}
@@ -647,6 +728,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 senderLabel: msg.sender_label || '',
                 senderSessionId,
                 clientMessageId,
+                taskId: msg.task_id || '',
             });
             incrementUnreadIfNeeded();
             return;
@@ -658,18 +740,16 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 updateLiveCardFromProgressMessage(msg);
                 return;
             }
-            if (liveCardState.groupId && !liveCardState.finished) {
-                liveCardState.finished = true;
-                liveCard.dataset.finished = '1';
-                if (['working', 'thinking'].includes(liveCardPhase.dataset.phase || '')) {
-                    liveCardPhase.dataset.phase = 'done';
-                    liveCardPhase.textContent = 'Done';
-                    liveCardPhase.className = 'chat-live-phase done';
-                }
+            if (msg.system_type === 'task_summary') {
+                appendTaskSummaryToLiveCard(msg);
+                incrementUnreadIfNeeded();
+                return;
             }
+            finishLiveCard(msg.task_id || activeLiveGroupId);
             addMessage(msg.content, msg.role, msg.markdown, msg.ts || null, false, {
                 systemType: msg.system_type || '',
                 source: msg.source || '',
+                taskId: msg.task_id || '',
             });
             incrementUnreadIfNeeded();
         }

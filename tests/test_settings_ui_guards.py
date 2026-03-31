@@ -14,6 +14,8 @@ class TestSettingsUiGuards(unittest.TestCase):
         return {
             "settings": (REPO / "web/modules/settings.js").read_text(encoding="utf-8"),
             "settings_ui": (REPO / "web/modules/settings_ui.js").read_text(encoding="utf-8"),
+            "settings_controls": (REPO / "web/modules/settings_controls.js").read_text(encoding="utf-8"),
+            "settings_catalog": (REPO / "web/modules/settings_catalog.js").read_text(encoding="utf-8"),
         }
 
     def test_save_checks_http_status(self):
@@ -44,3 +46,13 @@ class TestSettingsUiGuards(unittest.TestCase):
     def test_save_reloads_settings_after_success(self):
         source = self._read_settings_sources()["settings"]
         self.assertIn("await loadSettings();", source)
+
+    def test_model_picker_uses_single_custom_dropdown(self):
+        sources = self._read_settings_sources()
+        self.assertNotIn('list="settings-model-catalog"', sources["settings_ui"])
+        self.assertNotIn('<datalist id="settings-model-catalog">', sources["settings_ui"])
+        self.assertIn('autocomplete="off"', sources["settings_ui"])
+        self.assertIn('spellcheck="false"', sources["settings_ui"])
+        self.assertIn("closeAll();", sources["settings_controls"])
+        self.assertIn("closeAll(picker);", sources["settings_controls"])
+        self.assertIn("broadcastCatalog(items);", sources["settings_catalog"])

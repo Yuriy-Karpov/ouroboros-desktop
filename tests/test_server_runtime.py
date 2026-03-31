@@ -41,8 +41,8 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_lanes():
     }
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.4"
     assert normalized["OUROBOROS_MODEL_CODE"] == "openai::gpt-5.4"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-4.1"
-    assert normalized["OUROBOROS_MODEL_FALLBACK"] == "openai::gpt-4.1"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
+    assert normalized["OUROBOROS_MODEL_FALLBACK"] == "openai::gpt-5.4-mini"
     assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["openai::gpt-5.4"] * 3)
 
 
@@ -66,8 +66,8 @@ def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
     }
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.4"
     assert normalized["OUROBOROS_MODEL_CODE"] == "openai::gpt-5.4"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-4.1"
-    assert normalized["OUROBOROS_MODEL_FALLBACK"] == "openai::gpt-4.1"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
+    assert normalized["OUROBOROS_MODEL_FALLBACK"] == "openai::gpt-5.4-mini"
     assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["openai::gpt-5.4"] * 3)
 
 
@@ -76,14 +76,14 @@ def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_m
         "OPENAI_API_KEY": "sk-openai",
         "OUROBOROS_MODEL": "openai::gpt-5.4",
         "OUROBOROS_MODEL_CODE": "openai::gpt-5.4",
-        "OUROBOROS_MODEL_LIGHT": "openai::gpt-4.1",
-        "OUROBOROS_MODEL_FALLBACK": "openai::gpt-4.1",
-        "OUROBOROS_REVIEW_MODELS": "openai::gpt-5.4,openai::gpt-4.1",
+        "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.4-mini",
+        "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.4-mini",
+        "OUROBOROS_REVIEW_MODELS": "openai::gpt-5.4,openai::gpt-5.4-mini",
     })
 
     assert not changed
     assert changed_keys == []
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai::gpt-5.4,openai::gpt-4.1"
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai::gpt-5.4,openai::gpt-5.4-mini"
 
 
 def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():

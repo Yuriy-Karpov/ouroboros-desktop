@@ -13,14 +13,16 @@ def _read(rel: str) -> str:
 def test_chat_progress_updates_route_into_live_card():
     source = _read("web/modules/chat.js")
 
-    assert "liveCard.id = 'chat-live-card';" in source
+    assert "const liveCardRecords = new Map();" in source
     assert "summarizeChatLiveEvent" in source
     assert "Show details" in source
     assert "if (msg.is_progress) {" in source
     assert "updateLiveCardFromProgressMessage(msg);" in source
+    assert "appendTaskSummaryToLiveCard(msg);" in source
+    assert "finishLiveCard(msg.task_id || activeLiveGroupId);" in source
     assert "ws.on('log', (msg) => {" in source
     assert "updateLiveCardFromLogEvent(msg.data);" in source
-    assert "if (msg.is_progress) continue;" in source
+    assert "if (msg.is_progress) {" in source
     assert "hideTypingIndicatorOnly();" in source
     assert "state.activePage !== 'chat'" in source
 
@@ -61,3 +63,12 @@ def test_dashboard_and_chat_only_poll_state_when_active():
     assert "state.activePage !== 'chat'" in chat_source
     assert "state.activePage !== 'dashboard'" in dash_source
     assert "cache: 'no-store'" in dash_source
+
+
+def test_chat_history_replays_task_summaries_into_live_cards():
+    history_source = _read("ouroboros/server_history_api.py")
+    chat_source = _read("web/modules/chat.js")
+
+    assert '"task_id": str(entry.get("task_id", ""))' in history_source
+    assert "appendTaskSummaryToLiveCard(msg);" in chat_source
+    assert "taskId: msg.task_id || ''" in chat_source

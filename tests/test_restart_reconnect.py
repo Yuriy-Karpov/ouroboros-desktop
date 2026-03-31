@@ -14,10 +14,13 @@ def test_ws_has_error_handler_and_reconnect_timer():
     source = _read("web/modules/ws.js")
     assert "socket.onerror" in source
     assert "_scheduleReconnect" in source
-    assert "_reloadFallbackTimer" in source
+    assert "_scheduleUiRecovery" in source
+    assert "_uiRecoveryTimer" in source
     assert "_watchdogTimer" in source
     assert "_lastMessageAt" in source
     assert "_startWatchdog" in source
+    assert "window.location.replace" in source
+    assert "location.reload()" not in source
 
 
 def test_ws_queues_outbound_messages_when_disconnected():
