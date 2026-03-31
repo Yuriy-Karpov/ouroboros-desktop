@@ -1,4 +1,5 @@
 """Tests for browser state isolation and infrastructure error detection."""
+import pathlib
 import sys
 import types
 
@@ -70,6 +71,22 @@ class TestBrowserModuleState:
 
         assert page is fake_page
         assert getattr(ctx.browser_state, "_thread_id", None) is not None
+
+    def test_aliases_arm64_browser_cache_for_missing_x64_binary(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(browser_mod.sys, "platform", "darwin", raising=False)
+        root = tmp_path / "playwright" / "chromium_headless_shell-1208"
+        arm_dir = root / "chrome-headless-shell-mac-arm64"
+        arm_dir.mkdir(parents=True)
+        arm_binary = arm_dir / "chrome-headless-shell"
+        arm_binary.write_text("stub", encoding="utf-8")
+
+        missing_binary = root / "chrome-headless-shell-mac-x64" / "chrome-headless-shell"
+        err = RuntimeError(f"BrowserType.launch: Executable doesn't exist at {missing_binary}")
+
+        assert browser_mod._maybe_alias_playwright_binary(err) is True
+        alias_dir = missing_binary.parent
+        assert alias_dir.is_symlink()
+        assert pathlib.Path(alias_dir.resolve()) == arm_dir.resolve()
 
 
 class TestCleanupBrowser:
