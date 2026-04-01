@@ -168,6 +168,20 @@ def get_review_enforcement() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Version
+# ---------------------------------------------------------------------------
+def read_version() -> str:
+    try:
+        if getattr(sys, "frozen", False):
+            vp = pathlib.Path(sys._MEIPASS) / "VERSION"
+        else:
+            vp = pathlib.Path(__file__).parent.parent / "VERSION"
+        return vp.read_text(encoding="utf-8").strip()
+    except Exception:
+        return "0.0.0"
+
+
+# ---------------------------------------------------------------------------
 # Settings file locking
 # ---------------------------------------------------------------------------
 _SETTINGS_LOCK = pathlib.Path(str(SETTINGS_PATH) + ".lock")
