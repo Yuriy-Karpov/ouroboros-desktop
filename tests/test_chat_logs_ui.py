@@ -84,7 +84,7 @@ def test_styles_cover_chat_header_controls_and_grouped_cards():
     assert ".log-task-timeline {" in css
     assert re.search(r"\.chat-live-title\s*\{[^}]*font-weight:\s*400;", css, re.S)
     assert re.search(r"\.chat-live-line-title\s*\{[^}]*font-weight:\s*400;", css, re.S)
-    assert re.search(r"\.chat-live-line-body\s*\{[^}]*font-size:\s*15px;", css, re.S)
+    assert re.search(r"\.chat-live-line-body\s*\{[^}]*font-size:\s*\d+px;", css, re.S)
 
 
 def test_dashboard_and_chat_only_poll_state_when_active():

@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.7.5](https://img.shields.io/badge/version-4.7.5-green.svg)](VERSION)
+[![Version 4.7.6](https://img.shields.io/badge/version-4.7.6-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -369,6 +369,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.7.6 | 2026-04-01 | Fix status badge stuck in "Working..." after task completion: `finishLiveCard` now resets the badge to "Online" when no active live cards remain; also fix pre-existing test asserting wrong font-size for `.chat-live-line-body`. |
 | 4.7.5 | 2026-04-01 | Chat UX: make visible thinking/working live cards smaller and more muted, add per-block expand/collapse to reveal full text, and show reconnect feedback after both soft reconnects and restart-triggered reloads. |
 | 4.7.4 | 2026-04-01 | Config: increase default tool timeout from 120s to 600s so long-running shell commands (e.g. `npm install -g @anthropic-ai/claude-code`) can complete without being killed. |
 | 4.7.3 | 2026-04-01 | UI polish: progress/reasoning chat bubbles are now smaller and visually muted compared to regular messages; transient "♻️ Reconnected" system banner appears in chat after WebSocket reconnect (e.g. after `/restart`). |

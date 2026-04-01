@@ -653,6 +653,11 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         }
         syncLiveCardToggle(record);
         if (activeLiveGroupId === record.groupId) activeLiveGroupId = '';
+        // Reset status badge when no live cards remain active
+        if (!hasActiveLiveCard()) {
+            setStatus(activePhase === 'error' || activePhase === 'timeout' ? 'error' : 'online',
+                      activePhase === 'error' || activePhase === 'timeout' ? 'Attention' : 'Online');
+        }
     }
 
     function appendTaskSummaryToLiveCard(msg) {
