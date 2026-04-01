@@ -195,7 +195,7 @@ Navigation is a left sidebar with 9 pages.
 - **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic`, duplicated from Dashboard for quick task-side access.
 - **Message input**: textarea + send button. Shift+Enter for newline, Enter to send.
 - **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea.
-- **Messages**: user bubbles (right, blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown.
+- **Messages**: user bubbles (right, green-tinted), assistant bubbles (left, blue-tinted), and system-summary bubbles (left, amber). Non-user bubbles render markdown.
 - **Mirrored user lane**: Telegram-origin and Web UI-origin user messages render identically as one `You` stream. Source metadata stays transport-only where needed for routing and dedupe, not for visible speaker labeling.
 - **Timestamps**: smart relative formatting (today: "HH:MM", yesterday: "Yesterday, HH:MM", older: "Mon DD, HH:MM"). Shown on hover.
 - **Live task card**: reasoning/progress/tool chatter no longer spams the transcript as many assistant bubbles.
@@ -426,7 +426,7 @@ Each iteration (0.5s sleep):
 - Core tools always available; extra tools discoverable via `list_available_tools`/`enable_tools`
 - Read-only tools can run in parallel (ThreadPoolExecutor)
 - Browser tools use thread-sticky executor (Playwright greenlet affinity)
-- All tools have hard timeout (default 360s, per-tool overrides for browser/search/vision)
+- All tools have hard timeout (default 120s via `OUROBOROS_TOOL_TIMEOUT_SEC`, with per-tool overrides for browser/search/vision)
 - Multi-layer safety: hardcoded sandbox (registry.py) → deterministic whitelist → LLM safety supervisor
 - Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping.
 - Context compaction kicks in after round 8 (summarizes old tool results)
@@ -485,7 +485,7 @@ the constitutional guard is that the file itself must remain non-deletable.
 
 - Triggered after each task completion (non-blocking, runs in a daemon thread)
 - Reads unprocessed entries from `chat.jsonl` in BLOCK_SIZE (100) message chunks
-- Calls LLM (Gemini Flash) to create summary blocks stored in `dialogue_blocks.json`
+- Calls LLM (`google/gemini-3-flash-preview`) to create summary blocks stored in `dialogue_blocks.json`
 - **Era compression**: when block count exceeds MAX_SUMMARY_BLOCKS (10), oldest blocks
   compressed into single "era summary" (30-40% of original length)
 - **Auto-migration**: legacy `dialogue_summary.md` episodes auto-migrated to blocks
@@ -588,13 +588,14 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
-| OUROBOROS_REVIEW_ENFORCEMENT | blocking | Pre-commit review enforcement: `advisory` or `blocking` |
+| OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
 | OUROBOROS_EFFORT_TASK | medium | Reasoning effort for task/chat: none, low, medium, high |
 | OUROBOROS_EFFORT_EVOLUTION | high | Reasoning effort for evolution tasks |
 | OUROBOROS_EFFORT_REVIEW | medium | Reasoning effort for review tasks |
 | OUROBOROS_EFFORT_CONSCIOUSNESS | low | Reasoning effort for background consciousness |
 | OUROBOROS_SOFT_TIMEOUT_SEC | 600 | Soft timeout warning (10 min) |
 | OUROBOROS_HARD_TIMEOUT_SEC | 1800 | Hard timeout kill (30 min) |
+| OUROBOROS_TOOL_TIMEOUT_SEC | 120 | Default per-tool timeout in seconds before timeout handling kicks in |
 | LOCAL_MODEL_SOURCE | "" | HuggingFace repo for local model |
 | LOCAL_MODEL_FILENAME | "" | GGUF filename within repo |
 | LOCAL_MODEL_CONTEXT_LENGTH | 16384 | Context window for local model |

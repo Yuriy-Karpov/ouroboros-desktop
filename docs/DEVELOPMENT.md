@@ -138,3 +138,30 @@ Before every commit, verify the following:
 ---
 
 *This section is the authoritative definition of "DEVELOPMENT.md compliance" referenced in the `development_compliance` item in `docs/CHECKLISTS.md`.*
+
+---
+
+## Testing Standards
+
+- **Test runner:** `pytest` is the canonical test entrypoint for repo checks and regressions.
+- **Scope:** prefer focused regression tests near the touched subsystem (`tests/test_message_bus.py`, `tests/test_server_auth.py`, `tests/test_settings_runtime_regressions.py`) over broad snapshots that mostly restate implementation details.
+- **When to add or update tests:** changes to routing, auth, provider selection, file-path handling, WebSocket/chat behavior, startup checks, packaging/version wiring, or prompt-loading behavior should usually ship with a targeted test update.
+- **Minimum verification bar:** run the nearest targeted tests for the changed area. If a change affects docs/version/packaging contracts, also run the lightweight sync guards such as `tests/test_docs_sync.py`, `tests/test_packaging_sync.py`, and any relevant smoke checks.
+- **Assertion style:** test the contract or invariant the user actually relies on. Only assert internal implementation details when that detail itself is part of the contract.
+
+## Prompt Editing Standards
+
+- **Prompts are code:** prompt files in `prompts/` are maintained with the same discipline as runtime code (Bible P5).
+- **Prefer surgical edits:** remove conflicts and repetition instead of stacking new instructions on top of stale ones.
+- **Runtime truth wins:** if a prompt names tools, files, safety behavior, memory artifacts, or versioning rules, verify the implementation in `ouroboros/`, `supervisor/`, and `server.py` before committing prompt changes.
+- **Propagate contract changes:** if a prompt edit changes terminology or a runtime-facing contract, update the corresponding docs (`README.md`, `docs/ARCHITECTURE.md`) in the same commit.
+- **No aspirational rules:** do not add instructions that the current runtime, tools, or workflow cannot actually support or enforce.
+
+## Integration Patterns
+
+- **Config SSOT:** settings defaults, coercion, and env propagation live in `ouroboros/config.py`.
+- **Focused server modules:** `server.py` is the integration hub, but endpoints and runtime helpers should be extracted into focused modules such as `server_history_api.py`, `file_browser_api.py`, `model_catalog_api.py`, `local_model_api.py`, and `server_auth.py`, then wired from `server.py`.
+- **Message routing SSOT:** cross-channel chat flow goes through `supervisor/message_bus.py`; avoid parallel routing paths for Web UI, Telegram, and agent replies.
+- **Persistent artifacts:** runtime state is stored under `~/Ouroboros/data/` as JSON, JSONL, and text files. New files should have clear ownership and be considered for context injection in `context.py`.
+- **Frontend structure:** page logic belongs in `web/modules/`, while `web/app.js` stays a thin orchestrator that wires modules together.
+- **Change propagation:** if a new module adds an API endpoint, UI page, prompt dependency, or persistent data file, update the relevant docs and sync guards in the same change.

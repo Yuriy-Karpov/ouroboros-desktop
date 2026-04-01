@@ -104,7 +104,11 @@ The same values can also be provided via environment variables:
 If you bind on anything other than localhost, `OUROBOROS_NETWORK_PASSWORD` is optional. When set, non-loopback browser/API traffic is gated; when unset, the full surface remains open by design.
 
 The Files tab uses your home directory by default only for localhost usage. For Docker or other
-network-exposed runs, set `OUROBOROS_FILE_BROWSER_DEFAULT` to an explicit directory. Symlink entries are shown and can be read, edited, copied, moved, uploaded into, and deleted intentionally; root-delete protection still applies to the configured root itself.
+network-exposed runs, set `OUROBOROS_FILE_BROWSER_DEFAULT` to an explicit directory. If the
+configured path is missing or is not a directory, localhost requests still fall back to the home
+directory, while network-exposed requests fail fast instead of silently widening the file surface.
+Symlink entries are shown and can be read, edited, copied, moved, uploaded into, and deleted
+intentionally; root-delete protection still applies to the configured root itself.
 
 ### Provider Routing
 
@@ -319,7 +323,11 @@ OUROBOROS_FILE_BROWSER_DEFAULT=/home/app python server.py
 OUROBOROS_FILE_BROWSER_DEFAULT=/mnt/shared python server.py --port 9000
 ```
 
-If the variable is not set, Ouroboros uses the current user's home directory. If the configured path does not exist or is not a directory, Ouroboros also falls back to the home directory.
+If the variable is not set, Ouroboros uses the current user's home directory only for localhost
+requests. For network/Docker access the variable must point to an existing directory. If the
+configured path does not exist or is not a directory, localhost requests fall back to the home
+directory, but network/Docker requests return an error instead of silently changing the exposed
+root.
 
 The `Files` tab supports:
 
