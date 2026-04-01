@@ -277,41 +277,16 @@ def commit_bundle_sync(context: BootstrapContext, old_version: str, new_version:
 
 
 def sync_existing_repo_from_bundle(context: BootstrapContext) -> None:
-    bundle_version = read_version_file(context.bundle_dir) or context.app_version
-    repo_version = read_version_file(context.repo_dir)
-    version_mismatch = bool(bundle_version) and bundle_version != repo_version
-    repo_was_dirty = repo_has_pending_changes(context) if version_mismatch else False
-    backup_branch = ""
-    if version_mismatch and not repo_was_dirty:
-        backup_branch = create_bundle_backup_branch(context, repo_version)
+    """Sync core (safety-critical) files and fill in any missing managed files.
 
+    Matches the upstream main-branch launcher behavior: on subsequent launches
+    only the 3 core files are force-synced. Managed paths are copied with
+    overwrite_existing=False so that agent/user edits are never destroyed by a
+    version mismatch between the bundle and the repo.
+    """
     sync_core_files(context)
     sync_bundle_managed_paths(context, overwrite_existing=False)
-
-    if not version_mismatch:
-        commit_synced_files(context)
-        return
-    if repo_was_dirty:
-        context.log.warning(
-            "Bundle version %s differs from repo version %s, but repo was already dirty before sync. "
-            "Skipping destructive managed sync and keeping only protected/missing-file updates.",
-            bundle_version,
-            repo_version or "unknown",
-        )
-        commit_synced_files(context)
-        return
-    if not backup_branch:
-        context.log.warning(
-            "Bundle version %s differs from repo version %s, but backup branch creation failed. "
-            "Skipping destructive managed sync and keeping only protected/missing-file updates.",
-            bundle_version,
-            repo_version or "unknown",
-        )
-        commit_synced_files(context)
-        return
-
-    sync_bundle_managed_paths(context, overwrite_existing=True)
-    commit_bundle_sync(context, repo_version, bundle_version)
+    commit_synced_files(context)
 
 
 def _migrate_old_settings(context: BootstrapContext) -> None:
