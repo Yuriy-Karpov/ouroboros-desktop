@@ -17,6 +17,8 @@ def test_multi_model_review_async_uses_llm_client_chat_async(monkeypatch, tmp_pa
             return (
                 {"content": '[{"item":"check","verdict":"PASS","severity":"advisory","reason":"ok"}]'},
                 {
+                    "provider": "openrouter",
+                    "resolved_model": "anthropic/claude-sonnet-4.6",
                     "prompt_tokens": 10,
                     "completion_tokens": 5,
                     "cached_tokens": 7,
@@ -47,3 +49,49 @@ def test_multi_model_review_async_uses_llm_client_chat_async(monkeypatch, tmp_pa
     assert ctx.pending_events
     assert ctx.pending_events[0]["usage"]["cached_tokens"] == 7
     assert ctx.pending_events[0]["usage"]["cache_write_tokens"] == 2
+
+
+def test_multi_model_review_async_works_without_openrouter_for_official_openai(monkeypatch, tmp_path):
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools import review as review_module
+
+    calls = []
+
+    class FakeLLMClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat_async(self, **kwargs):
+            calls.append(kwargs)
+            return (
+                {"content": '[{"item":"check","verdict":"PASS","severity":"advisory","reason":"ok"}]'},
+                {
+                    "provider": "openai",
+                    "resolved_model": "openai/gpt-5.2",
+                    "prompt_tokens": 12,
+                    "completion_tokens": 6,
+                    "cost": 0.02,
+                },
+            )
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.2")
+    monkeypatch.setattr(review_module, "LLMClient", FakeLLMClient)
+    monkeypatch.setattr(review_module, "_load_bible", lambda: "Bible")
+
+    ctx = ToolContext(repo_dir=pathlib.Path(tmp_path), drive_root=pathlib.Path(tmp_path))
+    result = asyncio.run(
+        review_module._multi_model_review_async(
+            "review target",
+            "review instructions",
+            ["openai::gpt-5.2"],
+            ctx,
+        )
+    )
+
+    assert calls
+    assert calls[0]["model"] == "openai::gpt-5.2"
+    assert result["results"][0]["model"] == "openai/gpt-5.2"
+    assert ctx.pending_events[0]["provider"] == "openai"
+    assert ctx.pending_events[0]["api_key_type"] == "openai"

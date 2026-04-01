@@ -20,6 +20,10 @@ from ouroboros.utils import utc_now_iso, read_text, append_jsonl
 log = logging.getLogger(__name__)
 
 
+def _is_stable_release_tag(tag: str) -> bool:
+    return bool(re.match(r"^\d+\.\d+\.\d+$", str(tag or "").strip()))
+
+
 def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
     """Check for uncommitted changes and attempt auto-rescue commit."""
     import re
@@ -122,9 +126,11 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
         else:
             latest_tag = result.stdout.strip().lstrip('v')
             result_data["latest_tag"] = latest_tag
-            if version_file != latest_tag:
+            if _is_stable_release_tag(latest_tag) and version_file != latest_tag:
                 result_data["status"] = "warning"
                 issue_count += 1
+            elif not _is_stable_release_tag(latest_tag):
+                result_data["tag_sync"] = "ignored_non_release_tag"
 
         if issue_count == 0:
             result_data["status"] = "ok"

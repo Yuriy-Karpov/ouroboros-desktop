@@ -23,7 +23,7 @@ from ouroboros.memory import Memory
 log = logging.getLogger(__name__)
 
 
-def _build_user_content(task: Dict[str, Any]) -> Any:
+def build_user_content(task: Dict[str, Any]) -> Any:
     """Build user message content. Supports text + optional image."""
     text = task.get("text", "")
     image_b64 = task.get("image_base64")
@@ -824,7 +824,7 @@ def build_llm_messages(
                 },
             ],
         },
-        {"role": "user", "content": _build_user_content(task)},
+        {"role": "user", "content": build_user_content(task)},
     ]
 
     messages, cap_info = apply_message_token_soft_cap(messages, soft_cap_tokens)

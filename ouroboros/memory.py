@@ -69,6 +69,9 @@ class Memory:
     def identity_path(self) -> pathlib.Path:
         return self._memory_path("identity.md")
 
+    def world_path(self) -> pathlib.Path:
+        return self._memory_path("WORLD.md")
+
     def journal_path(self) -> pathlib.Path:
         return self._memory_path("scratchpad_journal.jsonl")
 
@@ -256,6 +259,13 @@ class Memory:
             write_text(self.scratchpad_path(), self._default_scratchpad())
         if not self.identity_path().exists():
             write_text(self.identity_path(), self._default_identity())
+        if not self.world_path().exists():
+            try:
+                from ouroboros.world_profiler import generate_world_profile
+
+                generate_world_profile(str(self.world_path()))
+            except Exception:
+                log.debug("Failed to generate WORLD.md during memory bootstrap", exc_info=True)
         if not self.journal_path().exists():
             write_text(self.journal_path(), "")
         if not self.identity_journal_path().exists():

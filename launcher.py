@@ -24,6 +24,13 @@ import threading
 import time
 from typing import Optional
 
+from ouroboros import get_version
+from ouroboros.launcher_bootstrap import (
+    BootstrapContext,
+    bootstrap_repo as _bootstrap_repo,
+    check_git as _check_git,
+    install_deps as _install_deps_impl,
+)
 from ouroboros.compat import (
     IS_WINDOWS, IS_MACOS,
     embedded_python_candidates, kill_process_on_port, force_kill_pid,
@@ -38,8 +45,10 @@ from ouroboros.compat import (
 from ouroboros.config import (
     HOME, APP_ROOT, REPO_DIR, DATA_DIR, SETTINGS_PATH, PID_FILE, PORT_FILE,
     RESTART_EXIT_CODE, PANIC_EXIT_CODE, AGENT_SERVER_PORT,
-    read_version, load_settings, save_settings, acquire_pid_lock, release_pid_lock,
+    load_settings, save_settings, acquire_pid_lock, release_pid_lock,
 )
+from ouroboros.onboarding_wizard import build_onboarding_html, prepare_onboarding_settings
+from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
 MAX_CRASH_RESTARTS = 5
 CRASH_WINDOW_SEC = 120
 
@@ -63,7 +72,7 @@ logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=_handlers)
 log = logging.getLogger("launcher")
 
 
-APP_VERSION = read_version()
+APP_VERSION = get_version()
 
 # Windows: prevent console windows when spawning subprocesses from the GUI app.
 _SUBPROCESS_NO_WINDOW = (
@@ -204,242 +213,36 @@ def _prepare_windows_webview_runtime() -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Bootstrap
 # ---------------------------------------------------------------------------
-def check_git() -> bool:
-    if shutil.which("git") is not None:
-        return True
-    if IS_WINDOWS:
-        for _candidate in (
-            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "cmd", "git.exe"),
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "cmd", "git.exe"),
-        ):
-            if os.path.isfile(_candidate):
-                git_dir = os.path.dirname(_candidate)
-                os.environ["PATH"] = git_dir + ";" + os.environ.get("PATH", "")
-                return True
-    return False
-
-
-def _sync_core_files() -> None:
-    """Sync core files from bundle to REPO_DIR on every launch."""
+def _bundle_dir() -> pathlib.Path:
     if getattr(sys, "frozen", False):
-        bundle_dir = pathlib.Path(sys._MEIPASS)
-    else:
-        bundle_dir = pathlib.Path(__file__).parent
-
-    sync_paths = [
-        "ouroboros/safety.py",
-        "prompts/SAFETY.md",
-        "ouroboros/tools/registry.py",
-    ]
-    for rel in sync_paths:
-        src = bundle_dir / rel
-        dst = REPO_DIR / rel
-        if src.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-    log.info("Synced %d core files to %s", len(sync_paths), REPO_DIR)
+        return pathlib.Path(sys._MEIPASS)
+    return pathlib.Path(__file__).parent
 
 
-def _commit_synced_files() -> None:
-    """Commit sync'd safety files so git reset --hard doesn't revert them."""
-    try:
-        for rel in ["ouroboros/safety.py", "prompts/SAFETY.md", "ouroboros/tools/registry.py"]:
-            _hidden_run(["git", "add", rel], cwd=str(REPO_DIR), check=False, capture_output=True)
-        status = _hidden_run(
-            ["git", "status", "--porcelain", "--",
-             "ouroboros/safety.py", "prompts/SAFETY.md", "ouroboros/tools/registry.py"],
-            cwd=str(REPO_DIR), capture_output=True, text=True,
-        )
-        if status.stdout.strip():
-            _hidden_run(
-                ["git", "commit", "-m", "safety-sync: restore protected files from bundle"],
-                cwd=str(REPO_DIR), check=False, capture_output=True,
-            )
-            log.info("Committed synced safety files.")
-    except Exception as e:
-        log.warning("Failed to commit synced files: %s", e)
+def _bootstrap_context() -> BootstrapContext:
+    return BootstrapContext(
+        bundle_dir=_bundle_dir(),
+        repo_dir=REPO_DIR,
+        data_dir=DATA_DIR,
+        settings_path=SETTINGS_PATH,
+        embedded_python=EMBEDDED_PYTHON,
+        app_version=APP_VERSION,
+        hidden_run=_hidden_run,
+        save_settings=save_settings,
+        log=log,
+    )
 
 
-_REPO_GITIGNORE = """\
-# Secrets
-.env
-.env.*
-*.key
-*.pem
-
-# IDE
-.cursor/
-.vscode/
-.idea/
-
-# Python bytecode
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-
-# Build artifacts
-dist/
-build/
-.pytest_cache/
-.mypy_cache/
-
-# Native / binary artifacts (PyInstaller, compiled extensions)
-*.so
-*.dylib
-*.dll
-*.dist-info/
-base_library.zip
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Release artifacts
-.create_release.py
-.release_notes.md
-python-standalone/
-"""
-
-
-def _ensure_repo_gitignore(repo_dir: pathlib.Path) -> None:
-    """Write .gitignore if missing — MUST run before any git add -A."""
-    gi = repo_dir / ".gitignore"
-    if not gi.exists():
-        gi.write_text(_REPO_GITIGNORE, encoding="utf-8")
+def check_git() -> bool:
+    return _check_git(IS_WINDOWS)
 
 
 def bootstrap_repo() -> None:
-    """Copy bundled codebase to REPO_DIR on first run, sync core files always."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if REPO_DIR.exists() and (REPO_DIR / "server.py").exists():
-        _sync_core_files()
-        _commit_synced_files()
-        return
-
-    needs_full_bootstrap = not REPO_DIR.exists()
-    log.info("Bootstrapping repository to %s (full=%s)", REPO_DIR, needs_full_bootstrap)
-
-    if getattr(sys, "frozen", False):
-        bundle_dir = pathlib.Path(sys._MEIPASS)
-    else:
-        bundle_dir = pathlib.Path(__file__).parent
-
-    if needs_full_bootstrap:
-        shutil.copytree(bundle_dir, REPO_DIR, ignore=shutil.ignore_patterns(
-            "repo", "data", "build", "dist", ".git", "__pycache__", "venv", ".venv",
-            "Ouroboros.spec", "run_demo.sh", "demo_app.py", "app.py", "launcher.py",
-            "colab_launcher.py", "colab_bootstrap_shim.py",
-            "python-standalone",
-            "*.pyc", "*.pyo", "*.so", "*.dylib", "*.dll",
-            "*.dist-info", "base_library.zip",
-        ))
-    else:
-        for item in ("server.py", "web", "assets"):
-            src = bundle_dir / item
-            dst = REPO_DIR / item
-            if src.exists() and not dst.exists():
-                if src.is_dir():
-                    shutil.copytree(src, dst)
-                else:
-                    shutil.copy2(src, dst)
-
-    # Initialize git repo if new
-    if needs_full_bootstrap:
-        _ensure_repo_gitignore(REPO_DIR)
-        try:
-            _hidden_run(["git", "init"], cwd=str(REPO_DIR), check=True, capture_output=True)
-            _hidden_run(["git", "config", "user.name", "Ouroboros"], cwd=str(REPO_DIR), check=True, capture_output=True)
-            _hidden_run(["git", "config", "user.email", "ouroboros@local.mac"], cwd=str(REPO_DIR), check=True, capture_output=True)
-            _hidden_run(["git", "add", "-A"], cwd=str(REPO_DIR), check=True, capture_output=True)
-            _hidden_run(["git", "commit", "-m", "Initial commit from app bundle"], cwd=str(REPO_DIR), check=False, capture_output=True)
-            _hidden_run(["git", "branch", "-M", "ouroboros"], cwd=str(REPO_DIR), check=False, capture_output=True)
-            _hidden_run(["git", "branch", "ouroboros-stable"], cwd=str(REPO_DIR), check=False, capture_output=True)
-        except Exception as e:
-            log.error("Git init failed: %s", e)
-
-    # Generate world profile
-    try:
-        memory_dir = DATA_DIR / "memory"
-        memory_dir.mkdir(parents=True, exist_ok=True)
-        world_path = memory_dir / "WORLD.md"
-        if not world_path.exists():
-            env = os.environ.copy()
-            env["PYTHONPATH"] = str(REPO_DIR)
-            _hidden_run(
-                [EMBEDDED_PYTHON, "-c",
-                 f"import sys; sys.path.insert(0, '{REPO_DIR}'); "
-                 f"from ouroboros.world_profiler import generate_world_profile; "
-                 f"generate_world_profile('{world_path}')"],
-                env=env, timeout=30, capture_output=True,
-            )
-    except Exception as e:
-        log.warning("World profile generation failed: %s", e)
-
-    # Migrate old settings if needed
-    _migrate_old_settings()
-
-    # Install dependencies
-    _install_deps()
-    log.info("Bootstrap complete.")
-
-
-def _migrate_old_settings() -> None:
-    """Migrate old-style env-only settings to settings.json for existing users."""
-    if SETTINGS_PATH.exists():
-        return
-
-    migrated = {}
-    env_keys = [
-        "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-        "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
-        "OUROBOROS_MODEL_FALLBACK", "TOTAL_BUDGET", "OUROBOROS_MAX_WORKERS",
-        "OUROBOROS_SOFT_TIMEOUT_SEC", "OUROBOROS_HARD_TIMEOUT_SEC",
-        "GITHUB_TOKEN", "GITHUB_REPO",
-    ]
-    for key in env_keys:
-        val = os.environ.get(key, "")
-        if val:
-            try:
-                if key in ("TOTAL_BUDGET",):
-                    migrated[key] = float(val)
-                elif key in ("OUROBOROS_MAX_WORKERS", "OUROBOROS_SOFT_TIMEOUT_SEC", "OUROBOROS_HARD_TIMEOUT_SEC"):
-                    migrated[key] = int(val)
-                else:
-                    migrated[key] = val
-            except (ValueError, TypeError):
-                migrated[key] = val
-
-    # Also check for old settings.json in data/state/
-    old_settings = DATA_DIR / "state" / "settings.json"
-    if old_settings.exists():
-        try:
-            old = json.loads(old_settings.read_text(encoding="utf-8"))
-            for key in env_keys:
-                if key in old and key not in migrated:
-                    migrated[key] = old[key]
-        except Exception:
-            pass
-
-    if migrated:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        SETTINGS_PATH.write_text(json.dumps(migrated, indent=2), encoding="utf-8")
-        log.info("Migrated %d settings to %s", len(migrated), SETTINGS_PATH)
+    _bootstrap_repo(_bootstrap_context())
 
 
 def _install_deps() -> None:
-    """Install Python dependencies for the agent."""
-    req_file = REPO_DIR / "requirements.txt"
-    if not req_file.exists():
-        return
-    log.info("Installing agent dependencies...")
-    try:
-        _hidden_run(
-            [EMBEDDED_PYTHON, "-m", "pip", "install", "-q", "-r", str(req_file)],
-            timeout=300, capture_output=True,
-        )
-    except Exception as e:
-        log.warning("Dependency install failed: %s", e)
+    _install_deps_impl(_bootstrap_context())
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +263,7 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     env["OUROBOROS_DATA_DIR"] = str(DATA_DIR)
     env["OUROBOROS_REPO_DIR"] = str(REPO_DIR)
     env["OUROBOROS_APP_VERSION"] = str(APP_VERSION)
+    env["OUROBOROS_MANAGED_BY_LAUNCHER"] = "1"
 
     # Pass settings as env vars
     settings = _load_settings()
@@ -660,8 +464,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
 
         if exit_code == RESTART_EXIT_CODE:
             log.info("Agent requested restart (exit code 42). Restarting...")
-            _sync_core_files()
-            _commit_synced_files()
+            _sync_existing_repo_from_bundle()
             _install_deps()
             _kill_stale_on_port(port)
             continue
@@ -689,135 +492,16 @@ def _load_settings() -> dict:
 # ---------------------------------------------------------------------------
 # First-run wizard
 # ---------------------------------------------------------------------------
-_WIZARD_HTML = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:#0d0b0f; color:#e2e8f0; font-family:-apple-system,system-ui,sans-serif;
-       display:flex; align-items:center; justify-content:center; min-height:100vh; padding:20px 0; }
-.card { background:rgba(255,255,255,.06); border-radius:16px; padding:28px 32px; width:480px;
-        max-height:90vh; overflow-y:auto; }
-h2 { font-size:22px; margin-bottom:4px; color:#e85d6f; }
-.sub { color:rgba(255,255,255,.5); font-size:13px; margin-bottom:16px; }
-h3 { font-size:14px; color:rgba(255,255,255,.6); margin-top:18px; margin-bottom:8px;
-     border-top:1px solid rgba(255,255,255,.08); padding-top:14px; }
-label { display:block; font-size:12px; color:rgba(255,255,255,.5); margin-bottom:4px; margin-top:10px; }
-input, select { width:100%; padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.12);
-        background:#1a1520; color:#e2e8f0; font-size:14px; outline:none; font-family:inherit; }
-input:focus, select:focus { border-color:#e85d6f; }
-.row { display:flex; gap:12px; }
-.row .field { flex:1; }
-.hint { font-size:11px; color:rgba(255,255,255,.35); margin-top:3px; }
-.btn { margin-top:20px; width:100%; padding:11px; border-radius:8px; border:none;
-       background:#dc2626; color:#fff; font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; }
-.btn:hover { background:#b91c1c; }
-.btn:disabled { opacity:.4; cursor:default; background:#7f1d1d; }
-.err { color:#ef4444; font-size:12px; margin-top:8px; display:none; }
-a { color:#e85d6f; }
-.opt { font-size:11px; color:rgba(255,255,255,.35); font-style:italic; }
-</style></head><body>
-<div class="card">
-  <h2>Ouroboros</h2>
-  <p class="sub">Configure your LLM provider. Everything can be changed later in Settings.</p>
-
-  <h3>Cloud LLM (OpenRouter)</h3>
-  <label>OpenRouter API Key <span class="opt">— required for cloud models</span></label>
-  <input id="api-key" type="password" placeholder="sk-or-v1-..." autofocus>
-  <p class="hint">Get one at <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></p>
-  <div class="row">
-    <div class="field"><label>Main Model</label><input id="model" value="anthropic/claude-opus-4.6"></div>
-    <div class="field"><label>Budget ($)</label><input id="budget" type="number" value="10" min="1" step="1" style="width:100px"></div>
-  </div>
-
-  <label>OpenAI API Key <span class="opt">— for web search</span></label>
-  <input id="openai-key" type="password" placeholder="sk-...">
-  <p class="hint">Enables the web_search tool. <a href="https://platform.openai.com/api-keys" target="_blank">Get key</a></p>
-
-  <h3>Local Model (optional)</h3>
-  <label>Preset</label>
-  <select id="local-preset">
-    <option value="">None — use cloud only</option>
-    <option value="qwen25-7b">Qwen2.5-7B Instruct Q3_K_M (~3.9 GB, 16 GB RAM)</option>
-    <option value="qwen3-14b">Qwen3-14B Instruct Q4_K_M (~9 GB, 32 GB RAM)</option>
-    <option value="qwen3-32b">Qwen3-32B Instruct Q4_K_M (~20 GB, 64 GB RAM)</option>
-    <option value="custom">Custom — I'll enter HuggingFace repo</option>
-  </select>
-  <div id="custom-fields" style="display:none">
-    <label>HuggingFace Source</label>
-    <input id="local-source" placeholder="Qwen/Qwen2.5-7B-Instruct-GGUF">
-    <label>GGUF Filename</label>
-    <input id="local-filename" placeholder="qwen2.5-7b-instruct-q3_k_m.gguf">
-  </div>
-
-  <p class="err" id="err"></p>
-  <button class="btn" id="save-btn" disabled>Start Ouroboros</button>
-</div>
-<script>
-const PRESETS = {
-    'qwen25-7b':  { source: 'Qwen/Qwen2.5-7B-Instruct-GGUF', filename: 'qwen2.5-7b-instruct-q3_k_m.gguf', ctx: 16384 },
-    'qwen3-14b':  { source: 'Qwen/Qwen3-14B-GGUF', filename: 'Qwen3-14B-Q4_K_M.gguf', ctx: 16384 },
-    'qwen3-32b':  { source: 'Qwen/Qwen3-32B-GGUF', filename: 'Qwen3-32B-Q4_K_M.gguf', ctx: 32768 },
-};
-const keyInput = document.getElementById('api-key');
-const preset = document.getElementById('local-preset');
-const btn = document.getElementById('save-btn');
-
-function validate() {
-    const hasKey = keyInput.value.trim().length >= 10;
-    const hasLocal = preset.value !== '';
-    btn.disabled = !(hasKey || hasLocal);
-}
-keyInput.addEventListener('input', validate);
-preset.addEventListener('change', () => {
-    document.getElementById('custom-fields').style.display = preset.value === 'custom' ? '' : 'none';
-    validate();
-});
-
-btn.addEventListener('click', async () => {
-    btn.disabled = true; btn.textContent = 'Saving...';
-    const data = {
-        TOTAL_BUDGET: parseFloat(document.getElementById('budget').value) || 10,
-        OUROBOROS_MODEL: document.getElementById('model').value.trim() || 'anthropic/claude-opus-4.6',
-    };
-    const orKey = keyInput.value.trim();
-    if (orKey.length >= 10) data.OPENROUTER_API_KEY = orKey;
-    const oaiKey = document.getElementById('openai-key').value.trim();
-    if (oaiKey.length >= 10) data.OPENAI_API_KEY = oaiKey;
-    const p = preset.value;
-    const defaultGpuLayers = navigator.platform.startsWith('Mac') ? -1 : 0;
-    if (p && p !== 'custom' && PRESETS[p]) {
-        data.LOCAL_MODEL_SOURCE = PRESETS[p].source;
-        data.LOCAL_MODEL_FILENAME = PRESETS[p].filename;
-        data.LOCAL_MODEL_CONTEXT_LENGTH = PRESETS[p].ctx;
-        data.LOCAL_MODEL_N_GPU_LAYERS = defaultGpuLayers;
-        data.USE_LOCAL_MAIN = !orKey;
-        data.USE_LOCAL_LIGHT = !orKey;
-        data.USE_LOCAL_CODE = !orKey;
-        data.USE_LOCAL_FALLBACK = true;
-    } else if (p === 'custom') {
-        data.LOCAL_MODEL_SOURCE = document.getElementById('local-source').value.trim();
-        data.LOCAL_MODEL_FILENAME = document.getElementById('local-filename').value.trim();
-        data.LOCAL_MODEL_N_GPU_LAYERS = defaultGpuLayers;
-        data.USE_LOCAL_MAIN = !orKey;
-        data.USE_LOCAL_LIGHT = !orKey;
-        data.USE_LOCAL_CODE = !orKey;
-        data.USE_LOCAL_FALLBACK = true;
-    }
-    const result = await window.pywebview.api.save_wizard(data);
-    if (result === 'ok') { btn.textContent = 'Starting...'; }
-    else { document.getElementById('err').style.display='block';
-           document.getElementById('err').textContent=result; btn.disabled=false; btn.textContent='Start Ouroboros'; }
-});
-</script></body></html>"""
-
-
 def _save_settings(settings: dict) -> None:
     save_settings(settings)
 
 
 def _run_first_run_wizard() -> bool:
-    """Show setup wizard if no API key or local model configured. Returns True if configured."""
-    settings = _load_settings()
-    if settings.get("OPENROUTER_API_KEY") or settings.get("LOCAL_MODEL_SOURCE"):
+    """Show setup wizard if no runtime provider or local model is configured."""
+    settings, provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(_load_settings())
+    if provider_defaults_changed:
+        _save_settings(settings)
+    if has_startup_ready_provider(settings):
         return True
 
     import webview
@@ -825,11 +509,11 @@ def _run_first_run_wizard() -> bool:
 
     class WizardApi:
         def save_wizard(self, data: dict) -> str:
-            key = str(data.get("OPENROUTER_API_KEY", "")).strip()
-            has_local = bool(data.get("LOCAL_MODEL_SOURCE", "").strip())
-            if len(key) < 10 and not has_local:
-                return "Provide an OpenRouter API key or select a local model."
-            settings.update(data)
+            prepared_settings, error = prepare_onboarding_settings(data, settings)
+            if error:
+                return error
+            settings.update(prepared_settings)
+            settings.update(apply_runtime_provider_defaults(settings)[0])
             try:
                 _save_settings(settings)
                 _wizard_done["ok"] = True
@@ -841,10 +525,11 @@ def _run_first_run_wizard() -> bool:
 
     webview.create_window(
         "Ouroboros — Setup",
-        html=_WIZARD_HTML,
+        html=build_onboarding_html(settings, host_mode="desktop"),
         js_api=WizardApi(),
-        width=520,
-        height=480,
+        width=980,
+        height=780,
+        min_size=(840, 640),
     )
     webview.start()
     return _wizard_done["ok"]
@@ -939,7 +624,7 @@ def main():
     # Bootstrap
     bootstrap_repo()
 
-    # First-run wizard (API key)
+    # First-run wizard (runtime provider)
     if not _run_first_run_wizard():
         log.info("Wizard was closed without saving. Launching anyway (Settings page available).")
 

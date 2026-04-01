@@ -18,6 +18,7 @@ DEFAULT_REASONING_EFFORT = "high"
 
 _OPENAI_PRICING = {
     "gpt-5.2": (1.75, 14.0),
+    "gpt-5.4-mini": (0.75, 4.5),
     "gpt-4.1": (2.0, 8.0),
     "o3": (2.0, 8.0),
     "o4-mini": (1.10, 4.40),
@@ -38,6 +39,16 @@ def _estimate_openai_cost(model: str, input_tokens: int, output_tokens: int) -> 
     return round(input_tokens * input_price / 1_000_000 + output_tokens * output_price / 1_000_000, 6)
 
 
+def _resolve_openai_client_settings() -> tuple[str, str | None, str, str]:
+    """Return credentials only for official OpenAI Responses web search."""
+    official_key = (os.environ.get("OPENAI_API_KEY", "") or "").strip()
+    legacy_base_url = (os.environ.get("OPENAI_BASE_URL", "") or "").strip()
+
+    if official_key and not legacy_base_url:
+        return official_key, None, "openai", "openai"
+    return "", None, "openai", "openai"
+
+
 def _web_search(
     ctx: ToolContext,
     query: str,
@@ -45,10 +56,13 @@ def _web_search(
     search_context_size: str = "",
     reasoning_effort: str = "",
 ) -> str:
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key, base_url, provider, api_key_type = _resolve_openai_client_settings()
     if not api_key:
         return json.dumps({
-            "error": "OPENAI_API_KEY not set. Configure it in Settings to enable web search."
+            "error": (
+                "web_search requires the official OpenAI Responses API. "
+                "Set OPENAI_API_KEY and leave OPENAI_BASE_URL empty."
+            ),
         })
 
     active_model = model or os.environ.get("OUROBOROS_WEBSEARCH_MODEL", DEFAULT_SEARCH_MODEL)
@@ -57,7 +71,7 @@ def _web_search(
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, base_url=base_url)
         resp = client.responses.create(
             model=active_model,
             tools=[{
@@ -85,9 +99,9 @@ def _web_search(
             try:
                 ctx.pending_events.append({
                     "type": "llm_usage",
-                    "provider": "openai_websearch",
+                    "provider": provider,
                     "model": active_model,
-                    "api_key_type": "openai",
+                    "api_key_type": api_key_type,
                     "model_category": "websearch",
                     "prompt_tokens": input_tokens,
                     "completion_tokens": output_tokens,

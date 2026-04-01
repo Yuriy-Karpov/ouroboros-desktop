@@ -1,14 +1,25 @@
 import { escapeHtml } from './utils.js';
+import {
+    LOG_CATEGORIES,
+    categorizeLogEvent,
+    duplicateLogEventKey,
+    getLogTaskGroupId,
+    isGroupedTaskEvent,
+    normalizeLogTs,
+    prettyLogEvent,
+    summarizeLogEvent,
+} from './log_events.js';
 
 export function initLogs({ ws, state }) {
-    const categories = {
-        tools: { label: 'Tools', color: 'var(--blue)' },
-        llm: { label: 'LLM', color: 'var(--accent)' },
-        errors: { label: 'Errors', color: 'var(--red)' },
-        tasks: { label: 'Tasks', color: 'var(--amber)' },
-        system: { label: 'System', color: 'var(--text-muted)' },
-        consciousness: { label: 'Consciousness', color: 'var(--accent)' },
-    };
+    const MAX_LOGS = 500;
+    const MAX_TASK_EVENTS = 30;
+    const duplicateWindowMs = 5000;
+    const duplicateState = new Map();
+    const taskGroups = new Map();
+
+    state.activeFilters = state.activeFilters || Object.fromEntries(
+        Object.keys(LOG_CATEGORIES).map((key) => [key, true]),
+    );
 
     const page = document.createElement('div');
     page.id = 'page-logs';
@@ -25,434 +36,76 @@ export function initLogs({ ws, state }) {
     `;
     document.getElementById('content').appendChild(page);
 
-    const filtersDiv = document.getElementById('log-filters');
-    Object.entries(categories).forEach(([key, cat]) => {
-        const chip = document.createElement('button');
-        chip.className = `filter-chip ${state.activeFilters[key] ? 'active' : ''}`;
-        chip.textContent = cat.label;
-        chip.addEventListener('click', () => {
-            state.activeFilters[key] = !state.activeFilters[key];
-            chip.classList.toggle('active');
-            logEntries.querySelectorAll('.log-entry').forEach(el => {
-                const entryCat = el.dataset.category;
-                if (entryCat) {
-                    el.style.display = state.activeFilters[entryCat] ? '' : 'none';
-                }
-            });
+    const filtersDiv = page.querySelector('#log-filters');
+    const logEntries = page.querySelector('#log-entries');
+    const logsNavBtn = document.querySelector('.nav-btn[data-page="logs"]');
+
+    function scrollToLatest() {
+        if (state.activePage !== 'logs') return;
+        requestAnimationFrame(() => {
+            logEntries.scrollTop = logEntries.scrollHeight;
         });
-        filtersDiv.appendChild(chip);
-    });
-
-    const logEntries = document.getElementById('log-entries');
-    const MAX_LOGS = 500;
-    const duplicateWindowMs = 5000;
-    const duplicateState = new Map();
-
-    function categorizeEvent(evt) {
-        const t = evt.type || evt.event || '';
-        if (evt.is_progress) {
-            return evt.task_id === 'bg-consciousness' ? 'consciousness' : 'tasks';
-        }
-        if (t.includes('error') || t.includes('crash') || t.includes('fail')) return 'errors';
-        if (t.includes('llm') || t.includes('model')) return 'llm';
-        if (t.includes('tool') || evt.tool) return 'tools';
-        if (t.includes('task') || t.includes('evolution') || t.includes('review')) return 'tasks';
-        if (t.includes('consciousness') || t.includes('bg_')) return 'consciousness';
-        return 'system';
-    }
-
-    function normalizeTs(isoStr) {
-        if (!isoStr) return '';
-        try {
-            const d = new Date(isoStr);
-            if (Number.isNaN(d.getTime())) return '';
-            return d.toLocaleTimeString([], { hour12: false });
-        } catch {
-            return '';
-        }
-    }
-
-    function shortText(text, maxLen = 180) {
-        const s = String(text || '').replace(/\s+/g, ' ').trim();
-        if (!s) return '';
-        return s.length > maxLen ? s.slice(0, maxLen - 3) + '...' : s;
-    }
-
-    function formatMoney(v) {
-        const num = Number(v);
-        if (!Number.isFinite(num) || num <= 0) return '';
-        return `$${num.toFixed(4)}`;
-    }
-
-    function formatDuration(sec) {
-        const num = Number(sec);
-        if (!Number.isFinite(num) || num < 0) return '';
-        if (num >= 60) {
-            const mins = Math.floor(num / 60);
-            const rem = Math.round(num % 60);
-            return `${mins}m ${rem}s`;
-        }
-        return `${num < 10 ? num.toFixed(1) : Math.round(num)}s`;
-    }
-
-    function formatTokens(evt) {
-        const prompt = Number(evt.prompt_tokens || 0);
-        const completion = Number(evt.completion_tokens || 0);
-        if (!prompt && !completion) return '';
-        return `${prompt}\u2192${completion} tok`;
-    }
-
-    function compactJson(value, maxLen = 220) {
-        if (value == null) return '';
-        let txt = '';
-        try {
-            txt = JSON.stringify(value);
-        } catch {
-            txt = String(value);
-        }
-        return shortText(txt, maxLen);
-    }
-
-    function describeStartupChecks(checks) {
-        if (!checks || typeof checks !== 'object') return '';
-        const parts = [];
-        for (const [key, value] of Object.entries(checks)) {
-            if (value && typeof value === 'object' && value.status) {
-                parts.push(`${key}:${value.status}`);
-            }
-        }
-        return shortText(parts.join(' | '), 240);
-    }
-
-    function summarizeEvent(evt) {
-        const t = evt.type || evt.event || 'unknown';
-        const base = {
-            typeLabel: t,
-            phase: '',
-            headline: '',
-            body: '',
-            meta: [],
-        };
-
-        if (evt.is_progress || t === 'send_message') {
-            return {
-                ...base,
-                phase: evt.task_id === 'bg-consciousness' ? 'thought' : 'progress',
-                headline: shortText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240) || 'Progress update',
-                meta: [evt.task_id === 'bg-consciousness' ? 'background' : 'task'].filter(Boolean),
-            };
-        }
-
-        if (t === 'task_started') {
-            return {
-                ...base,
-                phase: 'start',
-                headline: `Started ${evt.task_type || 'task'}`,
-                body: shortText(evt.task_text, 220),
-                meta: [evt.task_id ? `task=${evt.task_id}` : '', evt.direct_chat ? 'chat' : 'queued'].filter(Boolean),
-            };
-        }
-
-        if (t === 'task_received') {
-            const task = evt.task || {};
-            return {
-                ...base,
-                phase: 'queued',
-                headline: `Received ${task.type || 'task'}`,
-                body: shortText(task.text, 220),
-                meta: [task.id ? `task=${task.id}` : '', task.text_len ? `${task.text_len} chars` : ''].filter(Boolean),
-            };
-        }
-
-        if (t === 'context_building_started') {
-            return {
-                ...base,
-                phase: 'context',
-                headline: 'Building context',
-                meta: [evt.task_id ? `task=${evt.task_id}` : '', evt.task_type || ''].filter(Boolean),
-            };
-        }
-
-        if (t === 'context_building_finished') {
-            return {
-                ...base,
-                phase: 'ready',
-                headline: 'Context ready',
-                meta: [
-                    evt.task_id ? `task=${evt.task_id}` : '',
-                    evt.message_count != null ? `${evt.message_count} msgs` : '',
-                    Number.isFinite(Number(evt.budget_remaining_usd)) ? `$${Number(evt.budget_remaining_usd).toFixed(2)} left` : '',
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'task_heartbeat') {
-            return {
-                ...base,
-                phase: evt.phase || 'alive',
-                headline: 'Still working',
-                meta: [
-                    evt.task_id ? `task=${evt.task_id}` : '',
-                    evt.task_type || '',
-                    formatDuration(evt.runtime_sec),
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'llm_round_started') {
-            return {
-                ...base,
-                phase: 'calling',
-                headline: `Calling ${evt.model || 'model'}`,
-                meta: [
-                    evt.task_id ? `task=${evt.task_id}` : '',
-                    evt.round ? `r${evt.round}` : '',
-                    evt.attempt ? `try ${evt.attempt}` : '',
-                    evt.reasoning_effort || '',
-                    evt.use_local ? 'local' : '',
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'llm_round_finished' || t === 'llm_round') {
-            return {
-                ...base,
-                phase: 'done',
-                headline: `LLM round ${evt.round || ''} finished`.trim(),
-                meta: [
-                    evt.task_id ? `task=${evt.task_id}` : '',
-                    evt.model || '',
-                    formatTokens(evt),
-                    formatMoney(evt.cost_usd || evt.cost),
-                    evt.response_kind === 'tool_calls' ? `${evt.tool_call_count || 0} tool calls` : evt.response_kind || '',
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'llm_round_empty' || t === 'llm_empty_response') {
-            return {
-                ...base,
-                phase: 'empty',
-                headline: `Model returned empty response`,
-                meta: [evt.task_id ? `task=${evt.task_id}` : '', evt.model || '', evt.round ? `r${evt.round}` : ''].filter(Boolean),
-            };
-        }
-
-        if (t === 'llm_round_error' || t === 'llm_api_error') {
-            return {
-                ...base,
-                phase: 'error',
-                headline: 'LLM call failed',
-                body: shortText(evt.error, 260),
-                meta: [evt.task_id ? `task=${evt.task_id}` : '', evt.model || '', evt.round ? `r${evt.round}` : ''].filter(Boolean),
-            };
-        }
-
-        if (t === 'llm_usage') {
-            return {
-                ...base,
-                phase: 'usage',
-                headline: 'LLM usage recorded',
-                meta: [
-                    evt.task_id ? `task=${evt.task_id}` : '',
-                    evt.model || '',
-                    formatTokens(evt),
-                    formatMoney(evt.cost_usd || evt.cost),
-                    evt.category || '',
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'tool_call_started') {
-            return {
-                ...base,
-                phase: 'start',
-                headline: `Running ${evt.tool || 'tool'}`,
-                body: compactJson(evt.args, 260),
-                meta: [evt.task_id ? `task=${evt.task_id}` : '', evt.timeout_sec ? `timeout ${evt.timeout_sec}s` : ''].filter(Boolean),
-            };
-        }
-
-        if (t === 'tool_call_finished') {
-            return {
-                ...base,
-                phase: evt.is_error ? 'error' : 'done',
-                headline: `${evt.tool || 'tool'} ${evt.is_error ? 'failed' : 'finished'}`,
-                body: shortText(evt.result_preview, 260),
-                meta: [evt.task_id ? `task=${evt.task_id}` : '', formatDuration(evt.duration_sec)].filter(Boolean),
-            };
-        }
-
-        if (t === 'tool_call_timeout' || t === 'tool_timeout') {
-            return {
-                ...base,
-                phase: 'timeout',
-                headline: `${evt.tool || 'tool'} timed out`,
-                body: compactJson(evt.args, 220),
-                meta: [evt.task_id ? `task=${evt.task_id}` : '', evt.timeout_sec ? `limit ${evt.timeout_sec}s` : '', formatDuration(evt.duration_sec)].filter(Boolean),
-            };
-        }
-
-        if (t === 'tool_call' || evt.tool) {
-            return {
-                ...base,
-                phase: 'result',
-                headline: `${evt.tool || 'tool'} result`,
-                body: shortText(evt.result_preview || compactJson(evt.args, 220), 260),
-                meta: [evt.task_id ? `task=${evt.task_id}` : ''].filter(Boolean),
-            };
-        }
-
-        if (t === 'task_metrics_event' || t === 'task_eval') {
-            return {
-                ...base,
-                phase: 'metrics',
-                headline: 'Task metrics',
-                meta: [
-                    evt.task_id ? `task=${evt.task_id}` : '',
-                    evt.task_type || '',
-                    formatDuration(evt.duration_sec),
-                    evt.tool_calls != null ? `${evt.tool_calls} tools` : '',
-                    evt.tool_errors ? `${evt.tool_errors} errors` : '',
-                    evt.response_len ? `${evt.response_len} chars` : '',
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'task_done') {
-            return {
-                ...base,
-                phase: 'done',
-                headline: `Finished ${evt.task_type || 'task'}`,
-                meta: [
-                    evt.task_id ? `task=${evt.task_id}` : '',
-                    formatMoney(evt.cost_usd || evt.cost),
-                    evt.total_rounds ? `${evt.total_rounds} rounds` : '',
-                    formatTokens(evt),
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'startup_verification') {
-            return {
-                ...base,
-                phase: Number(evt.issues_count || 0) > 0 ? 'warn' : 'ok',
-                headline: 'Startup verification',
-                body: describeStartupChecks(evt.checks),
-                meta: [
-                    evt.git_sha ? String(evt.git_sha).slice(0, 8) : '',
-                    `${evt.issues_count || 0} issues`,
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'worker_spawn_start') {
-            return {
-                ...base,
-                phase: 'start',
-                headline: `Spawning ${evt.count || '?'} workers`,
-                meta: [evt.start_method || ''].filter(Boolean),
-            };
-        }
-
-        if (t === 'worker_sha_verify') {
-            return {
-                ...base,
-                phase: evt.ok ? 'ok' : 'warn',
-                headline: evt.ok ? 'Worker SHA verified' : 'Worker SHA mismatch',
-                meta: [
-                    evt.expected_sha ? `exp ${String(evt.expected_sha).slice(0, 8)}` : '',
-                    evt.observed_sha ? `got ${String(evt.observed_sha).slice(0, 8)}` : '',
-                    evt.worker_pid ? `pid ${evt.worker_pid}` : '',
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'worker_boot') {
-            return {
-                ...base,
-                phase: 'boot',
-                headline: 'Worker booted',
-                meta: [
-                    evt.pid ? `pid ${evt.pid}` : '',
-                    evt.git_sha ? String(evt.git_sha).slice(0, 8) : '',
-                ].filter(Boolean),
-            };
-        }
-
-        if (t === 'deps_sync_ok') {
-            return {
-                ...base,
-                phase: 'ok',
-                headline: 'Dependencies in sync',
-                meta: [evt.reason || '', shortText(evt.source, 60)].filter(Boolean),
-            };
-        }
-
-        if (t === 'reset_unsynced_rescued_then_reset') {
-            return {
-                ...base,
-                phase: 'warn',
-                headline: 'Recovered dirty worktree before restart',
-                meta: [
-                    evt.reason || '',
-                    evt.dirty_count != null ? `${evt.dirty_count} dirty` : '',
-                    evt.unpushed_count != null ? `${evt.unpushed_count} unpushed` : '',
-                ].filter(Boolean),
-            };
-        }
-
-        if (t.includes('error') || t.includes('crash') || t.includes('fail')) {
-            return {
-                ...base,
-                phase: 'error',
-                headline: t,
-                body: shortText(evt.error || evt.result_preview || evt.text || '', 260),
-                meta: [evt.task_id ? `task=${evt.task_id}` : '', evt.tool ? `tool=${evt.tool}` : ''].filter(Boolean),
-            };
-        }
-
-        return {
-            ...base,
-            phase: 'info',
-            headline: shortText(t, 120),
-            body: shortText(
-                evt.text || evt.error || evt.result_preview || compactJson(evt.args || evt.task || evt.checks, 260),
-                260,
-            ),
-            meta: [
-                evt.task_id ? `task=${evt.task_id}` : '',
-                evt.model || '',
-                formatMoney(evt.cost_usd || evt.cost),
-            ].filter(Boolean),
-        };
-    }
-
-    function duplicateKey(evt) {
-        const t = evt.type || evt.event || '';
-        if (t === 'startup_verification') return `${t}:${evt.git_sha || ''}:${evt.issues_count || 0}`;
-        if (t === 'worker_sha_verify') return `${t}:${evt.expected_sha || ''}:${evt.observed_sha || ''}:${evt.ok ? 1 : 0}`;
-        if (t === 'deps_sync_ok') return `${t}:${evt.reason || ''}:${evt.source || ''}`;
-        return '';
-    }
-
-    function prettyRaw(evt) {
-        try {
-            return JSON.stringify(evt, null, 2);
-        } catch {
-            return String(evt);
-        }
     }
 
     function updateVisibility(entry) {
         entry.style.display = state.activeFilters[entry.dataset.category] ? '' : 'none';
     }
 
-    function addLogEntry(evt) {
-        const view = summarizeEvent(evt);
-        if (!view) return;
-        const cat = categorizeEvent(evt);
-        const dedupeKey = duplicateKey(evt);
+    function renderFilters() {
+        filtersDiv.innerHTML = '';
+        Object.entries(LOG_CATEGORIES).forEach(([key, cat]) => {
+            const chip = document.createElement('button');
+            chip.className = `filter-chip ${state.activeFilters[key] ? 'active' : ''}`;
+            chip.textContent = cat.label;
+            chip.addEventListener('click', () => {
+                state.activeFilters[key] = !state.activeFilters[key];
+                chip.classList.toggle('active');
+                logEntries.querySelectorAll('.log-entry').forEach(updateVisibility);
+                scrollToLatest();
+            });
+            filtersDiv.appendChild(chip);
+        });
+    }
+
+    function trimEntries() {
+        while (logEntries.children.length > MAX_LOGS) {
+            const first = logEntries.firstElementChild;
+            if (!first) break;
+            const removeKey = [...duplicateState.entries()].find(([, tracked]) => tracked.entry === first)?.[0];
+            if (removeKey) duplicateState.delete(removeKey);
+            if (first.dataset.taskGroup) taskGroups.delete(first.dataset.taskGroup);
+            first.remove();
+        }
+    }
+
+    function metaPills(meta) {
+        if (!meta.length) return '';
+        return `<div class="log-meta">${meta.map((item) => `<span class="log-pill">${escapeHtml(item)}</span>`).join('')}</div>`;
+    }
+
+    function bindRawToggle(root) {
+        root.querySelectorAll('.log-raw-toggle').forEach((rawToggle) => {
+            if (rawToggle.dataset.bound === '1') return;
+            const rawEl = rawToggle.parentElement?.nextElementSibling;
+            if (!rawEl || !rawEl.classList.contains('log-raw')) return;
+            rawToggle.dataset.bound = '1';
+            rawToggle.addEventListener('click', () => {
+                const isHidden = rawEl.hasAttribute('hidden');
+                if (isHidden) {
+                    rawEl.removeAttribute('hidden');
+                    rawToggle.textContent = 'Hide raw';
+                } else {
+                    rawEl.setAttribute('hidden', '');
+                    rawToggle.textContent = 'Raw';
+                }
+            });
+        });
+    }
+
+    function createStandaloneEntry(evt) {
+        const view = summarizeLogEvent(evt);
+        const cat = categorizeLogEvent(evt);
+        const dedupeKey = duplicateLogEventKey(evt);
         const now = (() => {
             const parsed = evt.ts ? Date.parse(evt.ts) : NaN;
             return Number.isFinite(parsed) ? parsed : Date.now();
@@ -472,47 +125,38 @@ export function initLogs({ ws, state }) {
                     repeatEl.textContent = `x${last.count}`;
                     repeatEl.style.display = '';
                 }
+                const tsEl = last.entry.querySelector('.log-ts');
+                if (tsEl) tsEl.textContent = normalizeLogTs(evt.ts || evt.timestamp);
+                const rawEl = last.entry.querySelector('.log-raw');
+                if (rawEl) rawEl.textContent = prettyLogEvent(evt);
+                logEntries.appendChild(last.entry);
+                updateVisibility(last.entry);
                 return;
             }
-    }
+        }
 
         const entry = document.createElement('div');
         entry.className = 'log-entry';
         entry.dataset.category = cat;
-        const raw = prettyRaw(evt);
-        const metaHtml = view.meta.length
-            ? `<div class="log-meta">${view.meta.map(item => `<span class="log-pill">${escapeHtml(item)}</span>`).join('')}</div>`
-            : '';
         const bodyHtml = view.body
             ? `<div class="log-body">${escapeHtml(view.body)}</div>`
             : '';
         entry.innerHTML = `
             <div class="log-main">
-                <span class="log-ts">${escapeHtml(normalizeTs(evt.ts))}</span>
+                <span class="log-ts">${escapeHtml(normalizeLogTs(evt.ts || evt.timestamp))}</span>
                 <span class="log-type ${cat}">${escapeHtml(view.typeLabel)}</span>
                 <span class="log-phase ${escapeHtml(view.phase || 'info')}">${escapeHtml(view.phase || 'info')}</span>
                 <span class="log-headline">${escapeHtml(view.headline || 'Event')}</span>
                 <span class="log-repeat" style="display:none"></span>
             </div>
-            ${metaHtml}
+            ${metaPills(view.meta)}
             ${bodyHtml}
             <div class="log-actions">
                 <button class="log-raw-toggle" type="button">Raw</button>
             </div>
-            <pre class="log-raw" hidden>${escapeHtml(raw)}</pre>
+            <pre class="log-raw" hidden>${escapeHtml(prettyLogEvent(evt))}</pre>
         `;
-        const rawToggle = entry.querySelector('.log-raw-toggle');
-        const rawEl = entry.querySelector('.log-raw');
-        rawToggle.addEventListener('click', () => {
-            const isHidden = rawEl.hasAttribute('hidden');
-            if (isHidden) {
-                rawEl.removeAttribute('hidden');
-                rawToggle.textContent = 'Hide raw';
-            } else {
-                rawEl.setAttribute('hidden', '');
-                rawToggle.textContent = 'Raw';
-            }
-        });
+        bindRawToggle(entry);
         updateVisibility(entry);
         logEntries.appendChild(entry);
 
@@ -520,17 +164,147 @@ export function initLogs({ ws, state }) {
             duplicateState.set(dedupeKey, { entry, ts: now, count: 1 });
         }
 
-        while (logEntries.children.length > MAX_LOGS) {
-            logEntries.removeChild(logEntries.firstChild);
-        }
-        if (state.activeFilters[cat]) logEntries.scrollTop = logEntries.scrollHeight;
+        trimEntries();
+        if (state.activeFilters[cat]) scrollToLatest();
     }
+
+    function createTaskGroupCard(groupId, category) {
+        const entry = document.createElement('div');
+        entry.className = 'log-entry log-task-card';
+        entry.dataset.category = category;
+        entry.dataset.taskGroup = groupId;
+        entry.innerHTML = `
+            <div class="log-main">
+                <span class="log-ts" data-task-ts></span>
+                <span class="log-type ${escapeHtml(category)}" data-task-kind>${groupId === 'bg-consciousness' ? 'background' : 'task'}</span>
+                <span class="log-phase info" data-task-phase>info</span>
+                <span class="log-headline" data-task-headline>Task activity</span>
+                <span class="log-repeat" data-task-count style="display:none"></span>
+            </div>
+            <div class="log-task-summary" data-task-summary></div>
+            <details class="log-task-details">
+                <summary>Timeline</summary>
+                <div class="log-task-timeline" data-task-timeline></div>
+            </details>
+        `;
+        const record = {
+            entry,
+            ts: entry.querySelector('[data-task-ts]'),
+            kind: entry.querySelector('[data-task-kind]'),
+            phase: entry.querySelector('[data-task-phase]'),
+            headline: entry.querySelector('[data-task-headline]'),
+            count: entry.querySelector('[data-task-count]'),
+            summary: entry.querySelector('[data-task-summary]'),
+            timeline: entry.querySelector('[data-task-timeline]'),
+            events: 0,
+            category,
+            recent: [],
+        };
+        taskGroups.set(groupId, record);
+        return record;
+    }
+
+    function renderTaskTimeline(record) {
+        record.timeline.innerHTML = record.recent.map((item) => `
+            <div class="log-task-event">
+                <div class="log-main">
+                    <span class="log-ts">${escapeHtml(item.ts)}</span>
+                    <span class="log-phase ${escapeHtml(item.phase || 'info')}">${escapeHtml(item.phase || 'info')}</span>
+                    <span class="log-headline">${escapeHtml(item.headline)}</span>
+                    <span class="log-repeat" style="${item.count > 1 ? '' : 'display:none'}">${item.count > 1 ? `x${item.count}` : ''}</span>
+                </div>
+                ${metaPills(item.meta)}
+                ${item.body ? `<div class="log-body">${escapeHtml(item.body)}</div>` : ''}
+                <div class="log-actions">
+                    <button class="log-raw-toggle" type="button">Raw</button>
+                </div>
+                <pre class="log-raw" hidden>${escapeHtml(item.raw || '')}</pre>
+            </div>
+        `).join('');
+        bindRawToggle(record.timeline);
+    }
+
+    function updateTaskGroupCard(evt) {
+        const groupId = getLogTaskGroupId(evt);
+        if (!groupId) {
+            createStandaloneEntry(evt);
+            return;
+        }
+
+        const view = summarizeLogEvent(evt);
+        const eventCategory = categorizeLogEvent(evt);
+        const category = groupId === 'bg-consciousness'
+            ? 'consciousness'
+            : (eventCategory === 'errors' ? 'errors' : 'tasks');
+        const record = taskGroups.get(groupId) || createTaskGroupCard(groupId, category);
+        const ts = normalizeLogTs(evt.ts || evt.timestamp);
+
+        record.events += 1;
+        record.category = category;
+        record.entry.dataset.category = category;
+        record.ts.textContent = ts;
+        record.kind.textContent = groupId === 'bg-consciousness' ? 'background' : `task ${groupId}`;
+        record.kind.className = `log-type ${category}`;
+        record.phase.textContent = view.phase || 'info';
+        record.phase.className = `log-phase ${view.phase || 'info'}`;
+        record.headline.textContent = view.headline || 'Task activity';
+        record.count.textContent = `x${record.events}`;
+        record.count.style.display = record.events > 1 ? '' : 'none';
+        record.summary.innerHTML = metaPills([
+            groupId === 'bg-consciousness' ? 'background' : `task=${groupId}`,
+            ...view.meta,
+        ]);
+
+        const last = record.recent[record.recent.length - 1];
+        const dedupeKey = duplicateLogEventKey(evt);
+        if (last && last.dupKey && last.dupKey === dedupeKey) {
+            last.count += 1;
+            last.ts = ts;
+            last.meta = view.meta;
+            last.body = view.body;
+            last.raw = prettyLogEvent(evt);
+        } else {
+            record.recent.push({
+                ts,
+                phase: view.phase || 'info',
+                headline: view.headline || 'Task event',
+                meta: view.meta,
+                body: view.body,
+                raw: prettyLogEvent(evt),
+                count: 1,
+                dupKey: dedupeKey,
+            });
+            if (record.recent.length > MAX_TASK_EVENTS) record.recent.shift();
+        }
+
+        renderTaskTimeline(record);
+        updateVisibility(record.entry);
+        logEntries.appendChild(record.entry);
+        trimEntries();
+        if (state.activeFilters[category]) scrollToLatest();
+    }
+
+    function addLogEntry(evt) {
+        if (isGroupedTaskEvent(evt)) {
+            updateTaskGroupCard(evt);
+            return;
+        }
+        createStandaloneEntry(evt);
+    }
+
+    renderFilters();
 
     ws.on('log', (msg) => {
         if (msg.data) addLogEntry(msg.data);
     });
 
-    document.getElementById('btn-clear-logs').addEventListener('click', () => {
+    page.querySelector('#btn-clear-logs').addEventListener('click', () => {
+        duplicateState.clear();
+        taskGroups.clear();
         logEntries.innerHTML = '';
+    });
+
+    logsNavBtn?.addEventListener('click', () => {
+        scrollToLatest();
     });
 }

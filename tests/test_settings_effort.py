@@ -67,6 +67,13 @@ def test_review_enforcement_default_in_config():
 def test_get_review_models_default(monkeypatch):
     """get_review_models() returns the config default when env is unset."""
     monkeypatch.delenv("OUROBOROS_REVIEW_MODELS", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
     models = get_review_models()
     assert isinstance(models, list)
     assert len(models) >= 2
@@ -76,6 +83,13 @@ def test_get_review_models_default(monkeypatch):
 def test_get_review_models_custom(monkeypatch):
     """get_review_models() returns custom models when env is set."""
     monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "a/b,c/d")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
     models = get_review_models()
     assert models == ["a/b", "c/d"]
 
@@ -83,10 +97,68 @@ def test_get_review_models_custom(monkeypatch):
 def test_get_review_models_empty_env_falls_back_to_default(monkeypatch):
     """get_review_models() falls back to default when env is empty string."""
     monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
     models = get_review_models()
     # Must return the default, not an empty list
     assert len(models) >= 2
     assert models == [m.strip() for m in SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"].split(",") if m.strip()]
+
+
+def test_get_review_models_falls_back_to_main_in_openai_only_mode(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.4")
+    monkeypatch.setenv(
+        "OUROBOROS_REVIEW_MODELS",
+        "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+    )
+
+    models = get_review_models()
+
+    assert models == ["openai::gpt-5.4", "openai::gpt-5.4", "openai::gpt-5.4"]
+
+
+def test_get_review_models_preserves_explicit_official_openai_list(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.4")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "openai/gpt-5.4,openai/gpt-4.1")
+
+    models = get_review_models()
+
+    assert models == ["openai::gpt-5.4", "openai::gpt-4.1"]
+
+
+def test_get_review_models_falls_back_to_main_in_anthropic_only_mode(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL", "anthropic::claude-opus-4-6")
+    monkeypatch.setenv(
+        "OUROBOROS_REVIEW_MODELS",
+        "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+    )
+
+    models = get_review_models()
+
+    assert models == ["anthropic::claude-opus-4-6"] * 3
 
 
 def test_get_review_enforcement_default(monkeypatch):

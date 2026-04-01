@@ -14,10 +14,13 @@ def test_ws_has_error_handler_and_reconnect_timer():
     source = _read("web/modules/ws.js")
     assert "socket.onerror" in source
     assert "_scheduleReconnect" in source
-    assert "_reloadFallbackTimer" in source
+    assert "_scheduleUiRecovery" in source
+    assert "_uiRecoveryTimer" in source
     assert "_watchdogTimer" in source
     assert "_lastMessageAt" in source
     assert "_startWatchdog" in source
+    assert "window.location.replace" in source
+    assert "location.reload()" not in source
 
 
 def test_ws_queues_outbound_messages_when_disconnected():
@@ -40,6 +43,8 @@ def test_chat_resyncs_history_after_reconnect():
     assert "/api/chat/history?limit=1000" in source
     assert "cache: 'no-store'" in source
     assert "syncHistory({ includeUser: !historyLoaded })" in source
+    assert "const expectedDisconnect = socketState !== WebSocket.OPEN" in source
+    assert "if (expectedDisconnect && err instanceof TypeError)" in source
 
 
 def test_server_enables_ws_ping_and_heartbeat():
@@ -57,5 +62,6 @@ def test_index_includes_reconnect_overlay():
 
 
 def test_index_page_disables_cache():
-    source = _read("server.py")
-    assert "cache-control" in source.lower()
+    server_source = _read("server.py")
+    helper_source = _read("ouroboros/server_web.py")
+    assert "cache-control" in server_source.lower() or "cache-control" in helper_source.lower()
