@@ -203,7 +203,7 @@ bash scripts/download_python_standalone.sh
 bash build.sh
 ```
 
-Output: `dist/Ouroboros-<VERSION>-macos.dmg`
+Output: `dist/Ouroboros-<VERSION>.dmg`
 
 `build.sh` signs, notarizes, staples, and packages the macOS app and DMG using
 the configured local keychain identity/profile.
@@ -214,7 +214,7 @@ the configured local keychain identity/profile.
 bash build_linux.sh
 ```
 
-Output: `dist/Ouroboros-linux-x86_64.tar.gz`
+Output: `dist/Ouroboros-<VERSION>-linux-x86_64.tar.gz`
 
 ### Windows (.zip)
 
@@ -222,7 +222,7 @@ Output: `dist/Ouroboros-linux-x86_64.tar.gz`
 .\build_windows.ps1
 ```
 
-Output: `dist\Ouroboros-windows-x64.zip`
+Output: `dist\Ouroboros-<VERSION>-windows-x64.zip`
 
 ---
 
