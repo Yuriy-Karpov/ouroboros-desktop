@@ -1,12 +1,13 @@
 """
 Ouroboros — LLM client.
 
-The only module that communicates with LLM APIs (OpenRouter + optional local).
+The only module that communicates with LLM APIs (OpenRouter, direct providers, + optional local).
 Contract: chat(), default_model(), available_models(), add_usage().
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -14,6 +15,8 @@ import re
 import time
 import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from ouroboros.provider_models import normalize_anthropic_model_id
 
 log = logging.getLogger(__name__)
 
@@ -229,26 +232,137 @@ class LLMClient:
         self._async_client_api_key: Optional[str] = None
         self._local_client = None
         self._local_port: Optional[int] = None
+        self._remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
+        self._async_remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
 
-    def _get_client(self):
+    @staticmethod
+    def _parse_provider_model(model: str) -> Tuple[str, str]:
+        model_name = str(model or "").strip()
+        for prefix, provider in (
+            ("openai::", "openai"),
+            ("anthropic::", "anthropic"),
+            ("cloudru::", "cloudru"),
+            ("openai-compatible::", "openai-compatible"),
+            ("openrouter::", "openrouter"),
+        ):
+            if model_name.startswith(prefix):
+                return provider, model_name[len(prefix):].strip()
+        return "openrouter", model_name
+
+    @staticmethod
+    def _qualified_model_name(provider: str, resolved_model: str) -> str:
+        if provider == "openrouter":
+            return resolved_model
+        if provider == "openai":
+            return f"openai/{resolved_model}"
+        if provider == "anthropic":
+            return f"anthropic/{resolved_model}"
+        if provider == "cloudru":
+            return f"cloudru/{resolved_model}"
+        return f"openai-compatible/{resolved_model}"
+
+    def _resolve_remote_target(self, model: str) -> Dict[str, Any]:
+        provider, resolved_model = self._parse_provider_model(model)
+        usage_model = self._qualified_model_name(provider, resolved_model)
+
+        if provider == "openai":
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": os.environ.get("OPENAI_API_KEY", ""),
+                "base_url": "https://api.openai.com/v1",
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "anthropic":
+            resolved_model = normalize_anthropic_model_id(resolved_model)
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": self._qualified_model_name(provider, resolved_model),
+                "api_key": os.environ.get("ANTHROPIC_API_KEY", ""),
+                "base_url": "https://api.anthropic.com/v1",
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "cloudru":
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", ""),
+                "base_url": (
+                    os.environ.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL", "") or ""
+                ).strip() or "https://foundation-models.api.cloud.ru/v1",
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "openai-compatible":
+            compatible_key = (os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+            compatible_base_url = (os.environ.get("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip()
+            legacy_base_url = (os.environ.get("OPENAI_BASE_URL", "") or "").strip()
+            legacy_key = (os.environ.get("OPENAI_API_KEY", "") or "").strip()
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": compatible_key or legacy_key,
+                "base_url": compatible_base_url or legacy_base_url,
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
         current_api_key = self._api_key_override
         if current_api_key is None:
             current_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        return {
+            "provider": "openrouter",
+            "resolved_model": resolved_model,
+            "usage_model": usage_model,
+            "api_key": current_api_key,
+            "base_url": self._base_url,
+            "default_headers": {
+                "HTTP-Referer": "https://ouroboros.local/",
+                "X-Title": "Ouroboros",
+            },
+            "supports_openrouter_extensions": True,
+            "supports_generation_cost": True,
+        }
 
-        if self._client is None or self._client_api_key != current_api_key:
+    def _get_client(self):
+        target = self._resolve_remote_target("openrouter::")
+        return self._get_remote_client(target)
+
+    def _get_remote_client(self, target: Dict[str, Any]):
+        base_url = str(target.get("base_url") or "")
+        api_key = str(target.get("api_key") or "")
+        headers_dict = dict(target.get("default_headers") or {})
+        headers = tuple(sorted((str(k), str(v)) for k, v in headers_dict.items()))
+        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers)
+
+        client = self._remote_clients.get(cache_key)
+        if client is None:
             from openai import OpenAI
-            self._client = OpenAI(
-                base_url=self._base_url,
-                api_key=current_api_key,
-                max_retries=0,
-                default_headers={
-                    "HTTP-Referer": "https://ouroboros.local/",
-                    "X-Title": "Ouroboros",
-                },
-            )
-            self._client_api_key = current_api_key
-            self._api_key = current_api_key
-        return self._client
+
+            kwargs: Dict[str, Any] = {
+                "api_key": api_key,
+                "max_retries": 0,
+            }
+            if base_url:
+                kwargs["base_url"] = base_url
+            if headers_dict:
+                kwargs["default_headers"] = headers_dict
+            client = OpenAI(**kwargs)
+            self._remote_clients[cache_key] = client
+        return client
 
     def _get_local_client(self):
         port = int(os.environ.get("LOCAL_MODEL_PORT", "8766"))
@@ -263,43 +377,73 @@ class LLMClient:
         return self._local_client
 
     def _get_async_client(self):
-        current_api_key = self._api_key_override
-        if current_api_key is None:
-            current_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        target = self._resolve_remote_target("openrouter::")
+        return self._get_async_remote_client(target)
 
-        if self._async_client is None or self._async_client_api_key != current_api_key:
+    def _get_async_remote_client(self, target: Dict[str, Any]):
+        base_url = str(target.get("base_url") or "")
+        api_key = str(target.get("api_key") or "")
+        headers_dict = dict(target.get("default_headers") or {})
+        headers = tuple(sorted((str(k), str(v)) for k, v in headers_dict.items()))
+        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers)
+
+        client = self._async_remote_clients.get(cache_key)
+        if client is None:
             from openai import AsyncOpenAI
-            self._async_client = AsyncOpenAI(
-                base_url=self._base_url,
-                api_key=current_api_key,
-                max_retries=0,
-                default_headers={
-                    "HTTP-Referer": "https://ouroboros.local/",
-                    "X-Title": "Ouroboros",
-                },
-            )
-            self._async_client_api_key = current_api_key
-        return self._async_client
+
+            kwargs: Dict[str, Any] = {
+                "api_key": api_key,
+                "max_retries": 0,
+            }
+            if base_url:
+                kwargs["base_url"] = base_url
+            if headers_dict:
+                kwargs["default_headers"] = headers_dict
+            client = AsyncOpenAI(**kwargs)
+            self._async_remote_clients[cache_key] = client
+        return client
 
     @staticmethod
     def _strip_cache_control(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Strip cache_control from message content blocks (OpenRouter/Anthropic-only)."""
+        """Strip cache_control from message content blocks (OpenRouter/Anthropic-only).
+
+        For tool-role messages whose content is a list of blocks, also flattens
+        the content back to a plain string, because OpenAI and compatible providers
+        expect tool content as a string (not an array of blocks).
+        """
         import copy
         cleaned = copy.deepcopy(messages)
         for msg in cleaned:
             content = msg.get("content")
-            if isinstance(content, list):
+            if not isinstance(content, list):
+                continue
+            if msg.get("role") == "tool":
+                # Flatten back to plain string for providers that require it
+                msg["content"] = "".join(
+                    block.get("text", "") if isinstance(block, dict) else str(block)
+                    for block in content
+                )
+            else:
                 for block in content:
                     if isinstance(block, dict):
                         block.pop("cache_control", None)
         return cleaned
 
-    def _fetch_generation_cost(self, generation_id: str) -> Optional[float]:
+    def _fetch_generation_cost(
+        self,
+        generation_id: str,
+        target: Optional[Dict[str, Any]] = None,
+    ) -> Optional[float]:
         """Fetch cost from OpenRouter Generation API as fallback."""
+        active_target = target or self._resolve_remote_target("openrouter::")
+        if not active_target.get("supports_generation_cost"):
+            return None
         try:
             import requests
-            url = f"{self._base_url.rstrip('/')}/generation?id={generation_id}"
-            resp = requests.get(url, headers={"Authorization": f"Bearer {self._api_key}"}, timeout=5)
+            base_url = str(active_target.get("base_url") or "").rstrip("/")
+            api_key = str(active_target.get("api_key") or "")
+            url = f"{base_url}/generation?id={generation_id}"
+            resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5)
             if resp.status_code == 200:
                 data = resp.json().get("data") or {}
                 cost = data.get("total_cost") or data.get("usage", {}).get("cost")
@@ -307,7 +451,7 @@ class LLMClient:
                     return float(cost)
             # Generation might not be ready yet — retry once after short delay
             time.sleep(0.5)
-            resp = requests.get(url, headers={"Authorization": f"Bearer {self._api_key}"}, timeout=5)
+            resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5)
             if resp.status_code == 200:
                 data = resp.json().get("data") or {}
                 cost = data.get("total_cost") or data.get("usage", {}).get("cost")
@@ -337,7 +481,8 @@ class LLMClient:
         if use_local:
             return self._chat_local(messages, tools, max_tokens, tool_choice)
 
-        return self._chat_openrouter(messages, model, tools, reasoning_effort, max_tokens, tool_choice, temperature)
+        target = self._resolve_remote_target(model)
+        return self._chat_remote(target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature)
 
     async def chat_async(
         self,
@@ -349,15 +494,27 @@ class LLMClient:
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Async OpenRouter chat used by review/concurrent callers."""
+        """Async remote chat used by review/concurrent callers."""
         if tools:
             raise ValueError("chat_async does not support tool calls")
-        client = self._get_async_client()
-        kwargs = self._build_openrouter_kwargs(
-            messages, model, tools, reasoning_effort, max_tokens, tool_choice, temperature
+        target = self._resolve_remote_target(model)
+        if target.get("provider") == "anthropic":
+            return await asyncio.to_thread(
+                self._chat_anthropic,
+                target,
+                messages,
+                tools,
+                reasoning_effort,
+                max_tokens,
+                tool_choice,
+                temperature,
+            )
+        client = self._get_async_remote_client(target)
+        kwargs = self._build_remote_kwargs(
+            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
         )
         resp = await client.chat.completions.create(**kwargs)
-        return self._normalize_openrouter_response(resp.model_dump())
+        return self._normalize_remote_response(resp.model_dump(), target)
 
     def _prepare_messages_for_local_context(
         self,
@@ -460,8 +617,15 @@ class LLMClient:
                 err = str(exc)
                 if "context_length_exceeded" in err:
                     raise LocalContextTooLargeError(err) from exc
-                log.warning("Local model request failed: %s", exc)
-                raise
+                if attempt == 2:
+                    log.warning("Local model request failed: %s", exc)
+                    raise
+                log.warning(
+                    "Local model request failed (attempt %d/3): %s",
+                    attempt + 1,
+                    exc,
+                )
+                time.sleep(0.5 * (attempt + 1))
         if last_exc is not None:
             raise last_exc
 
@@ -618,29 +782,341 @@ class LLMClient:
                     log.info("Retry-truncated system message to %d chars (ratio=%.2f)", new_len, ratio)
                 return
 
-    def _build_openrouter_kwargs(
+    @staticmethod
+    def _stringify_anthropic_content(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    @staticmethod
+    def _coalesce_anthropic_message(
+        messages: List[Dict[str, Any]],
+        role: str,
+        content: List[Dict[str, Any]],
+    ) -> None:
+        if not content:
+            return
+        if messages and messages[-1].get("role") == role and isinstance(messages[-1].get("content"), list):
+            messages[-1]["content"].extend(content)
+            return
+        messages.append({"role": role, "content": list(content)})
+
+    @staticmethod
+    def _anthropic_image_block(image_url: str) -> Optional[Dict[str, Any]]:
+        url = str(image_url or "").strip()
+        if not url:
+            return None
+        if url.startswith("data:") and ";base64," in url:
+            header, data = url.split(",", 1)
+            mime = header[5:].split(";", 1)[0] or "image/png"
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": data,
+                },
+            }
+        return {
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": url,
+            },
+        }
+
+    def _anthropic_blocks_from_content(self, content: Any) -> List[Dict[str, Any]]:
+        if content is None:
+            return []
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content else []
+        if not isinstance(content, list):
+            text = self._stringify_anthropic_content(content)
+            return [{"type": "text", "text": text}] if text else []
+
+        blocks: List[Dict[str, Any]] = []
+        for block in content:
+            if isinstance(block, str):
+                if block:
+                    blocks.append({"type": "text", "text": block})
+                continue
+            if not isinstance(block, dict):
+                text = self._stringify_anthropic_content(block)
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                continue
+
+            block_type = str(block.get("type") or "").strip()
+            if block_type in {"text", "input_text", "output_text"}:
+                text = str(block.get("text") or "")
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                continue
+            if block_type == "image_url":
+                image_url = str((block.get("image_url") or {}).get("url") or "")
+                image_block = self._anthropic_image_block(image_url)
+                if image_block:
+                    blocks.append(image_block)
+                continue
+            if block.get("text"):
+                blocks.append({"type": "text", "text": str(block.get("text") or "")})
+        return blocks
+
+    def _build_anthropic_messages(
         self,
         messages: List[Dict[str, Any]],
-        model: str,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        system_parts: List[str] = []
+        anthropic_messages: List[Dict[str, Any]] = []
+
+        for msg in messages:
+            role = str(msg.get("role") or "").strip().lower()
+            if role == "system":
+                for block in self._anthropic_blocks_from_content(msg.get("content")):
+                    if block.get("type") == "text" and block.get("text"):
+                        system_parts.append(str(block.get("text") or ""))
+                continue
+
+            if role == "user":
+                self._coalesce_anthropic_message(
+                    anthropic_messages,
+                    "user",
+                    self._anthropic_blocks_from_content(msg.get("content")),
+                )
+                continue
+
+            if role == "assistant":
+                assistant_blocks = self._anthropic_blocks_from_content(msg.get("content"))
+                for tool_call in msg.get("tool_calls") or []:
+                    function = tool_call.get("function") or {}
+                    raw_args = function.get("arguments")
+                    parsed_args: Any = {}
+                    if isinstance(raw_args, str):
+                        try:
+                            parsed_args = json.loads(raw_args) if raw_args.strip() else {}
+                        except Exception:
+                            parsed_args = {"raw": raw_args}
+                    elif raw_args is not None:
+                        parsed_args = raw_args
+                    if not isinstance(parsed_args, dict):
+                        parsed_args = {"value": parsed_args}
+                    assistant_blocks.append({
+                        "type": "tool_use",
+                        "id": str(tool_call.get("id") or ""),
+                        "name": str(function.get("name") or ""),
+                        "input": parsed_args,
+                    })
+                self._coalesce_anthropic_message(anthropic_messages, "assistant", assistant_blocks)
+                continue
+
+            if role == "tool":
+                tool_use_id = str(msg.get("tool_call_id") or "")
+                if not tool_use_id:
+                    raise ValueError("Anthropic direct tool result is missing tool_call_id.")
+                raw_content = msg.get("content")
+                # Anthropic direct API supports list of content blocks (including
+                # cache_control) as tool_result content, so pass through as-is.
+                # For plain strings, pass them directly. Only JSON-serialize
+                # dicts and other non-string non-list values.
+                if isinstance(raw_content, list):
+                    tool_result_content: Any = raw_content
+                else:
+                    tool_result_content = self._stringify_anthropic_content(raw_content)
+                self._coalesce_anthropic_message(
+                    anthropic_messages,
+                    "user",
+                    [{
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": tool_result_content,
+                    }],
+                )
+
+        return "\n\n".join(part for part in system_parts if part).strip(), anthropic_messages
+
+    @staticmethod
+    def _build_anthropic_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        anthropic_tools: List[Dict[str, Any]] = []
+        for tool in tools or []:
+            function = tool.get("function") or {}
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            anthropic_tools.append({
+                "name": name,
+                "description": str(function.get("description") or ""),
+                "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
+            })
+        return anthropic_tools
+
+    @staticmethod
+    def _build_anthropic_tool_choice(tool_choice: Any) -> Optional[Dict[str, Any]]:
+        if not tool_choice or tool_choice == "auto":
+            return None
+        if tool_choice in {"required", "any"}:
+            return {"type": "any"}
+        if tool_choice == "none":
+            return {"type": "none"}
+        if isinstance(tool_choice, dict):
+            function = tool_choice.get("function") or {}
+            name = str(function.get("name") or "").strip()
+            if name:
+                return {"type": "tool", "name": name}
+        if isinstance(tool_choice, str):
+            return {"type": "tool", "name": tool_choice}
+        return None
+
+    def _normalize_anthropic_response(
+        self,
+        resp_dict: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        content_blocks = resp_dict.get("content") or []
+        text_parts: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "").strip()
+            if block_type == "text":
+                text = str(block.get("text") or "")
+                if text:
+                    text_parts.append(text)
+            elif block_type == "tool_use":
+                tool_calls.append({
+                    "id": str(block.get("id") or ""),
+                    "type": "function",
+                    "function": {
+                        "name": str(block.get("name") or ""),
+                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                    },
+                })
+
+        raw_usage = resp_dict.get("usage") or {}
+        usage: Dict[str, Any] = {
+            "prompt_tokens": int(raw_usage.get("input_tokens") or 0),
+            "completion_tokens": int(raw_usage.get("output_tokens") or 0),
+            "cached_tokens": int(raw_usage.get("cache_read_input_tokens") or 0),
+            "cache_write_tokens": int(raw_usage.get("cache_creation_input_tokens") or 0),
+            "provider": "anthropic",
+            "resolved_model": str(target.get("usage_model") or target.get("resolved_model") or ""),
+        }
+        if usage["prompt_tokens"] or usage["completion_tokens"]:
+            from ouroboros.pricing import estimate_cost
+
+            estimated_cost = estimate_cost(
+                usage["resolved_model"],
+                usage["prompt_tokens"],
+                usage["completion_tokens"],
+                usage["cached_tokens"],
+                usage["cache_write_tokens"],
+            )
+            if estimated_cost:
+                usage["cost"] = estimated_cost
+
+        message: Dict[str, Any] = {
+            "role": "assistant",
+            "content": "".join(text_parts),
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return message, usage
+
+    def _chat_anthropic(
+        self,
+        target: Dict[str, Any],
+        messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]],
         reasoning_effort: str,
         max_tokens: int,
         tool_choice: str,
+        temperature: Optional[float] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        import requests
+
+        del reasoning_effort  # Anthropic direct works without an extra effort payload here.
+
+        system, anthropic_messages = self._build_anthropic_messages(messages)
+        payload: Dict[str, Any] = {
+            "model": str(target.get("resolved_model") or ""),
+            "messages": anthropic_messages,
+            "max_tokens": max_tokens,
+        }
+        if system:
+            payload["system"] = system
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+        anthropic_tools = self._build_anthropic_tools(tools)
+        if anthropic_tools:
+            payload["tools"] = anthropic_tools
+            anthropic_tool_choice = self._build_anthropic_tool_choice(tool_choice)
+            if anthropic_tool_choice:
+                payload["tool_choice"] = anthropic_tool_choice
+
+        response = requests.post(
+            f"{str(target.get('base_url') or '').rstrip('/')}/messages",
+            headers={
+                "x-api-key": str(target.get("api_key") or ""),
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        )
+        response.raise_for_status()
+        return self._normalize_anthropic_response(response.json(), target)
+
+    def _build_remote_kwargs(
+        self,
+        target: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        reasoning_effort: str,
+        max_tokens: int,
+        tool_choice: str,
         temperature: Optional[float],
+        tools: Optional[List[Dict[str, Any]]],
     ) -> Dict[str, Any]:
+        resolved_model = str(target.get("resolved_model") or "")
+        token_limit_key = "max_tokens"
+        if str(target.get("provider") or "") == "openai" and resolved_model.startswith("gpt-5"):
+            token_limit_key = "max_completion_tokens"
+        if not target.get("supports_openrouter_extensions"):
+            # Strip cache_control from message content blocks — non-OpenRouter providers
+            # (OpenAI, openai-compatible, Cloud.ru) do not accept this field.
+            clean_messages = self._strip_cache_control(messages)
+            kwargs: Dict[str, Any] = {
+                "model": resolved_model,
+                "messages": clean_messages,
+                token_limit_key: max_tokens,
+            }
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            if tools:
+                kwargs["tools"] = [
+                    {k: v for k, v in t.items() if k != "cache_control"}
+                    for t in tools
+                ]
+                kwargs["tool_choice"] = tool_choice
+            return kwargs
+
         effort = normalize_reasoning_effort(reasoning_effort)
 
         extra_body: Dict[str, Any] = {
             "reasoning": {"effort": effort, "exclude": True},
         }
 
-        if model.startswith("anthropic/"):
+        if resolved_model.startswith("anthropic/"):
             extra_body["provider"] = {
                 "require_parameters": True,
             }
 
         kwargs: Dict[str, Any] = {
-            "model": model,
+            "model": resolved_model,
             "messages": messages,
             "max_tokens": max_tokens,
             "extra_body": extra_body,
@@ -657,9 +1133,25 @@ class LLMClient:
             kwargs["tool_choice"] = tool_choice
         return kwargs
 
-    def _normalize_openrouter_response(
+    def _build_openrouter_kwargs(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        tools: Optional[List[Dict[str, Any]]],
+        reasoning_effort: str,
+        max_tokens: int,
+        tool_choice: str,
+        temperature: Optional[float],
+    ) -> Dict[str, Any]:
+        target = self._resolve_remote_target(model)
+        return self._build_remote_kwargs(
+            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
+        )
+
+    def _normalize_remote_response(
         self,
         resp_dict: Dict[str, Any],
+        target: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
@@ -673,20 +1165,60 @@ class LLMClient:
         if not usage.get("cache_write_tokens"):
             prompt_details_for_write = usage.get("prompt_tokens_details") or {}
             if isinstance(prompt_details_for_write, dict):
-                cache_write = (prompt_details_for_write.get("cache_write_tokens")
-                              or prompt_details_for_write.get("cache_creation_tokens")
-                              or prompt_details_for_write.get("cache_creation_input_tokens"))
+                cache_write = (
+                    prompt_details_for_write.get("cache_write_tokens")
+                    or prompt_details_for_write.get("cache_creation_tokens")
+                    or prompt_details_for_write.get("cache_creation_input_tokens")
+                )
                 if cache_write:
                     usage["cache_write_tokens"] = int(cache_write)
 
-        if not usage.get("cost"):
-            gen_id = resp_dict.get("id") or ""
-            if gen_id:
-                cost = self._fetch_generation_cost(gen_id)
-                if cost is not None:
-                    usage["cost"] = cost
+        if target.get("supports_openrouter_extensions"):
+            if not usage.get("cost"):
+                gen_id = resp_dict.get("id") or ""
+                if gen_id:
+                    cost = self._fetch_generation_cost(gen_id, target)
+                    if cost is not None:
+                        usage["cost"] = cost
+
+        usage["provider"] = str(target.get("provider") or "openrouter")
+        usage["resolved_model"] = str(target.get("usage_model") or target.get("resolved_model") or "")
+        if not usage.get("cost") and (usage.get("prompt_tokens") or usage.get("completion_tokens")):
+            from ouroboros.pricing import estimate_cost
+
+            estimated_cost = estimate_cost(
+                usage["resolved_model"],
+                int(usage.get("prompt_tokens") or 0),
+                int(usage.get("completion_tokens") or 0),
+                int(usage.get("cached_tokens") or 0),
+                int(usage.get("cache_write_tokens") or 0),
+            )
+            if estimated_cost:
+                usage["cost"] = estimated_cost
 
         return msg, usage
+
+    def _chat_remote(
+        self,
+        target: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        reasoning_effort: str,
+        max_tokens: int,
+        tool_choice: str,
+        temperature: Optional[float] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Send a chat request to the resolved remote provider."""
+        if target.get("provider") == "anthropic":
+            return self._chat_anthropic(
+                target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature
+            )
+        client = self._get_remote_client(target)
+        kwargs = self._build_remote_kwargs(
+            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
+        )
+        resp = client.chat.completions.create(**kwargs)
+        return self._normalize_remote_response(resp.model_dump(), target)
 
     def _chat_openrouter(
         self,
@@ -698,13 +1230,8 @@ class LLMClient:
         tool_choice: str,
         temperature: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Send a chat request to OpenRouter."""
-        client = self._get_client()
-        kwargs = self._build_openrouter_kwargs(
-            messages, model, tools, reasoning_effort, max_tokens, tool_choice, temperature
-        )
-        resp = client.chat.completions.create(**kwargs)
-        return self._normalize_openrouter_response(resp.model_dump())
+        target = self._resolve_remote_target(model)
+        return self._chat_remote(target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature)
 
     def vision_query(
         self,

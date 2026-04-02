@@ -12,6 +12,7 @@ import logging
 import os
 import pathlib
 import re
+import sys
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,7 +24,7 @@ from ouroboros.memory import Memory
 log = logging.getLogger(__name__)
 
 
-def _build_user_content(task: Dict[str, Any]) -> Any:
+def build_user_content(task: Dict[str, Any]) -> Any:
     """Build user message content. Supports text + optional image."""
     text = task.get("text", "")
     image_b64 = task.get("image_base64")
@@ -80,6 +81,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         pass
 
     # --- Runtime context JSON ---
+    _is_desktop = bool(os.environ.get("OUROBOROS_DESKTOP_MODE", ""))
     runtime_data = {
         "utc_now": utc_now_iso(),
         "repo_dir": str(env.repo_dir),
@@ -87,6 +89,10 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         "git_head": git_sha,
         "git_branch": git_branch,
         "task": {"id": task.get("id"), "type": task.get("type")},
+        "runtime_env": {
+            "is_desktop": _is_desktop,
+            "platform": sys.platform,
+        },
     }
     if budget_info:
         runtime_data["budget"] = budget_info
@@ -802,6 +808,17 @@ def build_llm_messages(
             log.debug("Failed to build review context", exc_info=True)
             pass
 
+    # Advisory pre-review status — helps agent see pending findings before committing
+    try:
+        from ouroboros.review_state import load_state, format_status_section
+        advisory_state = load_state(pathlib.Path(env.drive_root))
+        if advisory_state.runs:
+            advisory_section = format_status_section(advisory_state)
+            if advisory_section:
+                dynamic_parts.append(advisory_section)
+    except Exception:
+        log.debug("Failed to build advisory review status section", exc_info=True)
+
     dynamic_text = "\n\n".join(dynamic_parts)
 
     messages: List[Dict[str, Any]] = [
@@ -824,7 +841,7 @@ def build_llm_messages(
                 },
             ],
         },
-        {"role": "user", "content": _build_user_content(task)},
+        {"role": "user", "content": build_user_content(task)},
     ]
 
     messages, cap_info = apply_message_token_soft_cap(messages, soft_cap_tokens)

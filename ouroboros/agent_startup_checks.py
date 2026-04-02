@@ -20,6 +20,19 @@ from ouroboros.utils import utc_now_iso, read_text, append_jsonl
 log = logging.getLogger(__name__)
 
 
+def _is_stable_release_tag(tag: str) -> bool:
+    return bool(re.match(r"^\d+\.\d+\.\d+$", str(tag or "").strip()))
+
+
+def _startup_auto_rescue_enabled(env: Any) -> bool:
+    managed = getattr(env, "launcher_managed", None)
+    if managed is None:
+        managed = os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "")
+    if isinstance(managed, bool):
+        return managed
+    return str(managed or "").strip() == "1"
+
+
 def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
     """Check for uncommitted changes and attempt auto-rescue commit."""
     import re
@@ -40,6 +53,17 @@ def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
         dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
         if dirty_files:
             auto_committed = False
+            if not _startup_auto_rescue_enabled(env):
+                log.warning(
+                    "Uncommitted changes detected on startup; skipping auto-rescue commit "
+                    "outside launcher-managed mode"
+                )
+                return {
+                    "status": "warning",
+                    "files": dirty_files[:20],
+                    "auto_committed": auto_committed,
+                    "auto_rescue_skipped": "not_launcher_managed",
+                }, 1
             try:
                 subprocess.run(["git", "add", "-u"], cwd=str(env.repo_dir),
                                capture_output=True, timeout=10)
@@ -122,9 +146,11 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
         else:
             latest_tag = result.stdout.strip().lstrip('v')
             result_data["latest_tag"] = latest_tag
-            if version_file != latest_tag:
+            if _is_stable_release_tag(latest_tag) and version_file != latest_tag:
                 result_data["status"] = "warning"
                 issue_count += 1
+            elif not _is_stable_release_tag(latest_tag):
+                result_data["tag_sync"] = "ignored_non_release_tag"
 
         if issue_count == 0:
             result_data["status"] = "ok"

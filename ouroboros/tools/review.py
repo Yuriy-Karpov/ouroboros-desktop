@@ -15,6 +15,7 @@ import pathlib
 from typing import List, Optional
 
 from ouroboros.llm import LLMClient
+from ouroboros.pricing import infer_api_key_type, infer_model_category
 from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl
 from ouroboros import config as _cfg
 from ouroboros.tools.registry import ToolEntry, ToolContext
@@ -50,6 +51,12 @@ err on the side of NOT recommending it and explain the tension.
 
 
 _CHECKLISTS_PATH = pathlib.Path(__file__).resolve().parent.parent.parent / "docs" / "CHECKLISTS.md"
+
+from ouroboros.tools.review_helpers import (
+    load_checklist_section as _load_checklist_section_precise,
+    build_touched_file_pack,
+    build_goal_section,
+)
 
 
 def _load_bible() -> str:
@@ -158,10 +165,6 @@ async def _multi_model_review_async(content: str, prompt: str,
     if len(models) > MAX_MODELS:
         return {"error": f"Too many models ({len(models)}). Maximum is {MAX_MODELS}."}
 
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        return {"error": "OPENROUTER_API_KEY not set"}
-
     bible_text = _load_bible()
     if bible_text:
         system_content = (
@@ -182,7 +185,7 @@ async def _multi_model_review_async(content: str, prompt: str,
     ]
 
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-    llm_client = LLMClient(api_key=api_key)
+    llm_client = LLMClient()
     tasks = [_query_model(llm_client, m, messages, semaphore) for m in models]
     results = await asyncio.gather(*tasks)
 
@@ -200,9 +203,13 @@ async def _multi_model_review_async(content: str, prompt: str,
 
 
 def _parse_model_response(model: str, result, headers_dict) -> dict:
+    usage = result.get("usage", {}) if isinstance(result, dict) else {}
+    resolved_model = str(usage.get("resolved_model") or model)
+    provider = str(usage.get("provider") or "openrouter")
     if isinstance(result, str):
         return {
-            "model": model, "verdict": "ERROR", "text": result,
+            "model": resolved_model, "request_model": model,
+            "provider": provider, "verdict": "ERROR", "text": result,
             "tokens_in": 0, "tokens_out": 0, "cost_estimate": 0.0,
         }
     try:
@@ -228,7 +235,6 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
         text = f"(unexpected response format: {json.dumps(result)[:200]})"
         verdict = "ERROR"
 
-    usage = result.get("usage", {})
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)
     cached_tokens = usage.get("cached_tokens", 0)
@@ -249,7 +255,8 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
         pass
 
     return {
-        "model": model, "verdict": verdict, "text": text,
+        "model": resolved_model, "request_model": model,
+        "provider": provider, "verdict": verdict, "text": text,
         "tokens_in": prompt_tokens, "tokens_out": completion_tokens,
         "cached_tokens": cached_tokens, "cache_write_tokens": cache_write_tokens,
         "cost_estimate": cost,
@@ -263,6 +270,11 @@ def _emit_usage_event(review_result: dict, ctx: ToolContext) -> None:
         "type": "llm_usage", "ts": utc_now_iso(),
         "task_id": ctx.task_id if ctx.task_id else "",
         "model": review_result.get("model", ""),
+        "api_key_type": infer_api_key_type(
+            review_result.get("model", ""),
+            review_result.get("provider", ""),
+        ),
+        "model_category": infer_model_category(review_result.get("model", "")),
         "usage": {
             "prompt_tokens": review_result["tokens_in"],
             "completion_tokens": review_result["tokens_out"],
@@ -270,7 +282,7 @@ def _emit_usage_event(review_result: dict, ctx: ToolContext) -> None:
             "cache_write_tokens": review_result.get("cache_write_tokens", 0),
             "cost": review_result["cost_estimate"],
         },
-        "provider": "openrouter",
+        "provider": review_result.get("provider", "openrouter"),
         "source": "review",
         "category": "review",
     }
@@ -292,21 +304,18 @@ def _load_checklist_section() -> str:
     """Load the Repo Commit Checklist from docs/CHECKLISTS.md (DRY, Bible P5).
 
     Raises FileNotFoundError or ValueError if missing or malformed — fail-closed.
+    Uses the precise section loader from review_helpers.
     """
     try:
-        text = _CHECKLISTS_PATH.read_text(encoding="utf-8")
+        return _load_checklist_section_precise("Repo Commit Checklist")
+    except FileNotFoundError:
+        raise
+    except ValueError:
+        raise
     except Exception as e:
         raise FileNotFoundError(
-            f"docs/CHECKLISTS.md not found at {_CHECKLISTS_PATH}: {e}"
+            f"docs/CHECKLISTS.md not found or malformed: {e}"
         ) from e
-    marker = "## Repo Commit Checklist"
-    start = text.find(marker)
-    if start == -1:
-        raise ValueError(
-            f"Section '{marker}' not found in docs/CHECKLISTS.md — "
-            "file may be corrupted or reformatted"
-        )
-    return text[start:].strip()
 
 
 _REVIEW_PREAMBLE = (
@@ -316,22 +325,27 @@ _REVIEW_PREAMBLE = (
 
 _REVIEW_PROMPT_TEMPLATE = """\
 {preamble}
-You must review the staged diff and produce a JSON array.  Each element has
-keys: "item", "verdict" (PASS or FAIL), "severity" (critical or advisory),
-and "reason" (one-line explanation).
+You must review the staged change and produce a JSON array.
+Each element has:
+- "item"
+- "verdict": "PASS" or "FAIL"
+- "severity": "critical" or "advisory"
+- "reason"
 
 {checklist_section}
 
 - Output ONLY a valid JSON array.  No markdown fences, no text outside the JSON.
 
+{goal_section}
+
 ## DEVELOPMENT.md
 
 {dev_guide_text}
 
-## Commit message
+## Current touched files
 
-{commit_message}
-{rebuttal_section}{review_history_section}
+{current_files_section}
+
 ## Staged diff
 
 {diff_text}
@@ -339,6 +353,8 @@ and "reason" (one-line explanation).
 ## Changed files
 
 {changed_files}
+
+{rebuttal_section}{review_history_section}
 """
 
 
@@ -537,13 +553,15 @@ def _build_critical_block_message(
         soft_hint = (
             "\n\nHint: You have attempted this commit 5+ times. Consider:\n"
             "- Breaking the change into smaller, independently reviewable commits\n"
-            "- Using review_rebuttal to address specific reviewer concerns"
+            "- If the same critical repeats: implement what the reviewer asks, or split the change, or report the blockage to the user instead of retrying"
         )
 
     return (
         f"⚠️ REVIEW_BLOCKED{iteration_note}: Critical issues found by reviewers.\n"
-        "Commit has NOT been created. Fix the issues and try again, or include a\n"
-        "review_rebuttal argument explaining why you disagree.\n\n"
+        "Commit has NOT been created. Fix the issues and try again. Use review_rebuttal\n"
+        "ONLY if a finding is factually incorrect — not to argue against requested tests\n"
+        "or artifacts. If the same finding repeats after a rebuttal, implement the fix\n"
+        "instead of re-arguing.\n\n"
         + "\n".join(f"  CRITICAL: {f}" for f in critical_fails)
         + (
             "\n\nAdvisory warnings:\n"
@@ -557,7 +575,9 @@ def _build_critical_block_message(
 
 def _run_unified_review(ctx: ToolContext, commit_message: str,
                         review_rebuttal: str = "",
-                        repo_dir=None) -> Optional[str]:
+                        repo_dir=None,
+                        goal: str = "",
+                        scope: str = "") -> Optional[str]:
     """Unified pre-commit review: 3 models, structured JSON, consistent severity.
 
     Returns None if commit may proceed. In blocking mode returns a blocking
@@ -610,11 +630,31 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
 
     review_history_section = _build_review_history_section(ctx._review_history)
 
+    # Build touched-file pack for full current file context
+    try:
+        touched_paths = [f.strip() for f in changed.strip().splitlines() if f.strip()]
+        current_files_section, _omitted = build_touched_file_pack(
+            pathlib.Path(target_repo), touched_paths
+        )
+        if _omitted:
+            current_files_section += (
+                f"\n\n⚠️ OMISSION NOTE: {len(_omitted)} file(s) omitted from direct context: "
+                f"{', '.join(_omitted)}"
+            )
+        if not current_files_section.strip():
+            current_files_section = "(no touched files could be read)"
+    except Exception as e:
+        log.warning("Failed to build touched file pack for triad review: %s", e)
+        current_files_section = f"(touched file pack unavailable: {e})"
+
+    goal_section = build_goal_section(goal, scope, commit_message)
+
     prompt = _REVIEW_PROMPT_TEMPLATE.format(
         preamble=_REVIEW_PREAMBLE,
         checklist_section=checklist_section,
+        goal_section=goal_section,
         dev_guide_text=dev_guide_text or "(DEVELOPMENT.md not found)",
-        commit_message=commit_message[:500],
+        current_files_section=current_files_section,
         rebuttal_section=rebuttal_section,
         review_history_section=review_history_section,
         diff_text=diff_text,

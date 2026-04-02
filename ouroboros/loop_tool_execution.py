@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import time
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,40 +19,27 @@ from typing import Any, Callable, Dict, List, Optional
 
 import logging
 
+from ouroboros.config import load_settings
+from ouroboros.tool_capabilities import (
+    READ_ONLY_PARALLEL_TOOLS,
+    STATEFUL_BROWSER_TOOLS,
+    TOOL_RESULT_LIMITS as _TOOL_RESULT_LIMITS,
+    DEFAULT_TOOL_RESULT_LIMIT as _DEFAULT_TOOL_RESULT_LIMIT,
+    UNTRUNCATED_TOOL_RESULTS as _UNTRUNCATED_TOOL_RESULTS,
+    UNTRUNCATED_REPO_READ_PATHS as _UNTRUNCATED_REPO_READ_PATHS,
+)
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
 
 log = logging.getLogger(__name__)
 
-READ_ONLY_PARALLEL_TOOLS = frozenset({
-    "repo_read", "repo_list",
-    "data_read", "data_list",
-    "web_search", "codebase_digest", "chat_history",
-})
-
-STATEFUL_BROWSER_TOOLS = frozenset({"browse_page", "browser_action"})
-
-_TOOL_RESULT_LIMITS: Dict[str, int] = {
-    "repo_read": 80_000,
-    "data_read": 80_000,
-    "knowledge_read": 80_000,
-    "run_shell": 80_000,
-}
-_DEFAULT_TOOL_RESULT_LIMIT = 15_000
-
-_UNTRUNCATED_TOOL_RESULTS = frozenset({
-    "repo_commit",
-    "repo_write_commit",
-    "multi_model_review",
-})
-
-_UNTRUNCATED_REPO_READ_PATHS = frozenset({
-    "BIBLE.md",
-    "README.md",
-    "docs/ARCHITECTURE.md",
-    "docs/CHECKLISTS.md",
-    "docs/DEVELOPMENT.md",
-})
+_FAILURE_PREFIXES = (
+    "⚠️ TOOL_",
+    "⚠️ SHELL_",
+    "⚠️ CLAUDE_CODE_",
+)
+_EXIT_CODE_RE = re.compile(r"exit_code=(-?\d+)")
+_SIGNAL_RE = re.compile(r"signal=([A-Z0-9_]+)")
 
 
 def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
@@ -68,11 +56,19 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
 
 
 def _get_tool_timeout(tools: ToolRegistry, tool_name: str) -> int:
-    """Get timeout for a tool call. Env override takes precedence over per-tool default."""
+    """Get timeout for a tool call. settings.json is SSOT; env is fallback."""
+    try:
+        settings_val = int(load_settings().get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
+        if settings_val > 0:
+            return settings_val
+    except Exception:
+        pass
     env_val = os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC")
     if env_val:
         try:
-            return int(env_val)
+            parsed = int(env_val)
+            if parsed > 0:
+                return parsed
         except ValueError:
             pass
     return tools.get_timeout(tool_name)
@@ -121,6 +117,55 @@ def _truncate_tool_result(
     return s[:limit] + f"\n... (truncated from {len(s)} chars, limit={limit})"
 
 
+def _is_tool_execution_failure(tool_ok: bool, result: Any) -> bool:
+    """Classify only executor/runtime failures as tool failures.
+
+    Many tools intentionally return warning-style results such as
+    ``REVIEW_BLOCKED`` or ``GIT_ERROR``. Those should be shown to the model and
+    user as normal completed tool results, not surfaced in the UI as "tool
+    failed". The hard failure bucket is reserved for executor-level failures:
+    parsing errors, timeouts, and uncaught tool exceptions.
+    """
+    if not tool_ok:
+        return True
+    text = str(result or "")
+    return text.startswith(_FAILURE_PREFIXES)
+
+
+def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[str, Any]:
+    """Extract structured outcome facts for summaries and reflections."""
+    text = str(result or "")
+    status = "error" if is_error else "ok"
+    if text.startswith("⚠️ TOOL_TIMEOUT"):
+        status = "timeout"
+    elif text.startswith("⚠️ SHELL_EXIT_ERROR"):
+        status = "non_zero_exit"
+    elif text.startswith("⚠️ SHELL_"):
+        status = "shell_error"
+    elif text.startswith("⚠️ CLAUDE_CODE_TIMEOUT"):
+        status = "timeout"
+    elif text.startswith("⚠️ CLAUDE_CODE_INSTALL_ERROR"):
+        status = "install_error"
+    elif text.startswith("⚠️ CLAUDE_CODE_UNAVAILABLE"):
+        status = "unavailable"
+    elif text.startswith("⚠️ CLAUDE_CODE_"):
+        status = "claude_code_error"
+
+    meta: Dict[str, Any] = {"status": status}
+    exit_match = _EXIT_CODE_RE.search(text)
+    if exit_match:
+        try:
+            meta["exit_code"] = int(exit_match.group(1))
+        except ValueError:
+            pass
+    signal_match = _SIGNAL_RE.search(text)
+    if signal_match:
+        meta["signal"] = signal_match.group(1)
+    if fn_name == "run_shell" and not is_error and meta.get("exit_code") == 0:
+        meta["status"] = "ok"
+    return meta
+
+
 def _execute_single_tool(
     tools: ToolRegistry,
     tc: Dict[str, Any],
@@ -148,6 +193,7 @@ def _execute_single_tool(
             "tool_args": {},
             "args_for_log": {},
             "is_code_tool": is_code_tool,
+            "result_meta": _extract_result_metadata(fn_name, result, True),
         }
 
     args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
@@ -169,7 +215,7 @@ def _execute_single_tool(
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
     })
 
-    is_error = (not tool_ok) or str(result).startswith("⚠️")
+    is_error = _is_tool_execution_failure(tool_ok, result)
 
     return {
         "tool_call_id": tool_call_id,
@@ -179,6 +225,7 @@ def _execute_single_tool(
         "tool_args": args if isinstance(args, dict) else {},
         "args_for_log": args_for_log,
         "is_code_tool": is_code_tool,
+        "result_meta": _extract_result_metadata(fn_name, result, is_error),
     }
 
 
@@ -255,6 +302,7 @@ def _make_timeout_result(
         "is_error": True,
         "args_for_log": args_for_log,
         "is_code_tool": is_code_tool,
+        "result_meta": _extract_result_metadata(fn_name, result, True),
     }
 
 
@@ -291,6 +339,7 @@ def _execute_with_timeout(
         future = stateful_executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
         try:
             result = future.result(timeout=timeout_sec)
+            result_meta = result.get("result_meta") or {}
             _emit_live_log(tools, {
                 "type": "tool_call_finished",
                 "task_id": task_id,
@@ -298,6 +347,9 @@ def _execute_with_timeout(
                 "args": result.get("args_for_log", args_for_log),
                 "duration_sec": round(time.perf_counter() - started_at, 3),
                 "is_error": bool(result.get("is_error")),
+                "status": result_meta.get("status"),
+                "exit_code": result_meta.get("exit_code"),
+                "signal": result_meta.get("signal"),
                 "result_preview": sanitize_tool_result_for_log(
                     truncate_for_log(result.get("result", ""), 500)
                 ),
@@ -325,6 +377,7 @@ def _execute_with_timeout(
             future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
             try:
                 result = future.result(timeout=timeout_sec)
+                result_meta = result.get("result_meta") or {}
                 _emit_live_log(tools, {
                     "type": "tool_call_finished",
                     "task_id": task_id,
@@ -332,6 +385,9 @@ def _execute_with_timeout(
                     "args": result.get("args_for_log", args_for_log),
                     "duration_sec": round(time.perf_counter() - started_at, 3),
                     "is_error": bool(result.get("is_error")),
+                    "status": result_meta.get("status"),
+                    "exit_code": result_meta.get("exit_code"),
+                    "signal": result_meta.get("signal"),
                     "result_preview": sanitize_tool_result_for_log(
                         truncate_for_log(result.get("result", ""), 500)
                     ),
@@ -413,6 +469,11 @@ def handle_tool_calls(
                         "tool_args": {},
                         "args_for_log": {},
                         "is_code_tool": fn_name in tools.CODE_TOOLS,
+                        "result_meta": _extract_result_metadata(
+                            fn_name,
+                            f"⚠️ TOOL_ERROR: Unexpected error: {exc}",
+                            True,
+                        ),
                     }
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -457,6 +518,7 @@ def process_tool_results(
             "args": _safe_args(exec_result["args_for_log"]),
             "result": truncate_for_log(exec_result["result"], 700),
             "is_error": is_error,
+            **(exec_result.get("result_meta") or {}),
         })
 
     return error_count

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import base64
 import logging
+import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -29,6 +31,7 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 log = logging.getLogger(__name__)
 
 _playwright_ready = False
+_MISSING_EXECUTABLE_RE = re.compile(r"Executable doesn't exist at ([^\n]+)")
 
 
 def _ensure_playwright_installed():
@@ -66,15 +69,62 @@ def _ensure_playwright_installed():
     _playwright_ready = True
 
 
+def _maybe_alias_playwright_binary(exc: Exception) -> bool:
+    """Bridge x64->arm64 browser cache lookups on Apple Silicon when possible."""
+    match = _MISSING_EXECUTABLE_RE.search(str(exc))
+    if not match:
+        return False
+
+    missing_path = pathlib.Path(match.group(1).strip())
+    missing_dir = missing_path.parent
+    if "-mac-x64" not in str(missing_dir):
+        return False
+
+    alternate_dir = pathlib.Path(str(missing_dir).replace("-mac-x64", "-mac-arm64"))
+    alternate_binary = alternate_dir / missing_path.name
+    if not alternate_binary.exists():
+        return False
+
+    try:
+        if missing_dir.exists():
+            return missing_path.exists()
+        missing_dir.symlink_to(alternate_dir, target_is_directory=True)
+        log.info("Aliased Playwright browser cache %s -> %s", missing_dir, alternate_dir)
+        return True
+    except OSError:
+        log.debug("Failed to alias Playwright browser cache", exc_info=True)
+        return False
+
+
+def _launch_browser_with_fallback(pw_instance: Any) -> Any:
+    launch_kwargs = {
+        "headless": True,
+        "args": [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=site-per-process",
+            "--window-size=1920,1080",
+        ],
+    }
+    try:
+        return pw_instance.chromium.launch(**launch_kwargs)
+    except Exception as exc:
+        if _maybe_alias_playwright_binary(exc):
+            return pw_instance.chromium.launch(**launch_kwargs)
+        raise
+
+
 def _ensure_browser(ctx: ToolContext):
     """Create or reuse browser for this context. All Playwright state lives
     in ctx.browser_state — no module-level globals."""
     bs = ctx.browser_state
     current_thread_id = threading.get_ident()
+    stored_thread_id = getattr(bs, "_thread_id", None)
 
-    if bs._thread_id is not None and bs._thread_id != current_thread_id:
+    if stored_thread_id is not None and stored_thread_id != current_thread_id:
         log.info("Thread switch detected (old=%s, new=%s). Tearing down browser for this context.",
-                 bs._thread_id, current_thread_id)
+                 stored_thread_id, current_thread_id)
         cleanup_browser(ctx)
 
     if bs.browser is not None:
@@ -90,19 +140,10 @@ def _ensure_browser(ctx: ToolContext):
     if bs.pw_instance is None:
         from playwright.sync_api import sync_playwright
         bs.pw_instance = sync_playwright().start()
-        bs._thread_id = current_thread_id
+        setattr(bs, "_thread_id", current_thread_id)
         log.info("Created Playwright instance in thread %s", current_thread_id)
 
-    bs.browser = bs.pw_instance.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=site-per-process",
-            "--window-size=1920,1080",
-        ],
-    )
+    bs.browser = _launch_browser_with_fallback(bs.pw_instance)
     bs.page = bs.browser.new_page(
         viewport={"width": 1920, "height": 1080},
         user_agent=(
@@ -141,7 +182,7 @@ def cleanup_browser(ctx: ToolContext) -> None:
     bs.page = None
     bs.browser = None
     bs.pw_instance = None
-    bs._thread_id = None
+    setattr(bs, "_thread_id", None)
 
 
 def _is_infrastructure_error(obj: Any) -> bool:

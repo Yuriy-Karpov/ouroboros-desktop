@@ -50,8 +50,88 @@ def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, remote_url: str,
 # ---------------------------------------------------------------------------
 
 def git_capture(cmd: List[str]) -> Tuple[int, str, str]:
-    r = subprocess.run(cmd, cwd=str(REPO_DIR), capture_output=True, text=True)
+    for _attempt in range(2):
+        r = subprocess.run(cmd, cwd=str(REPO_DIR), capture_output=True, text=True)
+        stderr = (r.stderr or "").strip()
+        if r.returncode == 0:
+            return r.returncode, (r.stdout or "").strip(), stderr
+        if _maybe_repair_git_index(stderr):
+            continue
+        return r.returncode, (r.stdout or "").strip(), stderr
     return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+
+
+def _stale_git_lock_paths(max_age_sec: float = 15.0) -> List[pathlib.Path]:
+    git_dir = REPO_DIR / ".git"
+    if not git_dir.exists():
+        return []
+    candidates = [git_dir / "index.lock"]
+    stale_paths: List[pathlib.Path] = []
+    now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    for path in candidates:
+        try:
+            age = now - path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+        if age >= max_age_sec:
+            stale_paths.append(path)
+    return stale_paths
+
+
+def _maybe_repair_git_index(stderr: str) -> bool:
+    error_text = str(stderr or "")
+    error_lower = error_text.lower()
+    repaired = False
+
+    if "index.lock" in error_lower:
+        for lock_path in _stale_git_lock_paths():
+            try:
+                lock_path.unlink()
+                repaired = True
+                log.warning("Removed stale git lock: %s", lock_path)
+            except Exception:
+                log.warning("Failed to remove stale git lock: %s", lock_path, exc_info=True)
+
+    corrupt_markers = (
+        "index file smaller than expected",
+        "index file corrupt",
+        "fatal: .git/index:",
+    )
+    if not any(marker in error_lower for marker in corrupt_markers):
+        return repaired
+
+    git_dir = REPO_DIR / ".git"
+    if not git_dir.exists():
+        return repaired
+
+    index_path = git_dir / "index"
+    if index_path.exists():
+        backup_path = git_dir / f"index.corrupt.{uuid.uuid4().hex[:8]}.bak"
+        try:
+            index_path.replace(backup_path)
+            repaired = True
+            log.warning("Backed up corrupt git index to %s", backup_path)
+        except Exception:
+            log.warning("Failed to back up corrupt git index %s", index_path, exc_info=True)
+            return repaired
+
+    rebuild = subprocess.run(
+        ["git", "reset", "--mixed", "HEAD"],
+        cwd=str(REPO_DIR),
+        capture_output=True,
+        text=True,
+    )
+    if rebuild.returncode == 0:
+        log.warning("Rebuilt git index after corruption in %s", REPO_DIR)
+        return True
+
+    log.warning(
+        "Failed to rebuild git index after corruption: %s",
+        (rebuild.stderr or "").strip() or (rebuild.stdout or "").strip(),
+    )
+    return repaired
 
 
 _REPO_GITIGNORE = """\
@@ -330,9 +410,10 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "type": "reset_fetch_failed",
                     "target_branch": branch, "reason": reason, "error": msg,
+                    "continuing_local_reset": True,
                 },
             )
-            return False, msg
+            log.warning("%s; continuing with local reset for branch %s", msg, branch)
 
     policy = str(unsynced_policy or "ignore").strip().lower()
     if policy not in {"ignore", "block", "rescue_and_block", "rescue_and_reset"}:
@@ -402,14 +483,28 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
     # never for resetting the local branch. Agent commits must survive restarts.
     def _run_git_resilient(cmd, **kwargs):
         import time
+        check = bool(kwargs.pop("check", False))
         for attempt in range(5):
-            try:
-                return subprocess.run(cmd, **kwargs)
-            except subprocess.CalledProcessError as e:
-                if attempt == 4:
-                    raise e
-                time.sleep(1)
-        return subprocess.run(cmd, **kwargs)
+            run_kwargs = dict(kwargs)
+            run_kwargs.setdefault("capture_output", True)
+            run_kwargs.setdefault("text", True)
+            result = subprocess.run(cmd, **run_kwargs)
+            if result.returncode == 0:
+                return result
+            if _maybe_repair_git_index(result.stderr):
+                time.sleep(0.2)
+                continue
+            if not check:
+                return result
+            if attempt == 4:
+                raise subprocess.CalledProcessError(
+                    result.returncode,
+                    cmd,
+                    output=result.stdout,
+                    stderr=result.stderr,
+                )
+            time.sleep(1)
+        return subprocess.run(cmd, check=check, **kwargs)
 
     rc_local = subprocess.run(
         ["git", "rev-parse", "--verify", branch],

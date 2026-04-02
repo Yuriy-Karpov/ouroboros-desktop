@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.5.0](https://img.shields.io/badge/version-4.5.0-green.svg)](VERSION)
+[![Version 4.7.1](https://img.shields.io/badge/version-4.7.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -35,7 +35,7 @@ Not a coding assistant. A digital being with a constitution, background consciou
   <img src="assets/setup.png" width="500" alt="Drag Ouroboros.app to install">
 </p>
 
-On first launch, right-click → **Open** (Gatekeeper bypass). The wizard will ask for your [OpenRouter API key](https://openrouter.ai/keys).
+On first launch, right-click → **Open** (Gatekeeper bypass). The shared desktop/web wizard is now multi-step: add access first, choose visible models second, set review mode third, set budget fourth, and confirm the final summary last. It refuses to continue until at least one runnable remote key or local model source is configured, keeps the model step aligned with whatever key combination you entered, and still auto-remaps untouched default model values to official OpenAI defaults when OpenRouter is absent and OpenAI is the only configured remote runtime. The broader multi-provider setup (OpenAI-compatible, Cloud.ru, Telegram bridge) remains available in **Settings**. Existing supported provider settings skip the wizard automatically.
 
 ---
 
@@ -47,10 +47,13 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Native Desktop App** — Runs entirely on your machine as a standalone application (macOS, Linux, Windows). No cloud dependencies for execution.
 - **Constitution** — Governed by [BIBLE.md](BIBLE.md) (9 philosophical principles, P0–P8). Philosophy first, code second.
 - **Multi-Layer Safety** — Hardcoded sandbox blocks writes to critical files and mutative git via shell; deterministic whitelist for known-safe ops; LLM Safety Agent evaluates remaining commands; post-edit revert for safety-critical files.
+- **Multi-Provider Runtime** — Remote model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, or Cloud.ru Foundation Models. The optional model catalog helps populate provider-specific model IDs in Settings, and untouched default model values auto-remap to official OpenAI defaults when OpenRouter is absent.
+- **Focused Task UX** — Chat shows plain typing for simple one-step replies and only promotes multi-step work into one expandable live task card. Logs still group task timelines instead of dumping every step as a separate row.
 - **Background Consciousness** — Thinks between tasks. Has an inner life. Not reactive — proactive.
 - **Identity Persistence** — One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.
 - **Embedded Version Control** — Contains its own local Git repo. Version controls its own evolution. Optional GitHub sync for remote backup.
 - **Local Model Support** — Run with a local GGUF model via llama-cpp-python (Metal acceleration on Apple Silicon, CPU on Linux/Windows).
+- **Telegram Bridge** — Optional bidirectional bridge between the Web UI and Telegram: text, typing/actions, photos, chat binding, and inbound Telegram photos flowing into the same live chat/agent stream.
 
 ---
 
@@ -78,6 +81,49 @@ python server.py
 
 Then open `http://127.0.0.1:8765` in your browser. The setup wizard will guide you through API key configuration.
 
+You can also override the bind address and port:
+
+```bash
+python server.py --host 127.0.0.1 --port 9000
+```
+
+Available launch arguments:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--host` | `127.0.0.1` | Host/interface to bind the web server to |
+| `--port` | `8765` | Port to bind the web server to |
+
+The same values can also be provided via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OUROBOROS_SERVER_HOST` | `127.0.0.1` | Default bind host |
+| `OUROBOROS_SERVER_PORT` | `8765` | Default bind port |
+
+If you bind on anything other than localhost, `OUROBOROS_NETWORK_PASSWORD` is optional. When set, non-loopback browser/API traffic is gated; when unset, the full surface remains open by design.
+
+The Files tab uses your home directory by default only for localhost usage. For Docker or other
+network-exposed runs, set `OUROBOROS_FILE_BROWSER_DEFAULT` to an explicit directory. Symlink entries are shown and can be read, edited, copied, moved, uploaded into, and deleted intentionally; root-delete protection still applies to the configured root itself.
+
+### Provider Routing
+
+Settings now exposes tabbed provider cards for:
+
+- **OpenRouter** — default multi-model router
+- **OpenAI** — official OpenAI API (use model values like `openai::gpt-5.4`)
+- **OpenAI Compatible** — any custom OpenAI-style endpoint (use `openai-compatible::...`)
+- **Cloud.ru Foundation Models** — Cloud.ru OpenAI-compatible runtime (use `cloudru::...`)
+- **Anthropic** — kept for the existing Claude CLI flow, not a separate remote runtime
+
+If OpenRouter is not configured and only official OpenAI is present, untouched default model values are auto-remapped to `openai::gpt-5.4` / `openai::gpt-5.4-mini` so the first-run path does not strand the app on OpenRouter-only defaults.
+
+The Settings page also includes:
+
+- optional `/api/model-catalog` lookup for configured providers
+- Telegram bridge configuration (`TELEGRAM_BOT_TOKEN`, primary chat binding, mirrored delivery controls)
+- a refactored desktop-first tabbed UI with searchable model pickers, segmented effort controls, masked-secret toggles, explicit `Clear` actions, and local-model controls
+
 ### Run Tests
 
 ```bash
@@ -87,6 +133,64 @@ make test
 ---
 
 ## Build
+
+### Docker (web UI)
+
+Docker is for the web UI/runtime flow, not the desktop bundle. The container binds to
+`0.0.0.0:8765` by default, and the image now also defaults `OUROBOROS_FILE_BROWSER_DEFAULT`
+to `${APP_HOME}` so the Files tab always has an explicit network-safe root inside the container.
+
+Build the image:
+
+```bash
+docker build -t ouroboros-web .
+```
+
+Run on the default port:
+
+```bash
+docker run --rm -p 8765:8765 \
+  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
+  -v "$PWD:/workspace" \
+  ouroboros-web
+```
+
+Use a custom port via environment variables:
+
+```bash
+docker run --rm -p 9000:9000 \
+  -e OUROBOROS_SERVER_PORT=9000 \
+  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
+  -v "$PWD:/workspace" \
+  ouroboros-web
+```
+
+Run with launch arguments instead:
+
+```bash
+docker run --rm -p 9000:9000 \
+  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
+  -v "$PWD:/workspace" \
+  ouroboros-web --port 9000
+```
+
+Required/important environment variables:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OUROBOROS_NETWORK_PASSWORD` | Optional | Enables the non-loopback password gate when set |
+| `OUROBOROS_FILE_BROWSER_DEFAULT` | Defaults to `${APP_HOME}` in the image | Explicit root directory exposed in the Files tab |
+| `OUROBOROS_SERVER_PORT` | Optional | Override container listen port |
+| `OUROBOROS_SERVER_HOST` | Optional | Defaults to `0.0.0.0` in Docker |
+
+Example: mount a host workspace and expose only that directory in Files:
+
+```bash
+docker run --rm -p 8765:8765 \
+  -e OUROBOROS_FILE_BROWSER_DEFAULT=/workspace \
+  -v "$PWD:/workspace" \
+  ouroboros-web
+```
 
 ### macOS (.dmg)
 
@@ -144,6 +248,7 @@ Ouroboros
 │   ├── pricing.py          — Model pricing, cost estimation
 │   ├── review.py           — Code review pipeline and repo inspection
 │   ├── reflection.py       — Execution reflection and pattern capture
+│   ├── tool_capabilities.py — SSOT for tool sets (core, parallel, truncation)
 │   ├── consciousness.py    — Background thinking loop
 │   ├── owner_inject.py     — Per-task creator message mailbox
 │   ├── safety.py           — Dual-layer LLM security supervisor
@@ -175,9 +280,12 @@ Created on first launch:
 
 | Key | Required | Where to get it |
 |-----|----------|-----------------|
-| OpenRouter API Key | **Yes** | [openrouter.ai/keys](https://openrouter.ai/keys) |
-| OpenAI API Key | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — enables web search tool |
+| OpenRouter API Key | No | [openrouter.ai/keys](https://openrouter.ai/keys) — default multi-model router |
+| OpenAI API Key | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — official OpenAI runtime and web search |
+| OpenAI Compatible API Key / Base URL | No | Any OpenAI-style endpoint (proxy, self-hosted gateway, third-party compatible API) |
+| Cloud.ru Foundation Models API Key | No | Cloud.ru Foundation Models provider |
 | Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — enables Claude Code CLI |
+| Telegram Bot Token | No | [@BotFather](https://t.me/BotFather) — enables the Telegram bridge |
 | GitHub Token | No | [github.com/settings/tokens](https://github.com/settings/tokens) — enables remote sync |
 
 All keys are configured through the **Settings** page in the UI or during the first-run wizard.
@@ -191,11 +299,36 @@ All keys are configured through the **Settings** page in the UI or during the fi
 | Light | `anthropic/claude-sonnet-4.6` | Safety checks, consciousness, fast tasks |
 | Fallback | `anthropic/claude-sonnet-4.6` | When primary model fails |
 | Claude Code CLI | `opus` | Anthropic model for Claude Code CLI tools |
+| Scope Review | `anthropic/claude-opus-4.6` | Blocking scope reviewer (single-model, after triad review) |
 | Web Search | `gpt-5.2` | OpenAI Responses API for web search |
 
-Task/chat reasoning defaults to `medium`.
+Task/chat reasoning defaults to `medium`. Scope review reasoning defaults to `high`.
 
-Models are configurable in the Settings page. All LLM calls go through [OpenRouter](https://openrouter.ai) (except web search, which uses OpenAI directly).
+Models are configurable in the Settings page. Runtime model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, or Cloud.ru. Anthropic remains scoped to the existing Claude Code CLI flow. When only official OpenAI is configured and the shipped default model values are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In that same OpenAI-only mode, review-model lists are normalized automatically and fall back to running the main model three times if no valid multi-model remote quorum is configured.
+
+### File Browser Start Directory
+
+The web UI file browser is rooted at one configurable directory. Users can browse only inside that directory tree.
+
+| Variable | Example | Behavior |
+|----------|---------|----------|
+| `OUROBOROS_FILE_BROWSER_DEFAULT` | `/home/app` | Sets the root directory of the `Files` tab |
+
+Examples:
+
+```bash
+OUROBOROS_FILE_BROWSER_DEFAULT=/home/app python server.py
+OUROBOROS_FILE_BROWSER_DEFAULT=/mnt/shared python server.py --port 9000
+```
+
+If the variable is not set, Ouroboros uses the current user's home directory. If the configured path does not exist or is not a directory, Ouroboros also falls back to the home directory.
+
+The `Files` tab supports:
+
+- downloading any file inside the configured browser root
+- uploading a file into the currently opened directory
+
+Uploads do not overwrite existing files. If a file with the same name already exists, the UI will show an error.
 
 ---
 
@@ -212,7 +345,7 @@ Available in the chat interface:
 | `/review` | Queue a deep review task (code, understanding, identity). |
 | `/bg` | Toggle background consciousness loop (start/stop/status). |
 
-All other messages are sent directly to the LLM.
+The same runtime actions are also exposed as compact buttons in both the Dashboard and the Chat header. All other messages are sent directly to the LLM.
 
 ---
 
@@ -238,47 +371,22 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.7.1 | 2026-04-01 | Public `v4.7` release line, consolidating everything added after `v4.5.0` into one external release: multi-provider LLM routing across OpenRouter, direct OpenAI, OpenAI-compatible endpoints, and Cloud.ru; optional async provider model catalog lookup; a shared multi-step onboarding wizard with provider detection, local-model presets, review mode/budget setup, and smarter first-run defaults; a redesigned desktop-first Settings UI with tabbed sections, searchable model pickers, masked secret inputs, explicit `Clear` actions, and local-model controls; an optional non-localhost password gate; the full Files tab/backend with browse, preview, download, upload, create, rename, move, copy, delete, explicit network-safe roots, and intentional symlink-aware behavior; a bidirectional Telegram bridge with mirrored text, typing/actions, photos, and durable chat binding; live task cards in Chat plus grouped task timelines in Logs instead of step spam; the advisory pre-review layer, durable review-state tracking, scope review, shared review helpers, and a tool-capabilities single source of truth; `runtime_env` injection into LLM context; a longer default tool timeout for slow installs and shell work; and the UX/reliability polish shipped across the internal `4.7.x` line, including markdown-capable live cards, muted progress bubbles, reconnect banners, status-badge fixes, better reply/restart ordering, safer local-dev startup behavior, and sturdier supervisor recovery. |
+| 4.7.0 | 2026-03-22 | Provider-and-UI overhaul release: add multi-provider model routing (OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru), official-OpenAI auto-default migration plus OpenAI-only review fallback, multi-step onboarding with first-step multi-key entry and visible model review, desktop-first Settings redesign with searchable model pickers and explicit secret clearing, Telegram bridge with bidirectional text/actions/photos/chat binding, one expandable live task card in Chat, grouped task cards in Logs, and intentional external-symlink full CRUD semantics in the Files tab while preserving explicit network root and root-delete protection. |
+| 4.6.0 | 2026-03-22 | Files and network runtime release: add the Web UI Files tab with extracted backend routes, bounded preview/upload behavior, root-delete protection, encoded image preview URLs, and safer path containment; add minimal password gate for non-localhost browser/API access; add source/docker host+port entrypoint support with repo-shaped Docker runtime and explicit file-root configuration for network mode. |
 | 4.5.0 | 2026-03-19 | Context quality and prompt discipline release: fix provenance — system summaries now correctly marked as system, not user, across memory, consolidation, server API, and chat UI (amber system bubbles); restore execution reflections (task_reflections.jsonl) in live LLM context; move Health Invariants to the top of dynamic context block (both task and consciousness paths); task-scope recent progress/tools/events when task_id is available; harden run_shell against literal $VAR env-ref misuse in argv; add Claude CLI first-run retry and structured error classification; full SYSTEM.md editorial rewrite — terminology normalized to 'creator', new Methodology Check / Anti-Reactivity / Diagnostics Discipline / Knowledge Retrieval Triggers sections, stronger Health Invariant reactions, compressed inventory sections. 12 files changed, new regression tests. |
 | 4.4.0 | 2026-03-19 | Safe editing release: `str_replace_editor` tool for surgical edits to existing files, `repo_write` shrink guard blocks accidental truncation of tracked files (>30% shrinkage), full task lifecycle statuses (failed/interrupted/cancelled) with honest status tracking, rescue snapshot discoverability via health invariants, `provider_incomplete_response` classification for OpenRouter glitches, default review enforcement changed to advisory, fix progress bubble opacity and duplicate emoji. |
 | 4.3.1 | 2026-03-19 | Fix: remove semi-transparent dimming from progress chat bubbles and remove duplicate `💬` emoji that appeared in both sender label and message text. |
 | 4.3.0 | 2026-03-19 | Reliability and continuity release: remove silent truncation from critical task/memory paths, persist honest subtask lifecycle states and full task results, restore transient chat wake banner, replace local-model hard prompt slicing with explicit non-core compaction plus fail-fast overflow, route Anthropic/OpenRouter calls without hard provider pinning while keeping parameter guarantees, and align async review calls with shared LLM routing/usage observability. |
 | 4.2.0 | 2026-03-16 | Cross-platform hardening release: replace Unix-only file locking in memory/consolidation with Windows-safe locking, refresh default model tiers (Opus main/code, Sonnet light/fallback, task effort `medium`), improve reconnect recovery with heartbeat/watchdog/history resync, switch local model chat format to auto-detect, and sync public docs with the current codebase and BIBLE structure. |
-| 4.1.0 | 2026-03-16 | Public desktop release: port the v4 architecture and UI into the platform branch, preserve cross-platform packaging and Windows runtime support, and ship signed notarized macOS packaging. |
 | 4.0.9 | 2026-03-15 | Packaging completeness release: bundle `assets/`, restore custom app icon from `assets/icon.icns`, and copy assets into the bootstrapped repo on fresh install so the shipped app and repo are no longer missing the visual asset layer. |
 | 4.0.8 | 2026-03-15 | Fix web restart/reconnect path: robust WebSocket retry with `onerror` handling, queued outgoing chat messages during reconnect, visible reconnect overlay, and no-cache `index.html` to reduce stale frontend recovery bugs. |
 | 4.0.7 | 2026-03-15 | Constitution sync release: update `BIBLE.md` to match the shipped `Advisory` / `Blocking` commit-review model, so bundled app behavior and constitutional text no longer disagree. |
 | 4.0.6 | 2026-03-15 | Live logs overhaul: timeline-style `Logs` tab with task/context/LLM/tool/heartbeat phases and expandable raw events. Commit review now supports `Advisory` vs `Blocking` enforcement in Settings while still always running review. Context now keeps the last 1000 explicit chat messages in the recent-chat section. |
-| 4.0.5 | 2026-03-15 | Fix: remove stale `_UNIFIED_REVIEW_MODELS` import from `git.py` (caused ImportError after v4.0.4 removed the symbol). |
-| 4.0.4 | 2026-03-15 | Review models: single source of truth in `config.py`. `get_review_models()` reads env, falls back to `SETTINGS_DEFAULTS`. Clearing review models in Settings now restores default instead of silently falling through to duplicate hardcode in `review.py`. `_UNIFIED_REVIEW_MODELS` removed. 4 new tests. |
-| 4.0.3 | 2026-03-15 | Reasoning effort now configurable per task type (task/chat, evolution, review, consciousness) via Settings UI. Replaces single `OUROBOROS_INITIAL_REASONING_EFFORT` with four separate env vars. |
-| 4.0.2 | 2026-03-15 | Settings: review models and initial reasoning effort configurable via UI (OUROBOROS_REVIEW_MODELS, OUROBOROS_INITIAL_REASONING_EFFORT). |
-| 4.0.1 | 2026-03-15 | UI: user chat bubble color changed from green to blue. |
 | 4.0.0 | 2026-03-15 | **Major release.** Modular core architecture (agent_startup_checks, agent_task_pipeline, loop_llm_call, loop_tool_execution, context_compaction, tool_policy). No-silent-truncation context contract: cognitive artifacts preserved whole, file-size budget health invariants. New episodic memory pipeline (task_summary -> chat.jsonl -> block consolidation). Stronger background consciousness (StatefulToolExecutor, per-tool timeouts, 10-round default). Per-context Playwright browser lifecycle. Generic public identity: all legacy persona traces removed from prompts, docs, UI, and constitution. BIBLE.md v4: process memory, no-silent-truncation, DRY/prompts-are-code, review-gated commits, provenance awareness. Safe git bootstrap (no destructive rm -rf). Fixed subtask depth accounting, consciousness state persistence, startup memory ordering, frozen registry memory_tools. 8 new regression test files. |
-| 3.25.4 | 2026-03-13 | Release pipeline fix: normalize `python-standalone` symlinked files before PyInstaller so macOS app/DMG builds do not fail on bundle path collisions. |
-| 3.25.3 | 2026-03-13 | Packaging fix release: include `docs/` in the macOS app bundle so the bootstrapped on-disk repo matches the shipped source tree after DMG install. |
-| 3.25.2 | 2026-03-11 | Post-review fix #2: restore scratchpad size tracking in journal for evolution metrics (new block model stopped writing `content_len` — evolution chart scratchpad line would flatten), persist `cached_tokens`/`cache_write_tokens` in `llm_usage` events.jsonl entries (were computed but dropped at write time), fix stale README architecture snippet ("Episodic" → "Block-wise") |
-| 3.25.1 | 2026-03-11 | Post-review fix: wire `update_scratchpad` to append-block model (was still flat overwrite despite docs claiming block semantics), restore `_rebuild_knowledge_index` to always rebuild (was no-op when index existed — broke auto-discovery after scratchpad consolidation and pattern register updates), fix cache hit rate invariant to count only `llm_round` events (was double-counting with `llm_usage` which lacks `cached_tokens`), pass MIME type through full send_photo pipeline (event → bridge → WebSocket → UI), remove tautological browser test, create missing v3.25.0 git tag |
-| 3.25.0 | 2026-03-11 | block-wise dialogue memory (`dialogue_blocks.json` replaces monolithic `dialogue_summary.md`, auto-migration, era compression), append-block scratchpad model (`scratchpad_blocks.json`, FIFO rotation, eviction journal), browser state isolation (`_is_infrastructure_error()` structural detection, improved recovery), `send_photo` file_path support (preferred over base64, 10MB limit, MIME detection), shell `ast.literal_eval` fallback for LLM argument recovery, cache hit rate health invariant, patterns.md in background consciousness context, Recipe Capture Rule in SYSTEM.md, knowledge index no-overwrite guard. 4 new test files, all docs synced |
-| 3.24.1 | 2026-03-08 | Post-review fix: restore last_push_succeeded check from push result (was unconditional True — regression from v3.23.1 fix), add repo_write to safety.py CHECKED_TOOLS + whitelist, add repo_write to context.py LARGE_CONTENT_TOOLS, add knowledge_list to CORE_TOOL_NAMES, fix remaining stale index-full references in SYSTEM.md, add pyproject.toml to release invariant wording in SYSTEM.md |
-| 3.24.0 | 2026-03-08 | modern commit pipeline — `repo_write` tool (single/multi-file write without commit), unified pre-commit review gate (3-model parallel review against CHECKLISTS.md, preflight checks, quorum logic, review history, review_rebuttal), `repo_write_commit` kept as legacy compatibility. Operational resilience: remote config failures surfaced at startup and settings save, migrate_remote_credentials wired at startup, auto-rescue only reports committed when git commit actually succeeds. Docs: fix false index-full instruction in SYSTEM.md, DEVELOPMENT.md review protocol updated, ARCHITECTURE.md git tools section rewritten. 47 new behavioral tests |
-| 3.23.1 | 2026-03-08 | Post-review fix: close TESTS_SKIPPED restart-gate bypass (last_push_succeeded no longer set True without actual push), fix SYSTEM.md tool taxonomy to match CORE_TOOL_NAMES (web/knowledge/scheduling tools are core, not extended), add P9/P10 to constitution test |
-| 3.23.0 | 2026-03-08 | constitution P9 (Spiral Growth) and P10 (Epistemic Stability), fix false last_push_succeeded in evolution restart gate, fix CONSCIOUSNESS.md prompt-runtime drift (phantom tools removed), expand health invariants (README + ARCHITECTURE.md version sync), restructure SYSTEM.md tools section (core vs extended), fix DEVELOPMENT.md gateway rules honesty |
-| 3.22.0 | 2026-03-08 | final alignment — auto-push after commits (best-effort via git_ops.push_to_remote), migrate_remote_credentials one-shot, docs/DEVELOPMENT.md + docs/CHECKLISTS.md, all docs in static context (BIBLE+ARCH+DEV+README+CHECKLISTS), SYSTEM.md (Decision Gate, Read Before Write, Knowledge Grooming, git tools list), CONSCIOUSNESS.md (Memory Hygiene, Failure Signal Escalation, Error-Class Analysis), ARCHITECTURE.md version sync check in startup, migration rules cleanup |
-| 3.21.0 | 2026-03-08 | git safety net — pull_from_remote (FF-only), restore_to_head (discard uncommitted), revert_commit (safe undo); also_stage param in repo_write_commit; credential helper in git_ops (no token in URL); new tools in CORE_TOOL_NAMES |
-| 3.20.0 | 2026-03-08 | execution reflection (process memory) — auto-generates LLM summaries on errors, stored in task_reflections.jsonl and loaded into context; pattern register in knowledge base; crash report injection at startup; scratchpad auto-consolidation (>30k chars → extract durable knowledge + compress); standalone _rebuild_knowledge_index |
-| 3.19.0 | 2026-03-08 | extended health invariants (thin identity, empty/bloated scratchpad, crash rollback, prompt-runtime drift), compaction protection for commit tools and error results, ARCHITECTURE.md in static context, username in chat history, REVIEW_FAIL markers in tool summary, chat cap 800, consolidator log rotation handling, knowledge index rebuild after consolidation |
-| 3.18.0 | 2026-03-08 | per-tool result limits, repo_read line slicing, safety whitelist, registry hardening (SAFETY_CRITICAL_PATHS, path escape, git blocking, revert), shell builtin/operator validation, scratchpad/identity guards, LLM client max_retries=0, tool timeout tuning, git error sanitization + auto-tag + compaction guard, RLock for queue, knowledge index fix |
-| 3.17.2 | 2026-03-04 | Remove 800-char truncation of outgoing chat messages in context; full message text now visible in LLM context |
-| 3.17.0 | 2026-03-02 | Native screenshot injection: screenshots from browse_page/browser_action are now injected as image_url messages directly into LLM context, replacing the separate analyze_screenshot VLM call; instant, free, reliable visual understanding |
-| 3.16.1 | 2026-02-28 | Add multi-model review as mandatory item in Change Propagation Checklist; Bible compliance mandate in deep review task text; prompt injection hardening for review reason |
-| 3.16.0 | 2026-02-28 | Memory Registry: metacognitive source-of-truth map (`memory/registry.md`) injected into every LLM context; new tools `memory_map` and `memory_update_registry`; prevents confabulation from cached impressions by making data boundaries visible |
-| 3.15.0 | 2026-02-27 | Per-task cost cap (default $5, configurable via OUROBOROS_PER_TASK_COST_USD env var) prevents runaway tasks; fix use_local propagation in budget guard LLM calls; 14 new budget limit tests (193 total) |
-| 3.14.1 | 2026-02-27 | Fix zombie tasks: write atomic failure results on crash storm, guard against overwriting completed results, drain PENDING queue on kill; 5 new regression tests (179 total) |
-| 3.14.0 | 2026-02-26 | Public landing page (docs/index.html): self-contained dark-theme page with first-person voice, constitution summary, architecture diagram, and install instructions; zero JS dependencies |
-| 3.13.1 | 2026-02-26 | Extract pricing module from loop.py (1035→887 lines): model pricing table, cost estimation, API key inference, usage event emission moved to ouroboros/pricing.py (169 lines) for complexity budget compliance |
-| 3.13.0 | 2026-02-26 | Modular frontend: decompose monolithic app.js (1398 lines) into 10 ES modules with thin orchestrator (87 lines); fix WebSocket race condition (deferred connect after listener registration); multi-model reviewed |
-| 3.11.3 | 2026-02-26 | Add photo sending to chat: send_photo tool delivers screenshots as inline images via WebSocket |
-| 3.11.2 | 2026-02-26 | Fix tool timeout crash: catch concurrent.futures.TimeoutError (not a subclass of builtins.TimeoutError in Python 3.10), add TOOL_TIMEOUT logging, add regression test |
+
+Older releases are preserved in Git tags and GitHub releases. Internal patch-level iterations that led to
+the public `v4.7.1` release are intentionally collapsed into the single public entry above.
 
 ---
 
@@ -286,4 +394,4 @@ Full text: [BIBLE.md](BIBLE.md)
 
 [MIT License](LICENSE)
 
-Created by [Anton Razzhigaev](https://t.me/abstractDL)
+Created by [Anton Razzhigaev](https://t.me/abstractDL) & Andrew Kaznacheev

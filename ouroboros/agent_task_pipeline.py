@@ -22,6 +22,51 @@ from ouroboros.utils import utc_now_iso, append_jsonl
 log = logging.getLogger(__name__)
 
 
+def _parse_model_provider(model: str) -> str:
+    model_name = str(model or "").strip()
+    for prefix, provider in (
+        ("openai::", "openai"),
+        ("anthropic::", "anthropic"),
+        ("cloudru::", "cloudru"),
+        ("openai-compatible::", "openai-compatible"),
+        ("openrouter::", "openrouter"),
+    ):
+        if model_name.startswith(prefix):
+            return provider
+    return "openrouter"
+
+
+def _has_provider_credentials(provider: str) -> bool:
+    if provider == "openai":
+        return bool(str(os.environ.get("OPENAI_API_KEY", "") or "").strip())
+    if provider == "anthropic":
+        return bool(str(os.environ.get("ANTHROPIC_API_KEY", "") or "").strip())
+    if provider == "cloudru":
+        return bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
+    if provider == "openai-compatible":
+        compatible_key = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+        legacy_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
+        legacy_base = str(os.environ.get("OPENAI_BASE_URL", "") or "").strip()
+        return bool(compatible_key or (legacy_key and legacy_base))
+    return bool(str(os.environ.get("OPENROUTER_API_KEY", "") or "").strip())
+
+
+def _resolve_task_summary_model(default_model: str) -> str:
+    if _has_provider_credentials(_parse_model_provider(default_model)):
+        return default_model
+
+    for env_name in (
+        "OUROBOROS_MODEL_LIGHT",
+        "OUROBOROS_MODEL_FALLBACK",
+        "OUROBOROS_MODEL",
+        "OUROBOROS_MODEL_CODE",
+    ):
+        candidate = str(os.environ.get(env_name, "") or "").strip()
+        if candidate and _has_provider_credentials(_parse_model_provider(candidate)):
+            return candidate
+    return default_model
+
+
 def _truncate_with_notice(text: Any, limit: int) -> str:
     raw = str(text or "")
     if len(raw) <= limit:
@@ -59,8 +104,17 @@ def build_trace_summary(llm_trace: dict) -> str:
                 args_str = repr(args)
                 if len(args_str) > 80:
                     args_str = args_str[:77] + "..."
+            facts = []
+            status = str(tc.get("status") or "").strip()
+            if status and status != "ok":
+                facts.append(f"status={status}")
+            if tc.get("exit_code") not in (None, 0):
+                facts.append(f"exit_code={tc.get('exit_code')}")
+            if tc.get("signal"):
+                facts.append(f"signal={tc.get('signal')}")
+            fact_suffix = f" [{', '.join(facts)}]" if facts else ""
             suffix = " → ERROR" if tc.get("is_error") else ""
-            return f"{idx}. {name}({args_str}){suffix}"
+            return f"{idx}. {name}({args_str}){fact_suffix}{suffix}"
 
         if n > 30:
             shown = (
@@ -73,7 +127,7 @@ def build_trace_summary(llm_trace: dict) -> str:
         lines.extend(shown)
 
     if notes:
-        lines.append("\n## Agent notes")
+        lines.append("\n## Agent notes (supplementary, not source of truth)")
         lines.extend(f"- {note}" for note in notes)
 
     summary = "\n".join(lines)
@@ -82,12 +136,38 @@ def build_trace_summary(llm_trace: dict) -> str:
     return summary
 
 
+def _run_post_task_processing_async(
+    env: Any,
+    task: Dict[str, Any],
+    usage: Dict[str, Any],
+    llm_trace: Dict[str, Any],
+    drive_logs: pathlib.Path,
+) -> None:
+    """Best-effort async post-task memory work that must not block reply delivery."""
+    task_snapshot = json.loads(json.dumps(task, ensure_ascii=False, default=str))
+    usage_snapshot = json.loads(json.dumps(usage, ensure_ascii=False, default=str))
+    trace_snapshot = json.loads(json.dumps(llm_trace, ensure_ascii=False, default=str))
+
+    def _run() -> None:
+        try:
+            from ouroboros.llm import LLMClient
+
+            llm_client = LLMClient()
+            _run_task_summary(env, llm_client, task_snapshot, usage_snapshot, trace_snapshot, drive_logs)
+            _run_reflection(env, llm_client, task_snapshot, usage_snapshot, trace_snapshot)
+        except Exception:
+            log.warning("Async post-task processing failed", exc_info=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def emit_task_results(
     env: Any, memory: Any, llm: Any,
     pending_events: List[Dict[str, Any]],
     task: Dict[str, Any], text: str,
     usage: Dict[str, Any], llm_trace: Dict[str, Any],
     start_time: float, drive_logs: pathlib.Path,
+    ctx: Any = None,
 ) -> None:
     """Emit all end-of-task events to supervisor and run post-task processing."""
     pending_events.append({
@@ -148,10 +228,21 @@ def emit_task_results(
     })
 
     _store_task_result(env, task, text, usage, llm_trace)
-    _run_task_summary(env, llm, task, usage, llm_trace, drive_logs)
+    restart_reason = str(getattr(ctx, "pending_restart_reason", "") or "").strip()
+    if restart_reason:
+        pending_events.append({
+            "type": "restart_request",
+            "reason": restart_reason,
+            "ts": utc_now_iso(),
+        })
+        try:
+            ctx.pending_restart_reason = None
+        except Exception:
+            pass
+
     _run_chat_consolidation(env, memory, llm, task, drive_logs)
     _run_scratchpad_consolidation(env, memory, llm)
-    _run_reflection(env, llm, task, usage, llm_trace)
+    _run_post_task_processing_async(env, task, usage, llm_trace, drive_logs)
 
 
 def _store_task_result(env: Any, task: Dict[str, Any], text: str,
@@ -180,6 +271,8 @@ _TASK_SUMMARY_PROMPT = """\
 Summarize this completed task for Ouroboros's episodic memory.
 Be specific about: what was tried, what worked, what failed, key decisions made.
 Include file names, tool names, error messages when relevant.
+Treat tool statuses and exit/signal facts as authoritative. Agent notes are supplementary only.
+Never claim a tool succeeded when the trace shows non-zero exit, timeout, install_error, or any error status.
 If the task was trivial (simple reply, no tool calls), keep it to 1-2 sentences.
 End with: "Details: progress.jsonl + tools.jsonl for task_id={task_id}"
 
@@ -200,6 +293,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs):
             CONSOLIDATION_MODEL,
             CONSOLIDATION_REASONING_EFFORT,
         )
+        summary_model = _resolve_task_summary_model(CONSOLIDATION_MODEL)
         task_id = task.get("id", "unknown")
         goal = _truncate_with_notice(task.get("text", ""), 500)
         rounds = int(usage.get("rounds") or 0)
@@ -212,7 +306,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs):
         )
         try:
             msg, _usage = llm.chat(messages=[{"role": "user", "content": prompt}],
-                                   model=CONSOLIDATION_MODEL,
+                                   model=summary_model,
                                    reasoning_effort=CONSOLIDATION_REASONING_EFFORT,
                                    max_tokens=2048)
             summary_text = (msg.get("content") or "").strip()

@@ -78,6 +78,9 @@ class TestEstimateCost:
             assert all(isinstance(p, (int, float)) for p in prices), f"{model} has non-numeric prices"
             assert all(p >= 0 for p in prices), f"{model} has negative prices"
 
+    def test_gpt_54_mini_static_pricing_is_registered(self):
+        assert MODEL_PRICING_STATIC["openai/gpt-5.4-mini"] == (0.75, 0.075, 4.50)
+
 
 # --- infer_api_key_type ---
 
@@ -96,6 +99,15 @@ class TestInferApiKeyType:
     def test_bare_claude_is_anthropic(self):
         assert infer_api_key_type("claude-sonnet-4.6") == "anthropic"
 
+    def test_provider_override_uses_official_openai(self):
+        assert infer_api_key_type("openai/gpt-5.2", provider="openai") == "openai"
+
+    def test_openai_double_colon_is_official_openai(self):
+        assert infer_api_key_type("openai::gpt-5.2") == "openai"
+
+    def test_anthropic_double_colon_is_direct_anthropic(self):
+        assert infer_api_key_type("anthropic::claude-sonnet-4-6") == "anthropic"
+
     def test_unknown_defaults_openrouter(self):
         assert infer_api_key_type("some-random-model") == "openrouter"
 
@@ -111,6 +123,14 @@ class TestInferModelCategory:
     def test_matches_light_model(self):
         with patch.dict(os.environ, {"OUROBOROS_MODEL_LIGHT": "google/gemini-3-flash-preview"}):
             assert infer_model_category("google/gemini-3-flash-preview") == "light"
+
+    def test_matches_openai_double_colon_against_resolved_usage_name(self):
+        with patch.dict(os.environ, {"OUROBOROS_MODEL": "openai::gpt-5.2"}):
+            assert infer_model_category("openai/gpt-5.2") == "main"
+
+    def test_matches_anthropic_double_colon_against_normalized_usage_name(self):
+        with patch.dict(os.environ, {"OUROBOROS_MODEL": "anthropic::claude-sonnet-4.6"}):
+            assert infer_model_category("anthropic/claude-sonnet-4-6") == "main"
 
     def test_no_match_returns_other(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -140,6 +160,20 @@ class TestEmitLlmUsageEvent:
         assert event["cost"] == 0.0105
         assert event["category"] == "task"
         assert "ts" in event
+
+    def test_provider_override_sets_api_key_type(self):
+        q = queue.Queue()
+        emit_llm_usage_event(
+            event_queue=q,
+            task_id="test-123",
+            model="openai/gpt-5.2",
+            usage={"prompt_tokens": 100, "completion_tokens": 50},
+            cost=0.01,
+            provider="openai",
+        )
+        event = q.get_nowait()
+        assert event["provider"] == "openai"
+        assert event["api_key_type"] == "openai"
 
     def test_none_queue_no_error(self):
         # Should silently do nothing

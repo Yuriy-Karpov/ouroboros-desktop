@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import logging
 
+from ouroboros.provider_models import normalize_model_identity
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -21,14 +22,17 @@ log = logging.getLogger(__name__)
 # Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
 MODEL_PRICING_STATIC = {
     "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
+    "anthropic/claude-opus-4-6": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),
+    "anthropic/claude-sonnet-4-6": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.5": (3.0, 0.30, 15.0),
     "openai/o3": (2.0, 0.50, 8.0),
     "openai/o3-pro": (20.0, 1.0, 80.0),
     "openai/o4-mini": (1.10, 0.275, 4.40),
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
+    "openai/gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
     "openai/gpt-5.3-codex": (1.75, 0.175, 14.0),
@@ -111,11 +115,33 @@ def _normalize_model_name(model: str) -> str:
     return text
 
 
-def infer_api_key_type(model: str) -> str:
+def _normalize_model_identity(model: str) -> str:
+    return normalize_model_identity(_normalize_model_name(model))
+
+
+def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
     """Infer which API key is used based on model name."""
-    normalized = _normalize_model_name(model)
+    provider_name = str(provider or "").strip().lower()
+    if provider_name in {"local", "openrouter", "openai", "anthropic", "openai-compatible", "cloudru"}:
+        return provider_name
+    raw_model = _normalize_model_name(model)
+    if raw_model.startswith("openai::"):
+        return "openai"
+    if raw_model.startswith("anthropic::"):
+        return "anthropic"
+    if raw_model.startswith("openai-compatible::"):
+        return "openai-compatible"
+    if raw_model.startswith("cloudru::"):
+        return "cloudru"
+    normalized = _normalize_model_identity(raw_model)
     if str(model or "").endswith(" (local)"):
         return "local"
+    if normalized.startswith("openai/"):
+        return "openrouter"
+    if normalized.startswith("openai-compatible/"):
+        return "openai-compatible"
+    if normalized.startswith("cloudru/"):
+        return "cloudru"
     if normalized.startswith(("anthropic/", "google/", "openai/", "x-ai/", "qwen/")):
         return "openrouter"
     if "claude" in normalized.lower():
@@ -125,7 +151,7 @@ def infer_api_key_type(model: str) -> str:
 
 def infer_model_category(model: str) -> str:
     """Infer model category by comparing against configured model env vars."""
-    normalized = _normalize_model_name(model)
+    normalized = _normalize_model_identity(model)
     configured = {
         "main": os.environ.get("OUROBOROS_MODEL", ""),
         "code": os.environ.get("OUROBOROS_MODEL_CODE", ""),
@@ -133,7 +159,7 @@ def infer_model_category(model: str) -> str:
         "fallback": os.environ.get("OUROBOROS_MODEL_FALLBACK", ""),
     }
     for cat, val in configured.items():
-        if val and normalized == val:
+        if val and normalized == _normalize_model_identity(val):
             return cat
     return "other"
 
@@ -168,7 +194,7 @@ def emit_llm_usage_event(
             "ts": utc_now_iso(),
             "task_id": task_id,
             "model": model,
-            "api_key_type": infer_api_key_type(model),
+            "api_key_type": infer_api_key_type(model, resolved_provider),
             "model_category": infer_model_category(model),
             "provider": resolved_provider,
             "source": source,

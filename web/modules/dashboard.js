@@ -46,6 +46,10 @@ export function initDashboard({ ws, state }) {
                 <button class="btn btn-primary" id="btn-restart">Restart Agent</button>
                 <button class="btn btn-danger" id="btn-panic">Panic Stop</button>
             </div>
+            <div class="dashboard-runtime-status">
+                <div id="dash-evolution-detail" class="dashboard-runtime-note">Evolution state will appear here.</div>
+                <div id="dash-bg-detail" class="dashboard-runtime-note">Background consciousness state will appear here.</div>
+            </div>
         </div>
     `;
     document.getElementById('content').appendChild(page);
@@ -67,9 +71,10 @@ export function initDashboard({ ws, state }) {
     });
 
     // Poll dashboard state
-    async function updateDashboard() {
+    async function updateDashboard(force = false) {
+        if (!force && state.activePage !== 'dashboard') return;
         try {
-            const resp = await fetch('/api/state');
+            const resp = await fetch('/api/state', { cache: 'no-store' });
             const data = await resp.json();
             const uptime = data.uptime || 0;
             const h = Math.floor(uptime / 3600);
@@ -95,9 +100,18 @@ export function initDashboard({ ws, state }) {
             else document.getElementById('toggle-evo').classList.remove('on');
             if (data.bg_consciousness_enabled) document.getElementById('toggle-bg').classList.add('on');
             else document.getElementById('toggle-bg').classList.remove('on');
-        } catch {}
+
+            document.getElementById('dash-evolution-detail').textContent =
+                data?.evolution_state?.detail || 'Evolution mode is off.';
+            document.getElementById('dash-bg-detail').textContent =
+                data?.bg_consciousness_state?.detail || 'Background consciousness is off.';
+        } catch (error) {
+            const message = error?.message ? `Dashboard unavailable: ${error.message}` : 'Dashboard unavailable.';
+            document.getElementById('dash-evolution-detail').textContent = message;
+            document.getElementById('dash-bg-detail').textContent = 'Waiting for /api/state recovery.';
+        }
     }
 
-    updateDashboard();
+    updateDashboard(true);
     setInterval(updateDashboard, 3000);
 }

@@ -17,7 +17,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 log = logging.getLogger(__name__)
 
@@ -95,8 +95,22 @@ class OuroborosAgent:
 
         self._log_worker_boot_once()
 
-    def inject_message(self, text: str) -> None:
+    def inject_message(
+        self,
+        text: str,
+        image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
+    ) -> None:
         """Thread-safe: inject a user message into the active conversation."""
+        if image_data:
+            payload: Dict[str, Any] = {
+                "text": text,
+                "image_base64": image_data[0],
+                "image_mime": image_data[1],
+            }
+            if len(image_data) > 2 and image_data[2]:
+                payload["image_caption"] = image_data[2]
+            self._incoming_messages.put(payload)
+            return
         self._incoming_messages.put(text)
 
     def _emit_live_log(self, event_type: str, **fields: Any) -> None:
@@ -309,6 +323,7 @@ class OuroborosAgent:
                 self.env, self.memory, self.llm,
                 self._pending_events, task, text,
                 usage, llm_trace, start_time, drive_logs,
+                ctx=ctx,
             )
             return list(self._pending_events)
 

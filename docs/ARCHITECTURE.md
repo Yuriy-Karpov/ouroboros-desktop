@@ -1,4 +1,4 @@
-# Ouroboros v4.5.0 — Architecture & Reference
+# Ouroboros v4.7.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -20,7 +20,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
   ├── web/                     ← Web UI (SPA with ES modules in web/modules/)
   │
   ├── supervisor/              ← Background thread inside server.py
-  │   ├── message_bus.py       ← Queue-based message bus (LocalChatBridge)
+  │   ├── message_bus.py       ← Queue-based message bus + Telegram bridge (LocalChatBridge)
   │   ├── workers.py           ← Multiprocessing worker pool (fork/spawn by platform)
   │   ├── state.py             ← Persistent state (state.json) with file locking
   │   ├── queue.py             ← Task queue management (PENDING/RUNNING lists)
@@ -36,7 +36,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
       ├── loop_tool_execution.py ← Tool dispatch and tool-result handling
       ├── pricing.py           ← Model pricing, cost estimation, usage events
-      ├── llm.py               ← OpenRouter API client
+      ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru)
+      ├── model_catalog_api.py ← Optional provider model catalog endpoint
       ├── safety.py            ← Dual-layer LLM security supervisor
       ├── consciousness.py     ← Background thinking loop (with progress emission)
       ├── consolidator.py      ← Block-wise dialogue consolidation (dialogue_blocks.json)
@@ -47,13 +48,19 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── local_model_api.py   ← Local model HTTP endpoints
       ├── local_model_autostart.py ← Local model startup helper
       ├── review.py            ← Code collection, complexity metrics, full-codebase review
+      ├── review_state.py      ← Durable advisory pre-review state (advisory_review.json)
+      ├── onboarding_wizard.py ← Shared desktop/web onboarding bootstrap + validation
       ├── owner_inject.py      ← Per-task user message mailbox (compat module name)
       ├── reflection.py        ← Execution reflection and pattern capture
-      ├── server_runtime.py    ← Server startup and WebSocket liveness helpers
-      ├── tool_policy.py       ← Tool access policy and gating
+      ├── server_history_api.py ← Chat history + cost breakdown endpoints
+      ├── server_runtime.py    ← Server startup/onboarding and WebSocket liveness helpers
+      ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
+      ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
       ├── utils.py             ← Shared utilities
       ├── world_profiler.py    ← System profile generator (WORLD.md)
       ├── tools/               ← Auto-discovered tool plugins
+      │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
+      │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
       └── compat.py            ← Cross-platform process/path/locking helpers
 ```
 
@@ -66,7 +73,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
    - Starts `server.py` as a subprocess via embedded Python
    - Shows PyWebView window pointed at `http://127.0.0.1:8765`
    - Monitors subprocess; restarts on exit code 42 (restart signal)
-   - First-run wizard (PyWebView HTML page for API key entry)
+  - First-run wizard (shared desktop/web onboarding for multi-key and optional local setup)
    - **Graceful shutdown with orphan cleanup** (see Shutdown section below)
 
 2. **server.py** — self-editable inner server. Can be modified by the agent.
@@ -132,8 +139,8 @@ launcher.py main()
   ├── check_git()               → Show "install git" wizard if missing
   ├── bootstrap_repo()          → Copy workspace to ~/Ouroboros/repo/ (first run)
   │                               OR sync core files (subsequent runs)
-  ├── _run_first_run_wizard()   → Show API key wizard if no settings.json
-  │                               (PyWebView HTML page with key + budget + model fields)
+  ├── _run_first_run_wizard()   → Show shared setup wizard if no runnable config
+  │                               (access entry → models → review mode → budget → summary)
   │                               Saves to ~/Ouroboros/data/settings.json
   ├── agent_lifecycle_loop()    → Background thread: start/monitor server.py
   └── webview.start()           → Open PyWebView window at http://127.0.0.1:8765
@@ -141,9 +148,21 @@ launcher.py main()
 
 ### First-run wizard
 
-Shown when `settings.json` does not exist or has no `OPENROUTER_API_KEY`.
-Fields: OpenRouter API Key (required), Total Budget ($), Main Model.
-On save: writes `settings.json`, closes wizard, proceeds to main app.
+Shown when `settings.json` does not contain any supported remote provider key and has no
+`LOCAL_MODEL_SOURCE`.
+
+- Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, or local-model-source settings skip the wizard automatically.
+- The wizard is shared between desktop and web: one HTML/CSS/JS onboarding flow is rendered directly in pywebview for desktop and injected into a blocking web overlay for Docker/browser runs.
+- The wizard is multi-step and provider-aware: it starts with a single access step that accepts multiple remote keys plus optional local-model setup, then shows visible model defaults, a dedicated review-mode step, a dedicated budget step, and the final summary before save.
+- When an Anthropic key is present, onboarding shows an optional `Install Claude Code CLI` CTA plus `Skip for now`.
+  The copy is explicitly about the CLI, not the SDK.
+- Desktop first-run uses the same onboarding bundle and talks to Claude CLI install/status through `pywebview` bridge methods.
+  Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install`.
+- The wizard blocks progression if nothing runnable is configured.
+- When OpenRouter is absent and official OpenAI is the only configured remote runtime, untouched default model values are auto-remapped to `openai::gpt-5.4` / `openai::gpt-5.4-mini` so first-run startup does not strand the app on OpenRouter-only defaults.
+- `web_search` uses the official OpenAI Responses API only. It requires `OPENAI_API_KEY` and treats any non-empty `OPENAI_BASE_URL` as an incompatible custom runtime configuration rather than a fallback.
+- OpenAI-compatible and Cloud.ru remain explicit model-selection flows from the full Settings page because there is no single safe universal default model ID for those providers.
+- Closing the wizard without saving is non-fatal: the main app still launches and the user can finish configuration in Settings.
 
 ### Core file sync (`_sync_core_files`)
 
@@ -163,34 +182,60 @@ The web UI is a single-page app (`web/index.html` + `web/style.css` + ES modules
 `web/app.js` is the thin orchestrator (~90 lines) that imports from `web/modules/`:
 - `ws.js` — WebSocket connection manager
 - `utils.js` — shared utilities (markdown rendering, escapeHtml, matrix rain)
-- `chat.js` — chat page with message rendering
+- `chat.js` — chat page with message rendering, live task card, and compact runtime controls
 - `dashboard.js` — dashboard with controls and polling
-- `logs.js` — log viewer with category filters
+- `logs.js` — log viewer with category filters and grouped task cards
+- `log_events.js` — shared event summarization/grouping helpers used by Chat and Logs
+- `files.js` — file browser, preview, uploads, and editor
 - `evolution.js` — evolution chart (Chart.js)
 - `settings.js` — settings form with local model management
+- `settings_controls.js` — searchable model pickers + segmented effort controls
 - `costs.js` — cost breakdown tables
 - `versions.js` — version management and rollback
 - `about.js` — about page
 
-Navigation is a left sidebar with 8 pages.
+Navigation is a left sidebar with 9 pages.
 
 ### 3.1 Chat
 
-- **Status badge** (top-right): "Online" (green) / "Thinking..." (amber pulse) / "Reconnecting..." (red).
-  Driven by WebSocket connection state and typing events.
+- **Status badge** (top-right): "Online" (green) / "Thinking..." / "Working..." (amber pulse) / "Reconnecting..." (red).
+  Driven by WebSocket connection state, typing events, and live task state.
+- **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic`, duplicated from Dashboard for quick task-side access.
 - **Message input**: textarea + send button. Shift+Enter for newline, Enter to send.
+- **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea.
 - **Messages**: user bubbles (right, blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown.
+- **Multi-user visibility**: user messages are now session-aware. The current browser session stays labeled as `You`; other Web UI sessions render as `WebUI (<session>)`; Telegram-origin messages render with their Telegram sender label.
 - **Timestamps**: smart relative formatting (today: "HH:MM", yesterday: "Yesterday, HH:MM", older: "Mon DD, HH:MM"). Shown on hover.
-- **Progress messages**: background consciousness thinking shown as dimmed bubbles with 💬 prefix.
+- **Live task card**: reasoning/progress/tool chatter no longer spams the transcript as many assistant bubbles.
+  Chat listens to `log_event`/task events plus progress messages and collapses them into one expandable task card with a timeline of steps.
+- **Recoverable step failures**: step-level shell/tool failures stay as timeline notes and no longer freeze the card in a terminal `Issue` state.
+  Later progress updates can retake the headline until the task actually finishes.
 - **System summaries**: `direction="system"` entries from `chat.jsonl` are shown in the same timeline with a 📋 label instead of being hidden or treated as user text.
 - **Typing indicator**: animated "thinking dots" bubble appears when the agent is processing.
 - **Persistence**: chat history loaded from server on page load (`/api/chat/history`), survives app restarts. Fallback to sessionStorage.
+- **Duplicate-bubble prevention**: queued local user bubbles carry a `client_message_id`; echoed WebSocket/history messages with the same id are merged instead of duplicated.
 - **Empty-chat init**: if neither server history nor sessionStorage has messages, the UI shows a transient assistant bubble: `Ouroboros has awakened`. This is visual-only and is not written to chat history.
-- Messages sent via WebSocket `{type: "chat", content: text}`.
-- Responses arrive via WebSocket `{type: "chat", role: "assistant", content: text, ts: "ISO"}`. On page-load history sync, `/api/chat/history` can also return `role: "system"` entries for internal summaries.
+- **Telegram bridge**: Web UI initiated chats can be mirrored into the bound Telegram chat, Telegram text input is injected back into the same live chat timeline, and Telegram photos are bridged as image-aware user messages (including while a direct-chat turn is already running).
+- Messages sent via WebSocket `{type: "chat", content: text, sender_session_id: "uuid"}`.
+- Responses arrive via WebSocket `{type: "chat", role, content, ts, source?, sender_label?, sender_session_id?, client_message_id?}` and `{type: "photo", role, image_base64, mime, caption?, ts, source?, sender_label?}`. On page-load history sync, `/api/chat/history` can also return `role: "system"` entries for internal summaries plus metadata for multi-user reconstruction.
 - Supports slash commands: `/status`, `/evolve`, `/review`, `/bg`, `/restart`, `/panic`.
 
-### 3.2 Dashboard
+### 3.2 Files
+
+- **Browser pane**: directory tree for the configured root, breadcrumb navigation, inline filter, refresh button,
+  create-file/create-directory actions, clipboard-style copy/move/paste, and delete/download context menu.
+- **Preview pane**: text preview/editor, image preview, binary-file placeholder, and drag-drop upload target.
+- **Write safety**: unsaved text edits are guarded on folder switches, file switches, page navigation, and browser refresh.
+- **Root policy**: localhost requests fall back to the current user's home directory when no root is configured.
+  Network/Docker access requires an explicit `OUROBOROS_FILE_BROWSER_DEFAULT` directory.
+- **Network policy**: `OUROBOROS_NETWORK_PASSWORD` is optional. When configured, non-loopback browser/API access is gated.
+  When omitted, the full HTTP/WebSocket surface remains reachable by design. `/api/health` always stays public.
+- **Symlink policy**: entries are constrained lexically to the configured root, but symlink targets may resolve outside that root intentionally.
+  External symlink paths support list/read/download/content/write/mkdir/upload/copy/move/delete. Root-delete protection still applies only to the configured root itself.
+- **Transfer semantics**: copy/move of symlink entries preserves the link object; writing through a symlink-backed file edits the target content.
+- **Bounds**: directory listings are capped, previews are bounded to a text/byte limit, and uploads reject oversized payloads.
+
+### 3.3 Dashboard
 
 - **Stat cards**: Uptime, Workers (alive/total + progress bar), Budget (spent/limit + bar), Branch@SHA.
 - **Toggles**: Evolution Mode (on/off), Background Consciousness (on/off).
@@ -201,44 +246,59 @@ Navigation is a left sidebar with 8 pages.
   - **Panic Stop** → sends `/panic` command (with confirm dialog). Kills all workers immediately.
 - Dashboard polls `/api/state` every 3 seconds.
 
-### 3.3 Settings
+### 3.4 Settings
 
-- **API Keys**: OpenRouter (required), OpenAI (optional, for web search), Anthropic (optional).
-  Keys are displayed as masked values (e.g., `sk-or-v1...`).
-  Only overwritten on save if user enters a new value (not containing `...`).
+- **Tabbed layout**: `Providers`, `Models`, `Integrations`, `Advanced`.
+- **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
+- **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
+  Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
+- **Claude Code CLI CTA**: when Anthropic is configured, the Anthropic card exposes `Install Claude Code CLI` plus live install/status text.
+  This installs the `claude` binary, not the SDK.
 - **Models**: Main, Code, Light, Fallback.
-- **Reasoning Effort**: Four separate dropdowns for task/chat, evolution, review, and consciousness.
+- **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. Failures are non-fatal and surfaced as inline warnings.
+- **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models.
+- **Provider prefixes**:
+  - OpenRouter model values stay unprefixed (`anthropic/claude-opus-4.6`).
+  - OpenAI model values use `openai::...`.
+  - OpenAI-compatible model values use `openai-compatible::...`.
+  - Cloud.ru model values use `cloudru::...`.
+- **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
-  `OUROBOROS_EFFORT_CONSCIOUSNESS`. Loading falls back to legacy `OUROBOROS_INITIAL_REASONING_EFFORT`
-  for task/chat when the new key is absent.
-- **Review Models**: Comma-separated OpenRouter model IDs for pre-commit review.
+  `OUROBOROS_EFFORT_SCOPE_REVIEW`, `OUROBOROS_EFFORT_CONSCIOUSNESS`. Loading falls back to legacy
+  `OUROBOROS_INITIAL_REASONING_EFFORT` for task/chat when the new key is absent.
+- **Review Models**: Comma-separated remote model IDs for pre-commit review.
   Backed by `OUROBOROS_REVIEW_MODELS`.
+- **Scope Review Model**: Single model for the blocking scope reviewer.
+  Backed by `OUROBOROS_SCOPE_REVIEW_MODEL` (default `anthropic/claude-opus-4.6`).
+- **OpenAI-only review fallback**: if official OpenAI is the only configured remote runtime and the review list is invalid/underspecified, review falls back to the main model repeated three times.
 - **Review Enforcement**: `Advisory` or `Blocking` for pre-commit review behavior.
   Backed by `OUROBOROS_REVIEW_ENFORCEMENT`. Review always runs in both modes.
-- **Runtime**: Max Workers, Budget ($), Tool Timeout, Soft/Hard Timeout.
+- **Advanced**: local model runtime, max workers, total budget, per-task soft threshold, tool timeout, soft/hard timeout, web search model, review enforcement, legacy compatibility, and reset controls.
+- **Local Model Runtime**: source, GGUF filename, port, GPU layers, context length, chat format, start/stop/test buttons, live local-model status.
+- **Telegram**: Bot Token, primary chat id, legacy allowed chat ids. If no primary chat id is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.
 - **GitHub**: Token + Repo (for remote sync).
 - **Save Settings** button → POST `/api/settings`. Applies to env immediately.
-  Budget changes take effect immediately; model/worker changes need restart.
+  Budget and tool-timeout changes take effect immediately; provider/runtime changes may still require restart.
 - **Reset All Data** button (Danger Zone) → POST `/api/reset`.
   Deletes: state/, memory/, logs/, archive/, settings.json.
   Keeps: repo/ (agent code).
   Triggers server restart. On next launch, onboarding wizard appears.
 
-### 3.4 Logs
+### 3.5 Logs
 
 - **Filter chips**: Tools, LLM, Errors, Tasks, System, Consciousness.
   Toggle on/off to filter log entries.
 - **Clear** button: clears the in-memory log view (not files on disk).
 - Log entries arrive via WebSocket `{type: "log", data: event}`.
-- The page renders a live timeline: timestamp, category, phase badge, readable summary,
-  metadata pills, and optional body text.
-- Each row has a **Raw** toggle that expands the original JSON payload.
+- The page renders a live timeline: standalone system/error entries stay as rows, while task/LLM/tool/progress events with a shared `task_id` collapse into grouped task cards with an expandable internal timeline.
+- Chat and Logs share the same event summarization logic from `log_events.js`, so a task phase is described the same way in both places.
+- Each standalone row or grouped task card has a **Raw** toggle that expands the latest original JSON payload.
 - New live-only timeline events cover task start, context building, LLM round start/finish,
   tool start/finish/timeout, and compact task heartbeats during long waits.
 - Repeated startup/system events such as verification bursts are compacted in the UI.
 - Max 500 entries in view (oldest removed).
 
-### 3.5 Versions
+### 3.6 Versions
 
 - **Current branch + SHA** displayed at top.
 - **Recent Commits** list with SHA, date, message, and "Restore" button.
@@ -249,7 +309,7 @@ Navigation is a left sidebar with 8 pages.
   Updates `ouroboros-stable` branch to match `ouroboros`.
 - **Refresh** button → reloads commit/tag lists.
 
-### 3.6 Costs
+### 3.7 Costs
 
 - **Total Spent / Total Calls / Top Model** stat cards at top.
 - **Breakdown tables**: By Model, By API Key, By Model Category, By Task Category.
@@ -257,7 +317,7 @@ Navigation is a left sidebar with 8 pages.
 - **Refresh** button reloads data from `/api/cost-breakdown`.
 - Data auto-loads when the page becomes active (MutationObserver on class).
 
-### 3.7 Evolution
+### 3.8 Evolution
 
 - **Chart**: interactive Chart.js line graph showing code LOC, prompt sizes (BIBLE, SYSTEM),
   identity, scratchpad, and total memory growth across all git tags.
@@ -266,7 +326,7 @@ Navigation is a left sidebar with 8 pages.
 - Data fetched from `/api/evolution-data` (cached 60s server-side).
 - Chart.js bundled locally (`web/chart.umd.min.js`) — no CDN dependency.
 
-### 3.8 About
+### 3.9 About
 
 - Logo (large, centered)
 - "A self-creating AI agent" description
@@ -278,13 +338,29 @@ Navigation is a left sidebar with 8 pages.
 
 ## 4. Server API Endpoints
 
+If `OUROBOROS_NETWORK_PASSWORD` is configured, non-loopback HTTP/WebSocket access requires
+authentication. If the password is blank, non-loopback access stays open by design.
+`/api/health`, `/auth/login`, and `/auth/logout` remain reachable without an existing session.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Serves `web/index.html` |
 | GET | `/api/health` | `{status, version, runtime_version, app_version}` |
 | GET | `/api/state` | Dashboard data: uptime, workers, budget, branch, etc. |
+| GET | `/api/files/list` | Directory listing for Files tab root/path |
+| GET | `/api/files/read` | File preview payload (text/image metadata/binary placeholder) |
+| GET | `/api/files/content` | Raw file content response for image preview |
+| GET | `/api/files/download` | Attachment download for a file |
+| POST | `/api/files/write` | Create or overwrite a text file from Files editor |
+| POST | `/api/files/mkdir` | Create a directory inside current Files path |
+| POST | `/api/files/delete` | Delete a file/directory (root delete is rejected) |
+| POST | `/api/files/transfer` | Copy or move files/directories within the Files root |
+| POST | `/api/files/upload` | Multipart upload into current Files directory |
 | GET | `/api/settings` | Current settings with masked API keys |
 | POST | `/api/settings` | Update settings (partial update, only provided keys) |
+| GET | `/api/claude-code/status` | Claude Code CLI installed/busy/progress status |
+| POST | `/api/claude-code/install` | Run the shared native-first Claude Code CLI install flow |
+| GET | `/api/model-catalog` | Optional provider model catalog (OpenRouter/OpenAI/compatible/Cloud.ru) |
 | POST | `/api/command` | Send a slash command `{cmd: "/status"}` |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
 | GET | `/api/git/log` | Recent commits + tags + current branch/sha |
@@ -297,19 +373,22 @@ Navigation is a left sidebar with 8 pages.
 | GET | `/api/evolution-data` | Evolution metrics per git tag (LOC, prompt sizes, memory) |
 | GET | `/api/chat/history` | Merged chat + system summaries + progress messages (chronological, limit param) |
 | POST | `/api/local-model/test` | Local model sanity test (chat + tool calling) |
+| GET/POST | `/auth/login` | Password gate entrypoint for non-localhost browser/API access |
+| GET/POST | `/auth/logout` | Clear auth cookie/session |
 | WS | `/ws` | WebSocket: chat messages, commands, log streaming |
 | GET | `/static/*` | Static files from `web/` directory (NoCacheStaticFiles wrapper forces revalidation) |
 
 ### WebSocket protocol
 
 **Client → Server:**
-- `{type: "chat", content: "text"}` — send chat message
+- `{type: "chat", content: "text", sender_session_id: "uuid", client_message_id?: "msg-..."}` — send chat message
 - `{type: "command", cmd: "/status"}` — send slash command
 
 **Server → Client:**
-- `{type: "chat", role: "assistant", content: "text"}` — agent response
+- `{type: "chat", role, content, ts, source?, sender_label?, sender_session_id?, client_message_id?, telegram_chat_id?}` — user/assistant/system chat payloads
 - `{type: "log", data: {type, ts, ...}}` — real-time log event
 - `{type: "typing", action: "typing"}` — typing indicator (show animation)
+- `{type: "photo", image_base64, mime, caption, ts}` — assistant image/photo payload
 
 ---
 
@@ -351,21 +430,44 @@ Each iteration (0.5s sleep):
 3. `OuroborosAgent.handle_task(task)` →
    a. Build context (`context.py`): system prompt + bible + identity + scratchpad + runtime info + Memory Registry digest
    b. `run_llm_loop()`: LLM call → tool execution → repeat until final text response
-   c. Emit events: send_message, task_metrics, task_done
+   c. Emit final `send_message`, `task_metrics`, and `task_done`; any restart request is latched until after those final events are queued
+   d. Store task result synchronously; task summary and reflection run off the user-reply critical path
 4. Events flow back to supervisor via event queue
+
+### Tool capability sets (tool_capabilities.py)
+
+Single source of truth for all tool classification sets:
+- **`CORE_TOOL_NAMES`** — tools available from round 1 (no `enable_tools` needed)
+- **`META_TOOL_NAMES`** — discovery tools (`list_available_tools`, `enable_tools`)
+- **`READ_ONLY_PARALLEL_TOOLS`** — safe for concurrent execution in ThreadPoolExecutor
+- **`STATEFUL_BROWSER_TOOLS`** — require thread-sticky executor (Playwright affinity)
+- **`UNTRUNCATED_TOOL_RESULTS`** — tools whose output must never be truncated
+- **`UNTRUNCATED_REPO_READ_PATHS`** — repo files that must stay whole when read
+- **`TOOL_RESULT_LIMITS`** — per-tool output size caps (chars)
+
+`tool_policy.py` and `loop_tool_execution.py` import from this module. The legacy
+copy in `tools/registry.py` (safety-critical, overwritten on restart) is kept for
+backward compatibility but is not the runtime authority.
 
 ### Tool execution (loop.py)
 
 - Pricing/cost estimation logic extracted to `pricing.py` (model pricing table, cost estimation, API key inference, usage event emission)
-- **Per-task cost cap**: Each task has a cost ceiling (default $5, env `OUROBOROS_PER_TASK_COST_USD`). When a task exceeds this, the LLM is asked to wrap up immediately. This prevents runaway evolution tasks that previously hit $10+.
+- **Per-task soft threshold**: Each task has a soft threshold (default $20, env `OUROBOROS_PER_TASK_COST_USD`). When a task exceeds this, the LLM is asked to wrap up soon. This is a reminder, not a hard stop.
 - **`memory_tools.py`**: Provides `memory_map` (read the metacognitive registry of all data sources) and `memory_update_registry` (add/update entries). Part of the Memory Registry system (v3.16.0).
 - **`tool_discovery.py`**: Provides `list_available_tools` (discover non-core tools) and `enable_tools` (activate extra tools for the current task). Enables dynamic tool set management.
+- **`code_search`**: First-class code search tool in `tools/core.py`. Literal search by default, regex optional. Skips binaries, caches, vendor dirs. Bounded output (max 200 results, 80K chars). Available from round 1 as a core tool. Replaces the pattern of using `run_shell` with `grep`/`rg` for code search.
 - Core tools always available; extra tools discoverable via `list_available_tools`/`enable_tools`
 - Read-only tools can run in parallel (ThreadPoolExecutor)
 - Browser tools use thread-sticky executor (Playwright greenlet affinity)
-- All tools have hard timeout (default 360s, per-tool overrides for browser/search/vision)
+- All tools have hard timeout (default 600s, per-tool overrides for browser/search/vision); `OUROBOROS_TOOL_TIMEOUT_SEC` in `settings.json` is the runtime SSOT override read on each tool call.
 - Multi-layer safety: hardcoded sandbox (registry.py) → deterministic whitelist → LLM safety supervisor
 - Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping.
+- `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
+- `run_shell` rejects `cmd` as a plain string with a clear error. The `cmd` parameter must always be a JSON array of strings.
+- `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
+- `ensure_claude_cli`, `/api/claude-code/*`, and desktop onboarding all reuse the same Claude Code install/status helpers.
+- Claude Code install remains native-first (`install.sh` → Homebrew on macOS → npm fallback) and `claude_code_edit` still uses the installed CLI afterward.
+- **`seal_task_transcript`**: called after compaction and before each `call_llm_with_retry`. Marks one stable tool-result boundary with `cache_control: ephemeral` to improve Anthropic prompt cache hits. Reverts all previous seals first so compaction always sees plain strings. Provider handling: OpenRouter (Anthropic models) passes list content blocks through as-is; direct Anthropic path preserves list content for `tool_result` (Anthropic API supports content blocks there); `_strip_cache_control` in `llm.py` now flattens tool-role list content back to a plain string for OpenAI, OpenAI-compatible, Cloud.ru, and local providers.
 - Context compaction kicks in after round 8 (summarizes old tool results)
 
 ### Git tools (tools/git.py + tools/review.py + supervisor/git_ops.py)
@@ -477,6 +579,64 @@ the constitutional guard is that the file itself must remain non-deletable.
 - `build_health_invariants()` is split into focused helpers and now also surfaces recent provider/routing errors plus local context overflows.
 - Local-model path no longer silently slices the live system prompt. It compacts non-core sections explicitly and raises an overflow error if core context still cannot fit.
 
+### Review stack (advisory → triad → scope → commit)
+
+The commit pipeline runs three review stages before creating a git commit:
+
+1. **Advisory pre-review** (`tools/claude_advisory_review.py` + `review_state.py`)
+2. **Triad diff review** (`tools/review.py`)
+3. **Blocking scope review** (`tools/scope_review.py`)
+
+Shared helpers live in `tools/review_helpers.py`: checklist section loader,
+touched-file pack builder, broader repo pack builder, goal/scope resolution.
+
+#### Advisory pre-review gate
+
+- **`advisory_pre_review`** tool: runs a read-only Claude Code CLI review of the current
+  worktree BEFORE `repo_commit`. Permitted tools: `Read`, `Grep`, `Glob` only (no Edit/Bash).
+  Model pinned to `opus`. Prompt includes only the "Repo Commit Checklist" section from
+  CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, touched-file pack,
+  goal/scope sections, git status, and worktree diff.
+- **`review_status`** tool: read-only diagnostic showing the last 5 advisory runs.
+- **`review_state.py`**: durable state. State file: `data/state/advisory_review.json`.
+  Stores last 10 runs. Each run has: `snapshot_hash`, `commit_message`, `status`
+  (fresh/stale/bypassed), `items`, `raw_result` (full, no truncation), audit fields.
+- **Snapshot hash**: deterministic SHA-256 of changed file content digests only.
+  Commit message is NOT part of the hash (decoupled for less brittle freshness).
+  Path-aware: `paths` parameter scopes the hash to specific files.
+- **Stale lifecycle**: when a new fresh run is added, all previous runs with different
+  hashes are automatically marked stale. `mark_all_stale_except()` makes this real.
+- **Goal/scope params**: `advisory_pre_review` accepts optional `goal`, `scope`, `paths`
+  parameters for intent-aware review.
+- **Gate integration**: both `_repo_commit_push` and `_repo_write_commit` check freshness.
+- **Bypass**: `skip_advisory_pre_review=True` — durably audited in `events.jsonl`.
+- **Auto-bypass on missing key**: records a `bypassed` run when `ANTHROPIC_API_KEY` absent.
+- **No-truncation for results**: advisory run results stored in full (no `[:4000]` clipping).
+  Diff is capped at 80K chars with explicit omission note (not silent).
+
+#### Triad diff review (enriched)
+
+- Three models review the staged diff against "Repo Commit Checklist" from CHECKLISTS.md.
+- **Full touched-file context**: reviewers see the complete current content of all changed
+  files (via `build_touched_file_pack`), not just the patch hunks. Omission notes when
+  files are too large or unreadable.
+- **Goal section**: `build_goal_section` provides intended transformation context with
+  precedence: goal > scope > commit_message > fallback. No raw task/chat text.
+- Enforcement configurable: `blocking` or `advisory`.
+
+#### Blocking scope review
+
+- **Module**: `tools/scope_review.py`. Single-model (configurable via `OUROBOROS_SCOPE_REVIEW_MODEL`, default `anthropic/claude-opus-4.6`). Reasoning effort via `OUROBOROS_EFFORT_SCOPE_REVIEW` (default `high`).
+- **Fail-closed**: timeout, parse error, API failure, or incomplete context all block.
+- **Role**: completeness, forgotten touchpoints, cross-surface consistency, incomplete
+  migrations, intent mismatch. NOT a duplicate of line-by-line diff review.
+- **Prompt includes**: "Intent / Scope Review Checklist" from CHECKLISTS.md, touched-file
+  pack, broader repo pack (all tracked files minus touched), goal/scope sections,
+  DEVELOPMENT.md, staged diff, review history.
+- **Broader repo pack**: best-effort, up to 500K chars. Excludes touched files.
+- Runs AFTER triad review, BEFORE `git commit`.
+- Respects review enforcement setting (blocking/advisory).
+
 ### Deep review (review.py)
 
 - As of v3.16.1, the review task includes an explicit Constitution (BIBLE.md) compliance mandate as the highest-priority review criterion.
@@ -495,7 +655,7 @@ Single source of truth for:
 - **Paths**: HOME, APP_ROOT, REPO_DIR, DATA_DIR, SETTINGS_PATH, PID_FILE, PORT_FILE
 - **Constants**: RESTART_EXIT_CODE (42), AGENT_SERVER_PORT (8765)
 - **Settings defaults**: all model names, budget, timeouts, worker count
-- **Functions**: `read_version()`, `load_settings()`, `save_settings()`,
+- **Functions**: `load_settings()`, `save_settings()`,
   `apply_settings_to_env()`, `acquire_pid_lock()`, `release_pid_lock()`
 
 Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent access.
@@ -504,9 +664,18 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| OPENROUTER_API_KEY | "" | Required. Main LLM API key |
-| OPENAI_API_KEY | "" | Optional. For web_search tool |
+| OPENROUTER_API_KEY | "" | Optional. Default multi-model router key |
+| OPENAI_API_KEY | "" | Optional. Official OpenAI provider key (runtime + web search) |
+| OPENAI_BASE_URL | "" | Optional custom/legacy OpenAI-compatible runtime base URL. Keep empty for official OpenAI `web_search`. |
+| OPENAI_COMPATIBLE_API_KEY | "" | Optional. Dedicated OpenAI-compatible provider key |
+| OPENAI_COMPATIBLE_BASE_URL | "" | Optional. Dedicated OpenAI-compatible provider base URL |
+| CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Optional. Cloud.ru Foundation Models provider key |
+| CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru provider base URL |
 | ANTHROPIC_API_KEY | "" | Optional. For Claude Code CLI |
+| TELEGRAM_BOT_TOKEN | "" | Optional. Enables Telegram bridge polling/sending |
+| TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
+| TELEGRAM_ALLOWED_CHAT_IDS | "" | Optional legacy fallback list of Telegram chat ids |
+| OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
 | OUROBOROS_MODEL | anthropic/claude-opus-4.6 | Main reasoning model |
 | OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
 | OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |
@@ -514,12 +683,16 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | CLAUDE_CODE_MODEL | opus | Anthropic model for Claude Code CLI (sonnet, opus, or full name) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
-| OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | OpenAI model for web_search tool |
+| OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
+| OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
+| OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6 | Comma-separated OpenRouter model IDs for pre-commit review (min 2 for quorum) |
-| OUROBOROS_REVIEW_ENFORCEMENT | blocking | Pre-commit review enforcement: `advisory` or `blocking` |
+| OUROBOROS_REVIEW_ENFORCEMENT | advisory | Pre-commit review enforcement: `advisory` or `blocking` |
+| OUROBOROS_SCOPE_REVIEW_MODEL | anthropic/claude-opus-4.6 | Single model for the blocking scope reviewer |
 | OUROBOROS_EFFORT_TASK | medium | Reasoning effort for task/chat: none, low, medium, high |
 | OUROBOROS_EFFORT_EVOLUTION | high | Reasoning effort for evolution tasks |
 | OUROBOROS_EFFORT_REVIEW | medium | Reasoning effort for review tasks |
+| OUROBOROS_EFFORT_SCOPE_REVIEW | high | Reasoning effort for blocking scope review |
 | OUROBOROS_EFFORT_CONSCIOUSNESS | low | Reasoning effort for background consciousness |
 | OUROBOROS_SOFT_TIMEOUT_SEC | 600 | Soft timeout warning (10 min) |
 | OUROBOROS_HARD_TIMEOUT_SEC | 1800 | Hard timeout kill (30 min) |
@@ -539,6 +712,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | LOCAL_MODEL_CHAT_FORMAT | "" | Chat format for local model (`""` = auto-detect) |
 | GITHUB_TOKEN | "" | Optional. GitHub PAT for remote sync |
 | GITHUB_REPO | "" | Optional. GitHub repo (owner/name) for sync |
+| OUROBOROS_FILE_BROWSER_DEFAULT | "" | Explicit Files tab root. Required for Docker/non-localhost Files access |
 
 ---
 
@@ -614,7 +788,7 @@ On next manual launch:
 
 ### 9.3 Subprocess Process Group Management
 
-All subprocesses spawned by agent tools (`run_shell`, `claude_code_edit`)
+All subprocesses spawned by agent tools (`run_shell`, `ensure_claude_cli`, `claude_code_edit`)
 use `start_new_session=True` (via `_tracked_subprocess_run()` in
 `ouroboros/tools/shell.py`). This creates a separate process group for each
 subprocess and all its children.
@@ -625,6 +799,8 @@ subprocess trees (e.g., Claude CLI spawning node processes).
 
 Active subprocesses are tracked in a thread-safe global set and cleaned up
 automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
+`run_shell` surfaces timeout-vs-signal distinctions in its result text so
+`exit_code=-9` no longer looks like a silent success in summaries/reflections.
 
 ---
 
