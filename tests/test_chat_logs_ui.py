@@ -428,3 +428,60 @@ def test_evolution_runtime_card_uses_crimson_border():
     assert "201, 53, 69" in rule_body, "evo-runtime-card should use crimson accent border"
     # Must NOT use the old neutral white border
     assert "255, 255, 255, 0.08" not in rule_body, "evo-runtime-card should not use neutral white border"
+
+
+def test_live_card_timeline_no_hardcoded_item_cap():
+    """Live card timeline must not drop items — no 20-item shift() cap."""
+    source = _read("web/modules/chat.js")
+
+    # The old hard cap must be gone
+    assert "record.items.length > 20" not in source, "20-item cap must be removed from record.items"
+    assert "bufferedLiveUpdates.length > 20" not in source, "20-item cap must be removed from bufferedLiveUpdates"
+
+    # Incremental rendering helpers must be present
+    assert "function buildTimelineItemHtml(item, record)" in source
+    assert "function appendTimelineItem(item, record)" in source
+    assert "function patchLastTimelineItem(item, record)" in source
+
+    # timelineUpdate flag drives incremental vs full-rebuild path
+    assert "timelineUpdate = 'append'" in source
+    assert "timelineUpdate = 'patch-last'" in source
+    assert "appendTimelineItem(lastItem, record)" in source
+    assert "patchLastTimelineItem(lastItem, record)" in source
+
+    # TIMELINE_MAX_HEIGHT constant must be defined
+    assert "const TIMELINE_MAX_HEIGHT = 420;" in source
+    # syncLiveCardLayout must clamp to it
+    assert "Math.min(" in source and "TIMELINE_MAX_HEIGHT" in source
+
+    # Memory release must only free completed cards (guards rec.finished)
+    assert "rec.root?.remove()" in source
+    assert "rec && rec.finished" in source
+    # Retired set prevents syncHistory from recreating cleaned tasks
+    assert "const retiredTaskIds = new Set();" in source
+    assert "retiredTaskIds.add(taskState.taskId);" in source
+    assert "if (retiredTaskIds.has(taskId)) continue;" in source
+    # Reusable ids (bg-consciousness, active) reset on new cycle, not retired
+    assert "const REUSABLE_TASK_IDS = new Set(" in source
+    assert "REUSABLE_TASK_IDS.has(resolvedTaskId)" in source
+    assert "taskState.completed = false;" in source
+
+
+def test_live_card_timeline_css_scrollable():
+    """Expanded chat live timeline must be scrollable with a max-height."""
+    import re
+    css = _read("web/style.css")
+
+    # Find the expanded timeline rule
+    rule_match = re.search(
+        r'\.chat-live-card\[data-expanded="1"\]\s*\.chat-live-timeline\s*\{(.+?)\}',
+        css,
+        re.DOTALL,
+    )
+    assert rule_match, ".chat-live-card[data-expanded='1'] .chat-live-timeline rule not found"
+    rule_body = rule_match.group(1)
+
+    assert "max-height" in rule_body, "timeline must have max-height when expanded"
+    assert "420px" in rule_body, "timeline max-height must be 420px"
+    assert "overflow-y" in rule_body, "timeline must have overflow-y for scrolling"
+    assert "auto" in rule_body, "overflow-y must be auto"

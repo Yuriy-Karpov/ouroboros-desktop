@@ -1107,6 +1107,8 @@ body {
 .chat-live-card[data-expanded="1"] .chat-live-timeline {
     display: flex;
     border-top: 1px solid rgba(255,255,255,0.05);
+    max-height: 420px;
+    overflow-y: auto;
 }
 
 .chat-live-line {

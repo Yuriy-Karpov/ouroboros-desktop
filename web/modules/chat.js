@@ -94,6 +94,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     let welcomeShown = false;
     const liveCardRecords = new Map();
     const taskUiStates = new Map();
+    // Task ids that have been fully cleaned up (DOM removed, state freed).
+    // Checked in syncHistory to prevent retired tasks from being recreated.
+    const retiredTaskIds = new Set();
     let activeLiveGroupId = '';
     let historySyncTimer = null;
     let pendingReconnectBannerText = readPendingReconnectBanner();
@@ -291,6 +294,24 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (taskState.cleanupTimer) clearTimeout(taskState.cleanupTimer);
         taskState.cleanupTimer = setTimeout(() => {
             taskUiStates.delete(taskState.taskId);
+            // After the cleanup delay, history sync has already materialized
+            // the durable transcript.  Remove the live card DOM node (if it
+            // is still a finished card in the chat, it has been superseded by
+            // the regular assistant/summary bubbles added by syncHistory) and
+            // free the backing JS arrays to prevent unbounded memory growth.
+            const rec = liveCardRecords.get(taskState.taskId);
+            if (rec && rec.finished) {
+                rec.root?.remove();
+                rec.items = [];
+                rec.expandedLineKeys.clear();
+                liveCardRecords.delete(taskState.taskId);
+            }
+            // Mark as retired so syncHistory() never recreates the live card.
+            // Exempt reusable logical ids (see REUSABLE_TASK_IDS) because they
+            // can represent multiple independent cycles.
+            if (!REUSABLE_TASK_IDS.has(taskState.taskId) && taskState.taskId !== '') {
+                retiredTaskIds.add(taskState.taskId);
+            }
         }, delayMs);
     }
 
@@ -301,9 +322,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             ts,
             dedupeKey: dedupeKey || summary.dedupeKey || '',
         });
-        if (taskState.bufferedLiveUpdates.length > 20) {
-            taskState.bufferedLiveUpdates.shift();
-        }
+
     }
 
     function revealBufferedCardIfNeeded(taskState) {
@@ -367,13 +386,34 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (phase) taskState.completedPhase = phase;
     }
 
+    // Task ids that represent reusable logical slots (multiple independent cycles).
+    const REUSABLE_TASK_IDS = new Set(['bg-consciousness', 'active']);
+
     function queueTaskLiveUpdate(summary, taskId, ts, dedupeKey = '') {
         const resolvedTaskId = taskId || activeLiveGroupId || '';
         if (!resolvedTaskId) return;
         const taskState = getTaskUiState(resolvedTaskId, true);
         if (!taskState) return;
         if (taskState.completed && !isTerminalTaskPhase(summary.phase || '')) {
-            return;
+            // For reusable logical ids, a new non-terminal event means a new cycle
+            // has started.  Reset UI state rather than dropping the event silently.
+            if (REUSABLE_TASK_IDS.has(resolvedTaskId)) {
+                if (taskState.cleanupTimer) clearTimeout(taskState.cleanupTimer);
+                taskState.completed = false;
+                taskState.completedPhase = '';
+                taskState.cardVisible = false;
+                taskState.bufferedLiveUpdates = [];
+                taskState.toolCalls = 0;
+                taskState.forceCard = false;
+                const oldRec = liveCardRecords.get(resolvedTaskId);
+                if (oldRec) {
+                    oldRec.root?.remove();
+                    liveCardRecords.delete(resolvedTaskId);
+                }
+                retiredTaskIds.delete(resolvedTaskId);
+            } else {
+                return;
+            }
         }
         if (summary.phase === 'error' || summary.phase === 'timeout') {
             taskState.forceCard = true;
@@ -514,52 +554,81 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         record.toggleEl.textContent = record.root.dataset.expanded === '1' ? 'Hide details' : 'Show details';
     }
 
+    const TIMELINE_MAX_HEIGHT = 420;
+
     function syncLiveCardLayout(record) {
         if (!record?.root || !record.summaryButtonEl) return;
         const summaryHeight = Math.ceil(record.summaryButtonEl.getBoundingClientRect().height || 0);
         const expanded = record.root.dataset.expanded === '1';
         const timelineHeight = expanded
-            ? Math.ceil(record.timelineEl?.scrollHeight || 0)
+            ? Math.min(Math.ceil(record.timelineEl?.scrollHeight || 0), TIMELINE_MAX_HEIGHT)
             : 0;
         record.root.style.minHeight = `${Math.max(summaryHeight + timelineHeight, 0)}px`;
     }
 
-    function renderLiveCardTimeline(record) {
-        record.timelineEl.innerHTML = record.items.map((item) => {
-            const expandable = isLiveLineExpandable(item);
-            const expanded = expandable && record.expandedLineKeys.has(item.lineKey);
-            const displayHeadline = expanded && item.fullHeadline ? item.fullHeadline : item.headline;
-            const displayBody = expanded && item.fullBody ? item.fullBody : item.body;
-            const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
-            const headContent = `
-                <span class="chat-live-line-title">${isProgressLine ? renderMarkdown(displayHeadline) : escapeHtml(displayHeadline)}</span>
-                <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `${item.count}x` : ''}</span>
-                ${item.ts ? `<span class="chat-live-line-time">${escapeHtml(item.ts)}</span>` : ''}
-            `;
-            const headHtml = expandable
-                ? `
-                    <button
-                        type="button"
-                        class="chat-live-line-toggle"
-                        data-live-line-toggle="${escapeHtml(item.lineKey)}"
-                        aria-expanded="${expanded ? 'true' : 'false'}"
-                    >
-                        <span class="chat-live-line-head">${headContent}</span>
-                        <span class="chat-live-line-expand-label">${expanded ? 'Collapse' : 'Expand'}</span>
-                    </button>
-                `
-                : `<div class="chat-live-line-head">${headContent}</div>`;
-            return `
-                <div
-                    class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}"
-                    data-live-line-key="${escapeHtml(item.lineKey || '')}"
-                    data-expanded="${expanded ? '1' : '0'}"
+    function buildTimelineItemHtml(item, record) {
+        const expandable = isLiveLineExpandable(item);
+        const expanded = expandable && record.expandedLineKeys.has(item.lineKey);
+        const displayHeadline = expanded && item.fullHeadline ? item.fullHeadline : item.headline;
+        const displayBody = expanded && item.fullBody ? item.fullBody : item.body;
+        const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
+        const headContent = `
+            <span class="chat-live-line-title">${isProgressLine ? renderMarkdown(displayHeadline) : escapeHtml(displayHeadline)}</span>
+            <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `${item.count}x` : ''}</span>
+            ${item.ts ? `<span class="chat-live-line-time">${escapeHtml(item.ts)}</span>` : ''}
+        `;
+        const headHtml = expandable
+            ? `
+                <button
+                    type="button"
+                    class="chat-live-line-toggle"
+                    data-live-line-toggle="${escapeHtml(item.lineKey)}"
+                    aria-expanded="${expanded ? 'true' : 'false'}"
                 >
-                    ${headHtml}
-                    ${displayBody ? `<div class="chat-live-line-body">${renderMarkdown(displayBody)}</div>` : ''}
-                </div>
-            `;
-        }).join('');
+                    <span class="chat-live-line-head">${headContent}</span>
+                    <span class="chat-live-line-expand-label">${expanded ? 'Collapse' : 'Expand'}</span>
+                </button>
+            `
+            : `<div class="chat-live-line-head">${headContent}</div>`;
+        return `
+            <div
+                class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}"
+                data-live-line-key="${escapeHtml(item.lineKey || '')}"
+                data-expanded="${expanded ? '1' : '0'}"
+            >
+                ${headHtml}
+                ${displayBody ? `<div class="chat-live-line-body">${renderMarkdown(displayBody)}</div>` : ''}
+            </div>
+        `;
+    }
+
+    // Full rebuild — used for expand/collapse toggles and initial render.
+    function renderLiveCardTimeline(record) {
+        record.timelineEl.innerHTML = record.items.map((item) => buildTimelineItemHtml(item, record)).join('');
+    }
+
+    // Incremental: append a new item without touching existing DOM nodes.
+    function appendTimelineItem(item, record) {
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = buildTimelineItemHtml(item, record).trim();
+        const node = wrapper.firstElementChild;
+        if (node) {
+            record.timelineEl.appendChild(node);
+            // Auto-scroll to latest item when expanded.
+            if (record.root.dataset.expanded === '1') {
+                record.timelineEl.scrollTop = record.timelineEl.scrollHeight;
+            }
+        }
+    }
+
+    // Patch the last DOM node when an existing item is updated (dedup / count bump).
+    function patchLastTimelineItem(item, record) {
+        const lastEl = record.timelineEl.lastElementChild;
+        if (!lastEl) return renderLiveCardTimeline(record);
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = buildTimelineItemHtml(item, record).trim();
+        const newNode = wrapper.firstElementChild;
+        if (newNode) record.timelineEl.replaceChild(newNode, lastEl);
     }
 
     function scheduleHistorySync() {
@@ -607,6 +676,8 @@ export function initChat({ ws, state, updateUnreadBadge }) {
 
         const syntheticKey = summary.dedupeKey || dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
         const shouldRenderLine = summary.visible !== false && Boolean(headline || summary.body);
+        // Track how the timeline should be updated: 'none' | 'patch-last' | 'append'
+        let timelineUpdate = 'none';
         if (shouldRenderLine) {
             const last = record.items[record.items.length - 1];
             if (last && last.dedupeKey === syntheticKey) {
@@ -614,6 +685,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 last.ts = ts || last.ts;
                 last.fullHeadline = summary.fullHeadline || last.fullHeadline || last.headline;
                 last.fullBody = summary.fullBody || last.fullBody || last.body;
+                timelineUpdate = 'patch-last';
             } else {
                 const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
                 record.items.push({
@@ -627,10 +699,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     dedupeKey: syntheticKey,
                     lineKey,
                 });
-                if (record.items.length > 20) {
-                    const removed = record.items.shift();
-                    if (removed?.lineKey) record.expandedLineKeys.delete(removed.lineKey);
-                }
+                timelineUpdate = 'append';
             }
         }
         record.countEl.hidden = record.items.length < 2;
@@ -639,7 +708,14 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             nextGroupId === 'bg-consciousness' ? 'Background thinking' : '',
             ts ? `Latest ${ts}` : '',
         ].filter(Boolean).map((item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`).join('');
-        renderLiveCardTimeline(record);
+        // Incremental DOM update: append new items or patch the last one.
+        // Full rebuild is reserved for expand/collapse toggles.
+        const lastItem = record.items[record.items.length - 1];
+        if (timelineUpdate === 'append' && lastItem) {
+            appendTimelineItem(lastItem, record);
+        } else if (timelineUpdate === 'patch-last' && lastItem) {
+            patchLastTimelineItem(lastItem, record);
+        }
         insertMessageNode(record.root);
         syncLiveCardLayout(record);
         hideTypingIndicatorOnly();
@@ -859,6 +935,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     if (!includeUser && msg.role === 'user') continue;
                     if (msg.is_progress) {
                         if (!taskId) continue;
+                        if (retiredTaskIds.has(taskId)) continue;
                         const taskState = getTaskUiState(taskId, true);
                         if (taskState.completed) continue;
                         updateLiveCardFromProgressMessage(msg);
@@ -866,6 +943,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                     }
                     if (msg.system_type === 'task_summary') {
                         if (!taskId) continue;
+                        if (retiredTaskIds.has(taskId)) continue;
                         const taskState = getTaskUiState(taskId, true);
                         if (taskState.completed) continue;
                         // Force the card visible for historical tasks only when the task
