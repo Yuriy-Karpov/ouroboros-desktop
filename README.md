@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.11.8](https://img.shields.io/badge/version-4.11.8-green.svg)](VERSION)
+[![Version 4.11.9](https://img.shields.io/badge/version-4.11.9-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -345,7 +345,7 @@ Available in the chat interface:
 | `/restart` | Soft restart. Saves state, kills workers, re-launches. |
 | `/status` | Shows active workers, task queue, and budget breakdown. |
 | `/evolve` | Toggle autonomous evolution mode (on/off). |
-| `/review` | Queue a deep self-review: sends all code + memory to a 1M-context model for Constitution-grounded analysis. |
+| `/review` | Queue a deep self-review: sends all agent code, prompts, docs, and core memory artifacts (identity, scratchpad, registry, patterns) to a 1M-context model for Constitution-grounded analysis. Excludes vendored libraries and operational logs. |
 | `/bg` | Toggle background consciousness loop (start/stop/status). |
 
 The same runtime actions are also exposed as compact buttons in the Chat header. All other messages are sent directly to the LLM.
@@ -374,6 +374,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.11.9 | 2026-04-04 | deep_self_review: exclude vendored/minified files from review pack (`_VENDORED_SUFFIXES` + `_VENDORED_NAMES` constants, suffix matching in build loop); update ARCHITECTURE.md — clarify review pack scope (no dialogue/logs, explicit exclusion rules); update README `/review` command description. |
 | 4.11.8 | 2026-04-04 | Design system consistency: Evolution Versions sub-tab inline styles replaced with CSS classes (`.evo-versions-*`); evo-runtime-card and evo-chart-wrap border changed to crimson tint matching app accent; evo-subtab inactive state aligned to crimson palette; chart tooltip background/border use palette colors; `btn-xs` utility class added; `loadVersions()` error handling now resets all three UI surfaces (commits, tags, branch header) on failure and guards against non-2xx HTTP responses; 4 new regression tests. |
 | 4.11.7 | 2026-04-04 | Fix PyWebView page reload after restart: force reload on reconnect when _lastSha is unknown (JS memory lost across server restart) or SHA changed. Ensures new CSS/JS is always loaded after restart in the desktop app. |
 | 4.11.6 | 2026-04-04 | UI design system consistency: chat input gets glassmorphism (backdrop-filter + crimson border tint), log working-phase badges unified to crimson (matching chat live card), About and Costs inline styles replaced with CSS classes, Design System section added to DEVELOPMENT.md. |

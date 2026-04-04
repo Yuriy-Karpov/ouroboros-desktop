@@ -25,6 +25,14 @@ _SENSITIVE_NAMES = {
     ".git-credentials", ".netrc", ".npmrc", ".pypirc",
 }
 
+# Vendored / minified files: not agent logic, waste context window.
+# These patterns match file names (not paths) — add here when new vendored assets appear.
+_VENDORED_SUFFIXES = {".min.js", ".min.css", ".min.mjs"}
+_VENDORED_NAMES = {
+    # Bundled third-party libraries
+    "chart.umd.min.js",
+}
+
 _MEMORY_WHITELIST = [
     "memory/identity.md",
     "memory/scratchpad.md",
@@ -94,6 +102,10 @@ def build_review_pack(
             if fname in _SENSITIVE_NAMES or fsuffix in _SENSITIVE_EXTENSIONS:
                 skipped.append(f"{rel_path} (sensitive)")
                 continue
+            # Vendored/minified: skip third-party bundled assets (waste context window)
+            if fname in _VENDORED_NAMES or any(fname.endswith(s) for s in _VENDORED_SUFFIXES):
+                skipped.append(f"{rel_path} (vendored/minified)")
+                continue
             size = full_path.stat().st_size
             if size > _MAX_FILE_BYTES:
                 skipped.append(f"{rel_path} (>{_MAX_FILE_BYTES // 1024}KB)")
@@ -115,7 +127,7 @@ def build_review_pack(
         error_note += "\n".join(f"  - {e}" for e in read_errors)
         parts.insert(0, error_note + "\n")
 
-    # 2. Memory whitelist files
+    # 2. Memory whitelist files — collected BEFORE writing the omission section
     for rel_mem in _MEMORY_WHITELIST:
         full_path = drive_root / rel_mem
         try:
@@ -130,8 +142,22 @@ def build_review_pack(
                 continue
             parts.append(f"## FILE: drive/{rel_mem}\n{content}\n")
             file_count += 1
-        except Exception:
+        except Exception as e:
+            skipped.append(f"drive/{rel_mem} (read error: {e})")
             continue
+
+    # Append explicit omission section AFTER all passes so every exclusion is captured.
+    # This makes review scope fully auditable by the model and the operator.
+    if skipped:
+        omission_lines = [
+            "## OMITTED FILES (not included in review pack)",
+            "These files were excluded. Reasons: sensitive=secrets/keys, "
+            "vendored/minified=third-party bundled asset, too_large=>1MB, read_error=unreadable.",
+            "",
+        ]
+        for entry in skipped:
+            omission_lines.append(f"  - {entry}")
+        parts.append("\n".join(omission_lines) + "\n")
 
     pack_text = "\n".join(parts)
     stats = {

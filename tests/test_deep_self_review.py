@@ -138,6 +138,88 @@ class TestRequestToolEmitsEvent:
         assert "unavailable" in result
 
 
+class TestVendoredFilesExcluded:
+    def test_minified_js_skipped(self, tmp_repo, tmp_drive):
+        """Files with .min.js suffix are excluded from the review pack."""
+        (tmp_repo / "lib.min.js").write_text("!function(){var a=1;}()\n")
+        git_output = "main.py\nlib.min.js\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "lib.min.js" not in pack or "vendored/minified" in str(stats["skipped"])
+        assert "## FILE: lib.min.js" not in pack
+
+    def test_chart_umd_skipped(self, tmp_repo, tmp_drive):
+        """chart.umd.min.js (vendored Chart.js) is excluded by name and appears in OMITTED section."""
+        (tmp_repo / "chart.umd.min.js").write_text("!function(t,e){/* chart.js minified */}()\n")
+        git_output = "main.py\nchart.umd.min.js\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: chart.umd.min.js" not in pack
+        assert any("chart.umd.min.js" in s for s in stats["skipped"])
+        # Omission section must be present and mention the file
+        assert "## OMITTED FILES" in pack
+        assert "chart.umd.min.js" in pack
+
+    def test_min_css_skipped(self, tmp_repo, tmp_drive):
+        """Files with .min.css suffix are excluded."""
+        (tmp_repo / "style.min.css").write_text("body{margin:0}a{color:red}\n")
+        git_output = "main.py\nstyle.min.css\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: style.min.css" not in pack
+        assert any("style.min.css" in s for s in stats["skipped"])
+
+    def test_regular_js_included(self, tmp_repo, tmp_drive):
+        """Regular (non-minified) JS files are NOT excluded."""
+        (tmp_repo / "app.js").write_text("console.log('hello');\n")
+        git_output = "main.py\napp.js\n"
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## FILE: app.js" in pack
+        assert not any("app.js" in s for s in stats["skipped"])
+
+    def test_omission_section_after_memory_whitelist(self, tmp_repo, tmp_drive):
+        """OMITTED FILES section is appended after both repo and memory passes, capturing all skips.
+
+        Simulates a memory-whitelist read error by patching pathlib.Path.read_text so that
+        identity.md raises PermissionError, ensuring it lands in skipped and the OMITTED section.
+        """
+        (tmp_repo / "lib.min.js").write_text("minified\n")
+        git_output = "main.py\nlib.min.js\n"
+        (tmp_drive / "memory" / "identity.md").write_text("I am Ouroboros.\n")
+        target_path = str(tmp_drive / "memory" / "identity.md")
+
+        original_read_text = pathlib.Path.read_text
+
+        def patched_read_text(self, encoding="utf-8", errors="replace"):
+            if str(self) == target_path:
+                raise PermissionError("mocked read error")
+            return original_read_text(self, encoding=encoding, errors=errors)
+
+        with mock.patch("ouroboros.deep_self_review.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(stdout=git_output, returncode=0)
+            with mock.patch("pathlib.Path.read_text", patched_read_text):
+                pack, stats = build_review_pack(tmp_repo, tmp_drive)
+
+        assert "## OMITTED FILES" in pack
+        omitted_section_pos = pack.index("## OMITTED FILES")
+        # Vendored file listed in omitted section
+        assert "lib.min.js" in pack[omitted_section_pos:]
+        # Memory read error captured in skipped
+        memory_errors = [s for s in stats["skipped"] if "identity.md" in s and "read error" in s]
+        assert memory_errors, "identity.md read error should appear in skipped"
+        # And it appears in the OMITTED section too
+        assert "identity.md" in pack[omitted_section_pos:]
+
+
 class TestReviewPackOverflow:
     def test_explicit_error_on_overflow(self, tmp_repo, tmp_drive):
         """When pack exceeds ~900K tokens, run_deep_self_review returns an error."""

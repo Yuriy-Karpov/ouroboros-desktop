@@ -1,4 +1,4 @@
-# Ouroboros v4.11.8 — Architecture & Reference
+# Ouroboros v4.11.9 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -712,8 +712,9 @@ errors surface via the same observability path.
 - Replaces the legacy `type="review"` task path with a dedicated deep review system.
 - **Separate task type** (`deep_self_review`): bypasses the tool loop entirely — one direct LLM call.
 - **Model**: `openai/gpt-5.4-pro` via OpenRouter (primary), or `openai::gpt-5.4-pro` via direct OpenAI (fallback). If neither key is configured, the review tool returns an availability error.
-- **Review pack**: all git-tracked files (via `git ls-files`) + a whitelist of core memory files (`identity.md`, `scratchpad.md`, `registry.md`, `WORLD.md`, `knowledge/index-full.md`, `knowledge/patterns.md`).
-- **No chunking, no silent truncation**. Files > 1MB are skipped with a note. If the total pack exceeds ~900K tokens, an explicit error is returned.
+- **Review pack**: all git-tracked files (via `git ls-files`) + a whitelist of core memory files (`identity.md`, `scratchpad.md`, `registry.md`, `WORLD.md`, `knowledge/index-full.md`, `knowledge/patterns.md`). Does NOT include dialogue history, task reflections, or other operational logs — these would consume too much context without adding architectural insight.
+- **Excluded from pack**: sensitive files (`.env`, `.pem`, `.key`, etc.), vendored/minified third-party assets (`.min.js`, `.min.css`, bundled libraries such as `chart.umd.min.js`), and files > 1MB. The rule: deep review is for agent logic and its own prompts/docs — not for libraries it bundles or operational runtime logs.
+- **No chunking, no silent truncation**. All excluded files are listed in an `## OMITTED FILES` section appended to the review pack — visible to the model and the operator. If the total pack exceeds ~900K tokens, an explicit error is returned.
 - **System prompt**: Constitution-first review mandate (BIBLE.md as absolute reference).
 - **Invariants**: reasoning effort `high`, max_tokens `100000`, no tools, 1 round, 60-minute hard timeout.
 - **Output**: full report to chat + saved to `memory/deep_review.md`.
