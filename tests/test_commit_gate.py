@@ -536,6 +536,181 @@ def test_advisory_auto_bypass_on_missing_key(tmp_path, monkeypatch):
     assert "ANTHROPIC_API_KEY" in bypass_events[0]["bypass_reason"]
 
 
+def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
+    """Advisory prompt must include blocking history section when last commit was blocked."""
+    import subprocess
+    adv_mod = _get_advisory_module()
+    rs_mod = _get_review_state_module()
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+    # Create a blocked commit attempt with critical findings
+    state = rs_mod.AdvisoryReviewState()
+    state.last_commit_attempt = rs_mod.CommitAttemptRecord(
+        ts="2026-04-02T22:00:00",
+        commit_message="test blocked commit",
+        status="blocked",
+        block_reason="critical_findings",
+        block_details=(
+            "⚠️ REVIEW_BLOCKED: Critical issues found.\n"
+            "  CRITICAL: [gpt-5.4] bible_compliance: Missing BIBLE.md update\n"
+            "  CRITICAL: [gpt-5.4] tests_affected: No tests for new function\n"
+            "  WARN: [opus] self_consistency: Minor doc drift"
+        ),
+    )
+    rs_mod.save_state(drive_root, state)
+
+    # Build the advisory prompt with drive_root
+    prompt = adv_mod._build_advisory_prompt(
+        repo_dir, "test commit", drive_root=drive_root
+    )
+
+    # Must contain blocking history section
+    assert "Previous blocking review findings" in prompt
+    assert "bible_compliance" in prompt
+    assert "tests_affected" in prompt
+    assert "MUST catch these same issues" in prompt
+
+
+def test_advisory_prompt_no_blocking_history_when_succeeded(tmp_path):
+    """Advisory prompt must NOT include blocking history when last commit succeeded."""
+    import subprocess
+    adv_mod = _get_advisory_module()
+    rs_mod = _get_review_state_module()
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+    state = rs_mod.AdvisoryReviewState()
+    state.last_commit_attempt = rs_mod.CommitAttemptRecord(
+        ts="2026-04-02T22:00:00",
+        commit_message="test commit",
+        status="succeeded",
+    )
+    rs_mod.save_state(drive_root, state)
+
+    prompt = adv_mod._build_advisory_prompt(
+        repo_dir, "test commit", drive_root=drive_root
+    )
+
+    assert "Previous blocking review findings" not in prompt
+
+
+def test_advisory_prompt_no_blocking_history_without_drive_root(tmp_path):
+    """Advisory prompt must gracefully skip blocking history when no drive_root."""
+    import subprocess
+    adv_mod = _get_advisory_module()
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+    prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
+    assert "Previous blocking review findings" not in prompt
+
+
+def test_advisory_prompt_strictness_formulations():
+    """Advisory prompt must contain the same strictness language as blocking reviewers."""
+    import subprocess
+    adv_mod = _get_advisory_module()
+
+    import pathlib as _pl
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo_dir = _pl.Path(d)
+        (repo_dir / "BIBLE.md").write_text("test bible", encoding="utf-8")
+        subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+        prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
+
+        # Key strictness formulations that must be present
+        assert "same rigor" in prompt.lower() or "same severity threshold" in prompt.lower()
+        assert "do not stop after finding the first issue" in prompt.lower()
+        assert "distinct problem" in prompt.lower()
+        assert "read the full content of every changed file" in prompt.lower()
+        assert "all bugs, logic errors" in prompt.lower()
+        # Must NOT contain the old relaxing language
+        assert "findings do not directly block" not in prompt.lower()
+
+
+def test_advisory_prompt_includes_architecture_doc():
+    """Advisory prompt must include ARCHITECTURE.md for self_consistency cross-checking."""
+    import subprocess
+    adv_mod = _get_advisory_module()
+
+    import pathlib as _pl
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo_dir = _pl.Path(d)
+        (repo_dir / "BIBLE.md").write_text("test bible", encoding="utf-8")
+        (repo_dir / "docs").mkdir(parents=True, exist_ok=True)
+        (repo_dir / "docs" / "ARCHITECTURE.md").write_text(
+            "# Ouroboros v99.0.0 — Architecture", encoding="utf-8"
+        )
+        subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+        prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
+
+        # ARCHITECTURE.md must be present
+        assert "ARCHITECTURE.md" in prompt
+        assert "Ouroboros v99.0.0" in prompt
+
+
+def test_advisory_prompt_strictness_concrete_fix_requirement():
+    """Advisory prompt must require concrete fix suggestions for FAIL findings."""
+    import subprocess
+    adv_mod = _get_advisory_module()
+
+    import pathlib as _pl
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        repo_dir = _pl.Path(d)
+        subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+        prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
+
+        # Must require actionable fix suggestions
+        assert "concrete" in prompt.lower()
+        assert "fix" in prompt.lower()
+        assert "how to fix" in prompt.lower() or "how to change" in prompt.lower() or "what to change" in prompt.lower()
+
+
+def test_blocking_history_section_with_scope_blocked(tmp_path):
+    """Blocking history should also work for scope_blocked commits."""
+    adv_mod = _get_advisory_module()
+    rs_mod = _get_review_state_module()
+
+    drive_root = tmp_path
+    (drive_root / "state").mkdir(parents=True)
+
+    state = rs_mod.AdvisoryReviewState()
+    state.last_commit_attempt = rs_mod.CommitAttemptRecord(
+        ts="2026-04-02T22:00:00",
+        commit_message="scope blocked commit",
+        status="blocked",
+        block_reason="scope_blocked",
+        block_details=(
+            "⚠️ SCOPE_REVIEW_BLOCKED: Missing touchpoint.\n"
+            "CRITICAL: [opus] forgotten_touchpoints: ARCHITECTURE.md not updated"
+        ),
+    )
+    rs_mod.save_state(drive_root, state)
+
+    section = adv_mod._build_blocking_history_section(drive_root)
+    assert "Previous blocking review findings" in section
+    assert "scope_blocked" in section
+    assert "ARCHITECTURE.md" in section
+
+
 def test_review_blocked_message_prefers_fix_over_rebuttal():
     """v4.9.2: REVIEW_BLOCKED message directs agent to fix first, rebuttal only for factual errors."""
     from ouroboros.tools.review import _build_critical_block_message
@@ -564,3 +739,81 @@ def test_review_blocked_5plus_hint_suggests_split():
     )
     assert "split the change" in msg.lower() or "split" in msg.lower()
     assert "report the blockage" in msg.lower() or "report" in msg.lower()
+
+
+def test_self_consistency_listed_as_critical_in_severity_rules():
+    """self_consistency (item 13) must be treated as conditionally critical, not always advisory."""
+    import pathlib
+    checklists_path = pathlib.Path(__file__).parent.parent / "docs" / "CHECKLISTS.md"
+    content = checklists_path.read_text(encoding="utf-8")
+
+    # The severity rules section must describe self_consistency as conditionally critical
+    assert "self_consistency" in content
+    # Must NOT say items 11-13 are ALL advisory
+    lines = content.split("\n")
+    for line in lines:
+        if "items 11-13 are advisory" in line.lower():
+            raise AssertionError(
+                f"Found old 'items 11-13 are advisory' rule — self_consistency "
+                f"must now be conditionally critical:\n  {line}"
+            )
+    # Must say item 13 is conditionally critical
+    assert "item 13" in content.lower() and "critical" in content.lower()
+
+
+def test_development_compliance_checklist_expanded():
+    """development_compliance description must include specific concrete checks."""
+    import pathlib
+    checklists_path = pathlib.Path(__file__).parent.parent / "docs" / "CHECKLISTS.md"
+    content = checklists_path.read_text(encoding="utf-8")
+
+    # All these concrete checks must appear in the checklist
+    required_terms = [
+        "snake_case",
+        "PascalCase",
+        "Gateway",
+        "LLMClient",
+        "[:N]",
+        "ToolEntry",
+    ]
+    for term in required_terms:
+        assert term in content, (
+            f"development_compliance checklist must mention '{term}' for concrete checks, "
+            f"but it's missing from CHECKLISTS.md"
+        )
+
+
+def test_triad_review_prompt_has_thoroughness_instructions():
+    """Triad review prompt must include thoroughness instructions."""
+    from ouroboros.tools.review import _REVIEW_PROMPT_TEMPLATE
+
+    prompt_lower = _REVIEW_PROMPT_TEMPLATE.lower()
+    required_phrases = [
+        "read the entire",
+        "all bugs, logic errors",
+        "do not stop after finding",
+        "each distinct problem",
+        "pass reasons may be brief",
+        "fail reasons must be detailed",
+        "how-to-fix",
+    ]
+    for phrase in required_phrases:
+        assert phrase in prompt_lower, (
+            f"Triad review prompt missing required thoroughness instruction: '{phrase}'"
+        )
+
+
+def test_triad_review_reasoning_effort_is_medium_not_low():
+    """Triad review models must use at least medium reasoning effort, not 'low'."""
+    import inspect
+    from ouroboros.tools.review import _query_model
+
+    source = inspect.getsource(_query_model)
+    # Must NOT contain reasoning_effort="low"
+    assert 'reasoning_effort="low"' not in source, (
+        "_query_model uses reasoning_effort='low' — must be 'medium' or higher"
+    )
+    # Must contain medium or higher
+    assert 'reasoning_effort="medium"' in source or 'reasoning_effort="high"' in source, (
+        "_query_model must use reasoning_effort='medium' or 'high'"
+    )

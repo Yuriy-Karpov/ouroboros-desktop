@@ -130,6 +130,9 @@ def resolve_effort(task_type: str) -> str:
     elif t == "review":
         key = "OUROBOROS_EFFORT_REVIEW"
         default = "medium"
+    elif t == "deep_self_review":
+        key = "OUROBOROS_EFFORT_TASK"
+        default = "high"
     elif t in ("scope_review", "scope-review"):
         key = "OUROBOROS_EFFORT_SCOPE_REVIEW"
         default = "high"

@@ -22,7 +22,6 @@ import logging
 import os
 import pathlib
 import subprocess
-import shutil
 from typing import List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -45,18 +44,7 @@ from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
 
-_CLAUDE_CODE_TIMEOUT_SEC = 120  # Advisory run budget — keep it fast
 _MAX_DIFF_CHARS = 80_000        # Explicit omission note beyond this
-
-
-def _find_claude_bin() -> Optional[str]:
-    """Locate the claude binary using the same PATH augmentation as shell.py."""
-    try:
-        from ouroboros.tools.shell import _ensure_path
-        _ensure_path()
-    except Exception:
-        pass
-    return shutil.which("claude")
 
 
 def _load_doc(repo_dir: pathlib.Path, relpath: str, fallback: str = "") -> str:
@@ -110,17 +98,71 @@ def _get_changed_file_list(repo_dir: pathlib.Path) -> str:
         return "(git status error)"
 
 
+def _build_blocking_history_section(drive_root: pathlib.Path) -> str:
+    """Build a section summarizing recent blocking commit findings.
+
+    Reads the last commit attempt from durable state. If it was blocked with
+    critical_findings, includes those findings so the advisory reviewer can
+    catch the same issues proactively.
+    """
+    try:
+        state = load_state(drive_root)
+    except Exception:
+        return ""
+
+    sections: List[str] = []
+
+    # 1. Last commit attempt — if blocked with critical findings
+    ca = state.last_commit_attempt
+    if ca and ca.status == "blocked" and ca.block_reason in (
+        "critical_findings", "scope_blocked", "parse_failure"
+    ) and ca.block_details:
+        lines = [
+            "## Previous blocking review findings",
+            "",
+            "The last `repo_commit` was BLOCKED by the downstream blocking reviewers.",
+            "Your advisory review MUST catch these same issues — a false PASS here",
+            "wastes an entire blocking review cycle.",
+            "",
+            f"Block reason: {ca.block_reason}",
+            f"Commit message: \"{ca.commit_message}\"",
+            "",
+            "Findings from blocking reviewers:",
+            "",
+        ]
+        # Extract individual CRITICAL lines from block_details
+        for line in ca.block_details.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("CRITICAL:") or stripped.startswith("WARN:"):
+                lines.append(f"- {stripped}")
+            elif stripped.startswith("⚠️ SCOPE_REVIEW_BLOCKED") or stripped.startswith("⚠️ REVIEW_BLOCKED"):
+                lines.append(f"- {stripped[:200]}")
+        # If we didn't extract any structured lines, include a preview
+        if not any(l.startswith("- ") for l in lines):
+            preview = ca.block_details[:500].replace("\n", "\n  ")
+            lines.append(f"  {preview}")
+        lines.append("")
+        lines.append(
+            "IMPORTANT: Verify that ALL of the above issues have been fixed in the "
+            "current working tree. If any remain, FAIL the corresponding checklist item."
+        )
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
 def _build_advisory_prompt(
     repo_dir: pathlib.Path,
     commit_message: str,
     goal: str = "",
     scope: str = "",
     paths: Optional[List[str]] = None,
+    drive_root: Optional[pathlib.Path] = None,
 ) -> str:
     """Build the read-only advisory review prompt.
 
     Includes: BIBLE.md, CHECKLISTS.md, DEVELOPMENT.md, git status, staged diff,
-    touched file pack, goal/scope sections.
+    touched file pack, goal/scope sections, and blocking history.
     Does NOT include raw chat/task context.
     """
     bible = _load_doc(repo_dir, "BIBLE.md", "(BIBLE.md not found)")
@@ -136,13 +178,37 @@ def _build_advisory_prompt(
     goal_section = build_goal_section(goal, scope, commit_message)
     scope_section = build_scope_section(scope)
 
-    prompt = f"""\
-You are performing an ADVISORY pre-commit review of an Ouroboros self-modifying AI agent codebase.
+    # Build blocking history section if drive_root is available
+    blocking_history = ""
+    if drive_root:
+        blocking_history = _build_blocking_history_section(drive_root)
 
-## Your role
-- Review the current working tree changes (git diff / git status).
-- Use ONLY Read, Grep, Glob tools — do NOT edit or run any files.
-- Return a STRUCTURED JSON array of findings. No prose, no fences — only a JSON array.
+    arch_doc = _load_doc(repo_dir, "docs/ARCHITECTURE.md", "(ARCHITECTURE.md not found)")
+
+    prompt = f"""\
+You are performing a pre-commit review of an Ouroboros self-modifying AI agent codebase.
+
+## Your role — NON-NEGOTIABLE REQUIREMENTS
+- Review the current working tree changes with the SAME RIGOR as the downstream blocking reviewers.
+  A false PASS here wastes an entire blocking review cycle ($10+).
+- Use ONLY Read, Grep, Glob tools. Do NOT edit or execute any files.
+- Read the FULL CONTENT of every changed file listed below using the Read tool.
+  Do NOT evaluate security, bible compliance, or code quality from path listings or diff hunks alone.
+- Return ONLY a JSON array. No prose, no markdown fences — only the JSON array.
+
+## Thoroughness requirements
+- Do NOT stop after finding the first issue. Check EVERY item in the checklist.
+- Report ALL problems you find. If there are 5 bugs, list all 5 — each as a separate entry.
+- Do NOT summarize multiple distinct problems into one finding.
+- For PASS: brief reason is fine. For FAIL: cite the specific file, line/symbol, what is wrong,
+  and provide a CONCRETE fix suggestion so the developer knows exactly what to change.
+
+## Severity thresholds — treat as blocking reviewers do
+- bible_compliance (item 1): ANY violation of BIBLE.md principles is CRITICAL.
+- security_issues (item 5): ANY path traversal, secret leakage, or unsafe operation is CRITICAL.
+- development_compliance (item 2): naming, entity type rules, module size, no ad-hoc LLM calls,
+  no hardcoded [:N] truncation of cognitive artifacts — all CRITICAL when violated.
+- self_consistency (item 13): if a concrete stale artifact exists (specific file + line), CRITICAL.
 
 ## Output format
 Return ONLY a JSON array. Each element:
@@ -150,7 +216,7 @@ Return ONLY a JSON array. Each element:
   "item": "<checklist item name>",
   "verdict": "PASS" | "FAIL",
   "severity": "critical" | "advisory",
-  "reason": "<one-line explanation>"
+  "reason": "<for FAIL: file, line/symbol, what is wrong, how to fix>"
 }}
 
 ## CHECKLISTS.md (What to review)
@@ -169,6 +235,12 @@ Return ONLY a JSON array. Each element:
 
 {bible}
 
+## ARCHITECTURE.md (System structure reference)
+
+{arch_doc}
+
+{blocking_history}
+
 ## Commit message
 
 {commit_message}
@@ -177,7 +249,7 @@ Return ONLY a JSON array. Each element:
 
 {changed_files}
 
-## Current touched files
+## Current touched files (full content — read these with the Read tool for deeper inspection)
 
 {touched_pack}
 
@@ -185,11 +257,17 @@ Return ONLY a JSON array. Each element:
 
 {diff}
 
-## Instructions
-1. Read all changed files mentioned in the diff using the Read tool.
-2. Check each item from the "Repo Commit Checklist" in CHECKLISTS.md.
-3. Pay special attention to BIBLE.md compliance (item 1: bible_compliance).
-4. Output ONLY the JSON array — no markdown, no commentary outside the JSON.
+## Step-by-step instructions
+1. Read the FULL content of every changed file using the Read tool. Do not skip any file.
+2. Check EVERY item from the "Repo Commit Checklist" — do not stop after the first issue.
+3. Pay equal attention to ALL 13 checklist items. bible_compliance and security_issues must be
+   evaluated at the same strictness as the downstream blocking reviewers.
+4. Look for ALL bugs, logic errors, regressions, race conditions, and violations of BIBLE.md or DEVELOPMENT.md.
+5. Cross-check: do tool descriptions in prompts match actual get_tools() exports?
+   Does ARCHITECTURE.md header version match the VERSION file?
+6. If previous blocking review findings are listed above, verify that each one has been addressed.
+   If any remain, FAIL the corresponding checklist item.
+7. Output ONLY the JSON array — no markdown fences, no commentary outside the JSON.
 """
     return prompt
 
@@ -201,8 +279,9 @@ def _run_claude_advisory(
     goal: str = "",
     scope: str = "",
     paths: Optional[List[str]] = None,
+    drive_root: Optional[pathlib.Path] = None,
 ) -> tuple[list, str]:
-    """Run the advisory review via Claude Agent SDK (read-only) or CLI fallback.
+    """Run the advisory review via Claude Agent SDK (read-only).
 
     Returns (items: list, raw_result: str).
     items is a list of review finding dicts (may be empty on error).
@@ -212,9 +291,8 @@ def _run_claude_advisory(
     if not api_key:
         return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set."
 
-    prompt = _build_advisory_prompt(repo_dir, commit_message, goal=goal, scope=scope, paths=paths)
+    prompt = _build_advisory_prompt(repo_dir, commit_message, goal=goal, scope=scope, paths=paths, drive_root=drive_root)
 
-    # --- Primary path: Claude Agent SDK (read-only) ---
     try:
         from ouroboros.gateways.claude_code import run_readonly
 
@@ -226,89 +304,39 @@ def _run_claude_advisory(
         )
 
         if not result.success:
-            return [], f"⚠️ ADVISORY_ERROR: {result.error}"
+            import sys
+            sdk_version = "(unknown)"
+            try:
+                import importlib.metadata
+                sdk_version = importlib.metadata.version("claude-agent-sdk")
+            except Exception:
+                pass
+            return [], (
+                f"⚠️ ADVISORY_ERROR: {result.error}\n"
+                f"Diagnostic: sdk_version={sdk_version}, python={sys.executable}"
+            )
 
         raw_text = result.result_text
         items = _parse_advisory_output(raw_text)
         return items, raw_text
 
     except ImportError:
-        log.info("claude-agent-sdk not available for advisory review, falling back to CLI")
-
-    # --- Fallback: legacy CLI subprocess ---
-    claude_bin = _find_claude_bin()
-    if not claude_bin:
-        return [], "⚠️ ADVISORY_ERROR: claude binary not found. Run ensure_claude_cli first."
-
-    cmd = [
-        claude_bin,
-        "-p", prompt,
-        "--output-format", "json",
-        "--max-turns", "8",
-        "--tools", "Read,Grep,Glob",
-        "--no-session-persistence",
-        "--model", "opus",
-    ]
-
-    # Prefer bypassPermissions; fall back to legacy flag
-    perm_mode = os.environ.get("OUROBOROS_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions").strip()
-    cmd_primary = cmd + ["--permission-mode", perm_mode]
-    cmd_legacy = cmd + ["--dangerously-skip-permissions"]
-
-    env = os.environ.copy()
-    env["ANTHROPIC_API_KEY"] = api_key
-    try:
-        from ouroboros.tools.shell import _build_augmented_path
-        env["PATH"] = _build_augmented_path()
-    except Exception:
-        pass
-
-    def _run_cmd(cmd_variant: list):
-        try:
-            from ouroboros.tools.shell import _tracked_subprocess_run
-        except Exception:
-            import subprocess as _sp
-
-            class _compat:
-                @staticmethod
-                def _tracked_subprocess_run(c, **kw):
-                    return _sp.run(c, **kw)
-            _tracked_subprocess_run = _compat._tracked_subprocess_run
-
-        return _tracked_subprocess_run(
-            cmd_variant,
-            cwd=str(repo_dir),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=_CLAUDE_CODE_TIMEOUT_SEC,
-            env=env,
+        return [], (
+            "⚠️ ADVISORY_ERROR: claude-agent-sdk not installed. "
+            "Install: pip install 'ouroboros[claude-sdk]'"
         )
-
-    try:
-        res = _run_cmd(cmd_primary)
-        # Fallback if --permission-mode is not recognized
-        if res.returncode != 0:
-            combined = ((res.stdout or "") + (res.stderr or "")).lower()
-            if "--permission-mode" in combined and any(
-                m in combined for m in ("unknown option", "unknown argument", "unrecognized option")
-            ):
-                res = _run_cmd(cmd_legacy)
-    except subprocess.TimeoutExpired:
-        return [], f"⚠️ ADVISORY_ERROR: Claude Code timed out after {_CLAUDE_CODE_TIMEOUT_SEC}s."
     except Exception as e:
-        return [], f"⚠️ ADVISORY_ERROR: subprocess failed: {type(e).__name__}: {e}"
-
-    stdout = (res.stdout or "").strip()
-    stderr = (res.stderr or "").strip()
-
-    if res.returncode != 0:
-        raw = f"exit_code={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
-        return [], f"⚠️ ADVISORY_ERROR: Claude Code exited {res.returncode}.\n{raw}"
-
-    # Parse JSON from CLI output (may be wrapped in Claude's JSON envelope)
-    items = _parse_advisory_output(stdout)
-    return items, stdout
+        import sys
+        sdk_version = "(unknown)"
+        try:
+            import importlib.metadata
+            sdk_version = importlib.metadata.version("claude-agent-sdk")
+        except Exception:
+            pass
+        return [], (
+            f"⚠️ ADVISORY_ERROR: SDK call failed: {type(e).__name__}: {e}\n"
+            f"Diagnostic: sdk_version={sdk_version}, python={sys.executable}"
+        )
 
 
 def _parse_advisory_output(stdout: str) -> list:
@@ -383,7 +411,7 @@ def _handle_advisory_pre_review(
     scope: str = "",
     paths: Optional[List[str]] = None,
 ) -> str:
-    """Run an advisory pre-commit review via Claude Code CLI (read-only).
+    """Run an advisory pre-commit review via Claude Agent SDK (read-only).
 
     Stores result in durable state so repo_commit can verify freshness.
     Returns structured JSON with findings + status.
@@ -455,7 +483,7 @@ def _handle_advisory_pre_review(
     # Run the advisory review
     ctx.emit_progress_fn("Running advisory pre-review (Claude Code, read-only)...")
     changed_files = _get_changed_file_list(repo_dir)
-    items, raw_result = _run_claude_advisory(repo_dir, commit_message, ctx, goal=goal, scope=scope, paths=paths)
+    items, raw_result = _run_claude_advisory(repo_dir, commit_message, ctx, goal=goal, scope=scope, paths=paths, drive_root=drive_root)
 
     # Handle errors from the CLI
     if raw_result.startswith("⚠️ ADVISORY_ERROR"):
@@ -600,7 +628,7 @@ def get_tools() -> list:
             schema={
                 "name": "advisory_pre_review",
                 "description": (
-                    "Run an advisory pre-commit review via Claude Code CLI (read-only: Read, Grep, Glob only). "
+                    "Run an advisory pre-commit review via Claude Agent SDK (read-only: Read, Grep, Glob only). "
                     "MUST be called before repo_commit. Returns structured JSON findings. "
                     "Findings are advisory (non-blocking), but the absence of a fresh matching "
                     "advisory run will block repo_commit. "

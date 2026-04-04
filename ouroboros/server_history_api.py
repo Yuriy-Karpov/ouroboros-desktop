@@ -103,7 +103,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                         role = {"in": "user", "out": "assistant", "system": "system"}.get(direction)
                         if role is None:
                             continue
-                        combined.append({
+                        rec = {
                             "text": str(entry.get("text", "")),
                             "role": role,
                             "ts": str(entry.get("ts", "")),
@@ -116,7 +116,15 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                             "client_message_id": str(entry.get("client_message_id", "")),
                             "task_id": str(entry.get("task_id", "")),
                             "telegram_chat_id": int(entry.get("telegram_chat_id") or 0),
-                        })
+                        }
+                        # Pass task metadata for task_summary entries so the
+                        # frontend can decide whether to show a live card.
+                        if entry.get("type") == "task_summary":
+                            if "tool_calls" in entry:
+                                rec["tool_calls"] = int(entry["tool_calls"])
+                            if "rounds" in entry:
+                                rec["rounds"] = int(entry["rounds"])
+                        combined.append(rec)
             except Exception as exc:
                 log.warning("Failed to read chat history: %s", exc)
 

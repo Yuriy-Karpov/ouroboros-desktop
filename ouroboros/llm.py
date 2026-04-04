@@ -1238,7 +1238,7 @@ class LLMClient:
         prompt: str,
         images: List[Dict[str, Any]],
         model: str = "anthropic/claude-sonnet-4.6",
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
         reasoning_effort: str = "none",
     ) -> Tuple[str, Dict[str, Any]]:
         """

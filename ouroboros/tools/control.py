@@ -114,9 +114,13 @@ def _cancel_task(ctx: ToolContext, task_id: str) -> str:
     return f"Cancel requested: {task_id}"
 
 
-def _request_review(ctx: ToolContext, reason: str) -> str:
-    ctx.pending_events.append({"type": "review_request", "reason": reason, "ts": utc_now_iso()})
-    return f"Review requested: {reason}"
+def _request_deep_self_review(ctx: ToolContext, reason: str) -> str:
+    from ouroboros.deep_self_review import is_review_available
+    available, model = is_review_available()
+    if not available:
+        return "❌ Deep self-review unavailable: requires OPENROUTER_API_KEY or OPENAI_API_KEY."
+    ctx.pending_events.append({"type": "deep_self_review_request", "reason": reason, "model": model, "ts": utc_now_iso()})
+    return f"Deep self-review requested (model: {model}). It will be queued and executed asynchronously."
 
 
 def _chat_history(ctx: ToolContext, count: int = 100, offset: int = 0, search: str = "") -> str:
@@ -327,13 +331,13 @@ def get_tools() -> List[ToolEntry]:
             "description": "Cancel a task by ID.",
             "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
         }, _cancel_task),
-        ToolEntry("request_review", {
-            "name": "request_review",
-            "description": "Request a deep review of code, prompts, and state. You decide when a review is needed.",
+        ToolEntry("request_deep_self_review", {
+            "name": "request_deep_self_review",
+            "description": "Request a deep self-review of the entire Ouroboros project. Uses a 1M-context model to review all code, docs, and memory against the Constitution. Results go to chat and memory. Requires OPENROUTER_API_KEY or OPENAI_API_KEY.",
             "parameters": {"type": "object", "properties": {
                 "reason": {"type": "string", "description": "Why you want a review (context for the reviewer)"},
             }, "required": ["reason"]},
-        }, _request_review),
+        }, _request_deep_self_review),
         ToolEntry("chat_history", {
             "name": "chat_history",
             "description": "Retrieve messages from chat history. Supports search.",

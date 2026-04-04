@@ -88,7 +88,7 @@ export function initSettings({ state }) {
         if (!visible) return;
         if (button && button.dataset.busy !== '1' && button.dataset.installed !== '1') {
             button.disabled = false;
-            button.textContent = 'Install Claude Code CLI';
+            button.textContent = 'Install Claude Agent SDK';
         }
     }
 
@@ -99,7 +99,7 @@ export function initSettings({ state }) {
         const busy = Boolean(payload.busy);
         const error = String(payload.error || '').trim();
         const message = String(payload.message || '').trim()
-            || (installed ? 'Claude Code CLI is installed.' : 'Claude Code CLI is not installed.');
+            || (installed ? 'Claude Agent SDK is installed.' : 'Claude Agent SDK is not installed.');
         if (status) {
             status.textContent = message;
             status.dataset.tone = installed ? 'ok' : (error ? 'error' : 'muted');
@@ -108,7 +108,7 @@ export function initSettings({ state }) {
             button.dataset.busy = busy ? '1' : '0';
             button.dataset.installed = installed ? '1' : '0';
             button.disabled = busy || installed;
-            button.textContent = busy ? 'Installing...' : (installed ? 'Installed' : 'Install Claude Code CLI');
+            button.textContent = busy ? 'Installing...' : (installed ? 'Installed' : 'Install Claude Agent SDK');
         }
         renderClaudeCodeUi();
     }
@@ -128,7 +128,7 @@ export function initSettings({ state }) {
                 installed: false,
                 busy: false,
                 error: String(error?.message || error || ''),
-                message: `Claude Code CLI status failed: ${String(error?.message || error || '')}`,
+                message: `Claude Agent SDK status failed: ${String(error?.message || error || '')}`,
             });
         }
     }
@@ -282,7 +282,7 @@ export function initSettings({ state }) {
         applyClaudeCodeStatus({
             installed: false,
             busy: true,
-            message: 'Starting Claude Code CLI installation...',
+            message: 'Installing Claude Agent SDK...',
             error: '',
         });
         try {
@@ -290,16 +290,16 @@ export function initSettings({ state }) {
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
             applyClaudeCodeStatus(data);
-            setStatus(data.freshly_installed ? 'Claude Code CLI installed.' : 'Claude Code CLI already available.', 'ok');
+            setStatus(data.freshly_installed ? 'Claude Agent SDK installed.' : 'Claude Agent SDK already available.', 'ok');
         } catch (error) {
             const message = String(error?.message || error || '');
             applyClaudeCodeStatus({
                 installed: false,
                 busy: false,
                 error: message,
-                message: `Claude Code CLI install failed: ${message}`,
+                message: `Claude Agent SDK install failed: ${message}`,
             });
-            setStatus('Claude Code CLI install failed.', 'warn');
+            setStatus('Claude Agent SDK install failed.', 'warn');
         }
     });
 

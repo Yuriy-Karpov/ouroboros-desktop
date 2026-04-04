@@ -37,19 +37,19 @@ export function initEvolution({ ws, state }) {
             <div id="evo-tags-list" class="evo-tags-list"></div>
         </div>
         <!-- Versions sub-tab -->
-        <div id="evo-versions-content" style="display:none;flex:1;flex-direction:column;overflow:hidden;padding:20px">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
-                <div id="ver-current" style="flex:1;font-size:13px;color:var(--text-secondary)"></div>
+        <div id="evo-versions-content" class="evo-versions-content">
+            <div class="evo-versions-header">
+                <div id="ver-current" class="evo-versions-branch"></div>
                 <button class="btn btn-primary" id="btn-promote">Promote to Stable</button>
             </div>
-            <div style="display:flex;gap:24px;flex:1;overflow:hidden">
-                <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-                    <h3 style="margin-bottom:8px;font-size:14px;color:var(--text-secondary)">Recent Commits</h3>
-                    <div id="ver-commits" class="log-scroll" style="flex:1;overflow-y:auto"></div>
+            <div class="evo-versions-cols">
+                <div class="evo-versions-col">
+                    <h3 class="section-title">Recent Commits</h3>
+                    <div id="ver-commits" class="log-scroll evo-versions-list"></div>
                 </div>
-                <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-                    <h3 style="margin-bottom:8px;font-size:14px;color:var(--text-secondary)">Tags</h3>
-                    <div id="ver-tags" class="log-scroll" style="flex:1;overflow-y:auto"></div>
+                <div class="evo-versions-col">
+                    <h3 class="section-title">Tags</h3>
+                    <div id="ver-tags" class="log-scroll evo-versions-list"></div>
                 </div>
             </div>
         </div>
@@ -69,6 +69,7 @@ export function initEvolution({ ws, state }) {
         subtabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.subtab === name));
         chartContent.style.display = name === 'chart' ? '' : 'none';
         versionsContent.style.display = name === 'versions' ? 'flex' : 'none';
+        versionsContent.style.flexDirection = name === 'versions' ? 'column' : '';
         if (name === 'versions' && !versionsLoaded) loadVersions();
     }
 
@@ -262,10 +263,10 @@ export function initEvolution({ ws, state }) {
                         },
                     },
                     tooltip: {
-                        backgroundColor: '#1e293b',
+                        backgroundColor: 'rgba(26, 21, 32, 0.95)',
                         titleColor: '#e2e8f0',
                         bodyColor: '#94a3b8',
-                        borderColor: '#334155',
+                        borderColor: 'rgba(201, 53, 69, 0.18)',
                         borderWidth: 1,
                         titleFont: { family: 'JetBrains Mono, monospace', size: 12 },
                         bodyFont: { family: 'JetBrains Mono, monospace', size: 11 },
@@ -346,17 +347,14 @@ export function initEvolution({ ws, state }) {
 
     function renderRow(item, labelText, targetId) {
         const row = document.createElement('div');
-        row.className = 'log-entry';
-        row.style.display = 'flex';
-        row.style.alignItems = 'center';
-        row.style.gap = '8px';
+        row.className = 'log-entry evo-versions-row';
         const date = (item.date || '').slice(0, 16).replace('T', ' ');
         const msg = escapeHtml((item.message || '').slice(0, 60));
         row.innerHTML = `
-            <span class="log-type tools" style="min-width:70px;text-align:center">${escapeHtml(labelText)}</span>
+            <span class="log-type tools evo-versions-row-label">${escapeHtml(labelText)}</span>
             <span class="log-ts">${date}</span>
-            <span class="log-msg" style="flex:1">${msg}</span>
-            <button class="btn btn-danger" style="padding:2px 8px;font-size:11px" data-target="${escapeHtml(targetId)}">Restore</button>
+            <span class="log-msg evo-versions-row-msg">${msg}</span>
+            <button class="btn btn-danger btn-xs" data-target="${escapeHtml(targetId)}">Restore</button>
         `;
         row.querySelector('button').addEventListener('click', () => rollback(targetId));
         return row;
@@ -365,6 +363,7 @@ export function initEvolution({ ws, state }) {
     async function loadVersions() {
         try {
             const resp = await fetch('/api/git/log');
+            if (!resp.ok) throw new Error('Git log API error ' + resp.status);
             const data = await resp.json();
             currentDiv.textContent = `Branch: ${data.branch || '?'} @ ${data.sha || '?'}`;
 
@@ -372,16 +371,20 @@ export function initEvolution({ ws, state }) {
             (data.commits || []).forEach(c => {
                 commitsDiv.appendChild(renderRow(c, c.short_sha || c.sha?.slice(0, 8), c.sha));
             });
-            if (!data.commits?.length) commitsDiv.innerHTML = '<div style="color:var(--text-muted);padding:12px">No commits found</div>';
+            if (!data.commits?.length) commitsDiv.innerHTML = '<div class="evo-empty">No commits found</div>';
 
             tagsDiv.innerHTML = '';
             (data.tags || []).forEach(t => {
                 tagsDiv.appendChild(renderRow(t, t.tag, t.tag));
             });
-            if (!data.tags?.length) tagsDiv.innerHTML = '<div style="color:var(--text-muted);padding:12px">No tags found</div>';
+            if (!data.tags?.length) tagsDiv.innerHTML = '<div class="evo-empty">No tags found</div>';
             versionsLoaded = true;
         } catch (e) {
-            commitsDiv.innerHTML = `<div style="color:var(--red);padding:12px">Failed to load: ${e.message}</div>`;
+            const errHtml = `<div class="evo-empty evo-empty-error">Failed to load: ${escapeHtml(e.message)}</div>`;
+            commitsDiv.innerHTML = errHtml;
+            tagsDiv.innerHTML = errHtml;
+            currentDiv.textContent = 'Branch: unknown';
+            versionsLoaded = false;
         }
     }
 

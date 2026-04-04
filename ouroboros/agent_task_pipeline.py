@@ -287,11 +287,27 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs):
             CONSOLIDATION_MODEL,
             CONSOLIDATION_REASONING_EFFORT,
         )
-        summary_model = _resolve_task_summary_model(CONSOLIDATION_MODEL)
         task_id = task.get("id", "unknown")
-        goal = _truncate_with_notice(task.get("text", ""), 500)
+        n_tool_calls = len(llm_trace.get("tool_calls", []) or [])
         rounds = int(usage.get("rounds") or 0)
         cost = float(usage.get("cost") or 0)
+
+        # Skip LLM summary for trivial tasks (0 tool calls, ≤1 round)
+        if n_tool_calls == 0 and rounds <= 1:
+            goal = _truncate_with_notice(task.get("text", ""), 200)
+            summary_text = (
+                f"Task {task_id} ({task.get('type', 'user')}): "
+                f"{goal}. {rounds}r, ${cost:.2f}."
+            )
+            append_jsonl(drive_logs / "chat.jsonl", {
+                "ts": utc_now_iso(), "direction": "system",
+                "type": "task_summary", "task_id": task_id, "text": summary_text,
+                "tool_calls": n_tool_calls, "rounds": rounds,
+            })
+            return
+
+        summary_model = _resolve_task_summary_model(CONSOLIDATION_MODEL)
+        goal = _truncate_with_notice(task.get("text", ""), 500)
         trace = build_trace_summary(llm_trace)
         prompt = _TASK_SUMMARY_PROMPT.format(
             task_id=task_id, goal=goal or "(no goal text)",
@@ -320,6 +336,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs):
             append_jsonl(drive_logs / "chat.jsonl", {
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,
+                "tool_calls": n_tool_calls, "rounds": rounds,
             })
     except Exception:
         log.debug("Task summary generation failed (non-critical)", exc_info=True)
@@ -396,110 +413,8 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
 
 
 def build_review_context(env: Any) -> str:
-    """Collect full codebase for review tasks (1M-context models get the whole thing)."""
-    _TOKEN_LIMIT = 600_000
-    try:
-        from ouroboros.review import (
-            collect_full_codebase, collect_sections,
-            chunk_sections, compute_complexity_metrics, format_metrics,
-            _SKIP_EXT, _SKIP_FILENAMES, _MAX_FILE_BYTES,
-        )
+    """Legacy stub — deep review now uses its own context path (ouroboros.deep_self_review).
 
-        _dry_bytes = 0
-        for _root, _skip_dirs, _skip_ext_extra in [
-            (env.repo_dir,
-             {"__pycache__", ".git", ".pytest_cache", ".mypy_cache",
-              "node_modules", ".venv", ".idea", ".vscode"},
-             frozenset()),
-            (env.drive_root,
-             {"archive", "locks", "downloads", "screenshots"},
-             {".jsonl"}),
-        ]:
-            try:
-                _root_resolved = _root.resolve()
-                if not _root_resolved.exists():
-                    continue
-                for _dirpath, _dirnames, _filenames in os.walk(str(_root_resolved)):
-                    _dirnames[:] = [d for d in _dirnames if d not in _skip_dirs]
-                    for _fn in _filenames:
-                        try:
-                            _p = pathlib.Path(_dirpath) / _fn
-                            if not _p.is_file() or _p.is_symlink():
-                                continue
-                            if _p.suffix.lower() in _SKIP_EXT:
-                                continue
-                            if _p.suffix.lower() in _skip_ext_extra:
-                                continue
-                            if _fn in _SKIP_FILENAMES:
-                                continue
-                            _dry_bytes += min(_p.stat().st_size, _MAX_FILE_BYTES)
-                        except Exception:
-                            continue
-            except Exception:
-                continue
-
-        if _dry_bytes / 3.5 > _TOKEN_LIMIT:
-            sections, stats = collect_sections(env.repo_dir, env.drive_root)
-            metrics = compute_complexity_metrics(sections)
-            parts = [
-                "## Code Review Context\n"
-                "(Fallback: codebase too large for single-context review)\n",
-                format_metrics(metrics),
-                f"\nFiles: {stats['files']}, chars: {stats['chars']}\n",
-                "\nUse repo_read to inspect specific files. "
-                "Use run_shell for tests. Key files below:\n",
-            ]
-            if stats.get("truncated"):
-                parts.append(f"\nCompacted files: {stats['truncated']}\n")
-            if stats.get("dropped"):
-                dropped_paths = stats.get("dropped_paths") or []
-                preview = ", ".join(dropped_paths[:5])
-                parts.append(
-                    f"\nDropped files due review budget: {stats['dropped']}"
-                    + (f" ({preview}{' ...' if len(dropped_paths) > 5 else ''})" if preview else "")
-                    + "\n"
-                )
-            chunks = chunk_sections(sections)
-            parts.append(chunks[0] if chunks else "(No reviewable content found.)")
-            return "\n".join(parts)
-
-        full_text, full_stats = collect_full_codebase(env.repo_dir, env.drive_root)
-
-        if full_stats["tokens"] <= _TOKEN_LIMIT:
-            sections, _ = collect_sections(env.repo_dir, env.drive_root)
-            metrics = compute_complexity_metrics(sections)
-            parts = [
-                "## Full Codebase for Review\n",
-                format_metrics(metrics),
-                f"\nFiles: {full_stats['files']}, estimated tokens: {full_stats['tokens']}\n",
-                full_text,
-                "\nYou have the complete codebase above. "
-                "Identify issues, patterns, security concerns, and areas for improvement.",
-            ]
-            return "\n".join(parts)
-        else:
-            sections, stats = collect_sections(env.repo_dir, env.drive_root)
-            metrics = compute_complexity_metrics(sections)
-            parts = [
-                "## Code Review Context\n"
-                "(Fallback: codebase too large for single-context review)\n",
-                format_metrics(metrics),
-                f"\nFiles: {stats['files']}, chars: {stats['chars']}\n",
-                "\nUse repo_read to inspect specific files. "
-                "Use run_shell for tests. Key files below:\n",
-            ]
-            if stats.get("truncated"):
-                parts.append(f"\nCompacted files: {stats['truncated']}\n")
-            if stats.get("dropped"):
-                dropped_paths = stats.get("dropped_paths") or []
-                preview = ", ".join(dropped_paths[:5])
-                parts.append(
-                    f"\nDropped files due review budget: {stats['dropped']}"
-                    + (f" ({preview}{' ...' if len(dropped_paths) > 5 else ''})" if preview else "")
-                    + "\n"
-                )
-            chunks = chunk_sections(sections)
-            parts.append(chunks[0] if chunks else "(No reviewable content found.)")
-            return "\n".join(parts)
-    except Exception as e:
-        return f"## Code Review Context\n\n(Failed to collect: {e})\nUse repo_read and repo_list to inspect code."
+    Kept for backward compatibility with any callers that reference it.
+    """
+    return ""

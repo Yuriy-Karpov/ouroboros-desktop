@@ -70,7 +70,7 @@ def init_queue_refs(pending: List[Dict[str, Any]], running: Dict[str, Dict[str, 
 
 def _task_priority(task_type: str) -> int:
     t = str(task_type or "").strip().lower()
-    if t in ("task", "review"):
+    if t in ("task", "review", "deep_self_review"):
         return 0
     if t == "evolution":
         return 1
@@ -305,7 +305,11 @@ def enforce_task_timeouts() -> None:
             _att = task.get("_attempt")
         attempt = int(_att) if _att is not None else 1
 
-        if runtime_sec >= SOFT_TIMEOUT_SEC and not bool(meta.get("soft_sent")):
+        # Deep self-review gets a longer timeout (60 min)
+        effective_soft = 3000 if task_type == "deep_self_review" else SOFT_TIMEOUT_SEC
+        effective_hard = 3600 if task_type == "deep_self_review" else HARD_TIMEOUT_SEC
+
+        if runtime_sec >= effective_soft and not bool(meta.get("soft_sent")):
             meta["soft_sent"] = True
             if owner_chat_id:
                 send_with_budget(
@@ -314,7 +318,7 @@ def enforce_task_timeouts() -> None:
                     f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}s. Continuing.",
                 )
 
-        if runtime_sec < HARD_TIMEOUT_SEC:
+        if runtime_sec < effective_hard:
             continue
 
         RUNNING.pop(task_id, None)
@@ -394,45 +398,24 @@ def build_evolution_task_text(cycle: int) -> str:
     return f"EVOLUTION #{cycle}"
 
 
-def build_review_task_text(reason: str) -> str:
-    """Build review task text.
-
-    Includes explicit Constitution-compliance mandate so the reviewer treats
-    the Constitution as the supreme authority, not just another file in context.
-    """
-    safe_reason = (reason or "owner request").replace("\n", " ").strip()[:400]
-    return (
-        "IMPORTANT — Constitutional Compliance Check:\n"
-        "The Constitution (in your system prompt) is the supreme authority above all code, "
-        "prompts, and conventions. Every finding and recommendation in this review MUST be "
-        "verified against its principles. Specifically:\n"
-        "- Flag any code, architecture, or behavior that contradicts a constitutional principle.\n"
-        "- When recommending changes, cite which principle supports the recommendation.\n"
-        "- If a trade-off exists between principles, apply the priority order: P0 > P1 > P2 > ... > P8.\n"
-        "- Do NOT recommend anything that would violate the Constitution, even if it seems "
-        "technically beneficial.\n"
-        "Constitutional compliance is not a separate section — it must permeate every part of the review.\n\n"
-        "---\n\n"
-        f"REVIEW TASK: {safe_reason}"
-    )
-
-
-def queue_review_task(reason: str, force: bool = False) -> Optional[str]:
-    """Queue a review task."""
+def queue_deep_self_review_task(reason: str, model: str = "", force: bool = False) -> Optional[str]:
+    """Queue a deep self-review task."""
     st = load_state()
     owner_chat_id = st.get("owner_chat_id")
     if not owner_chat_id:
         return None
-    if (not force) and queue_has_task_type("review"):
+    if (not force) and queue_has_task_type("deep_self_review"):
         return None
     tid = uuid.uuid4().hex[:8]
     enqueue_task({
-        "id": tid, "type": "review",
+        "id": tid,
+        "type": "deep_self_review",
         "chat_id": int(owner_chat_id),
-        "text": build_review_task_text(reason=reason),
+        "text": reason or "Deep self-review",
+        "model": model,
     })
-    persist_queue_snapshot(reason="review_enqueued")
-    send_with_budget(int(owner_chat_id), f"🔎 Review queued: {tid} ({reason})")
+    persist_queue_snapshot(reason="deep_self_review_enqueued")
+    send_with_budget(int(owner_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})")
     return tid
 
 

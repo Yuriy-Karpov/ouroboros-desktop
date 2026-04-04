@@ -214,8 +214,39 @@ def test_live_event_summaries_preserve_full_text_for_expansion():
     assert "fullBody" in source
 
 
+def test_chat_scrolls_to_bottom_after_first_history_load():
+    """syncHistory must scroll to bottom on first load (restart/open) but
+    respect user scroll position on subsequent reconnect syncs."""
+    source = _read("web/modules/chat.js")
+    # First-load guard: wasFirstLoad captures pre-call state
+    assert "wasFirstLoad = !historyLoaded" in source, \
+        "Missing first-load detection before setting historyLoaded"
+    # Conditional scroll: first load always scrolls, reconnect only when near bottom
+    assert "if (wasFirstLoad || isNearBottom())" in source, \
+        "Missing conditional scroll-to-bottom after history sync"
+    assert "messagesDiv.scrollTop = messagesDiv.scrollHeight" in source
+
+
 def test_restart_watchdog_waits_for_uvicorn_exit():
     source = _read("server.py")
     assert "_uvicorn_exited = threading.Event()" in source
     assert "_uvicorn_exited.wait(timeout=force_exit_timeout_sec)" in source
     assert "_uvicorn_exited.set()" in source
+
+
+def test_ws_reloads_when_sha_unknown_after_reconnect():
+    """ws.js must reload the page when _lastSha is null after reconnect (PyWebView loses JS state).
+
+    Previously the guard was: `previouslyConnected && this._lastSha && d.sha && d.sha !== this._lastSha`
+    which silently skipped the reload when _lastSha was null.
+    Now: any reconnect with previouslyConnected=true where SHA is unknown or changed triggers reload.
+    """
+    source = _read("web/modules/ws.js")
+    # New guard: reload if lastSha unknown OR sha changed
+    assert "!this._lastSha || this._lastSha !== newSha" in source, (
+        "_refreshStateAfterOpen must reload when _lastSha is null or SHA changed"
+    )
+    # Must still be guarded by previouslyConnected to avoid spurious reload on first connect
+    assert "previouslyConnected && newSha" in source, (
+        "Reload must only fire when previouslyConnected=true and server returns a non-empty SHA"
+    )

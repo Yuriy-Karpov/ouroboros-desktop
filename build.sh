@@ -1,14 +1,15 @@
 #!/bin/bash
 set -e
 
-# Ad-hoc build for local use (no Developer ID, no notarization).
+SIGN_IDENTITY="Developer ID Application: Ian Mironov (WHY6PAKA5V)"
+NOTARYTOOL_PROFILE="ouroboros-notarize"
+ENTITLEMENTS="entitlements.plist"
 
 APP_PATH="dist/Ouroboros.app"
-VERSION=$(cat VERSION | tr -d '[:space:]')
-DMG_NAME="Ouroboros-${VERSION}-macos.dmg"
+DMG_NAME="Ouroboros-$(cat VERSION | tr -d '[:space:]').dmg"
 DMG_PATH="dist/$DMG_NAME"
 
-echo "=== Building Ouroboros.app (v${VERSION}) ==="
+echo "=== Building Ouroboros.app ==="
 
 if [ ! -f "python-standalone/bin/python3" ]; then
     echo "ERROR: python-standalone/ not found."
@@ -46,24 +47,38 @@ PY
 
 rm -rf build dist
 
-export PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller-cache"
-mkdir -p "$PYINSTALLER_CONFIG_DIR"
-
 echo "--- Running PyInstaller ---"
 python3 -m PyInstaller Ouroboros.spec --clean --noconfirm
 
 echo ""
-echo "=== Signing Ouroboros.app (ad-hoc) ==="
-codesign --force --deep --sign - "$APP_PATH"
+echo "=== Signing Ouroboros.app ==="
+
+echo "--- Finding and signing all Mach-O binaries ---"
+find "$APP_PATH" -type f | while read -r f; do
+    if file "$f" | grep -q "Mach-O"; then
+        codesign -s "$SIGN_IDENTITY" --timestamp --force --options runtime \
+            --entitlements "$ENTITLEMENTS" "$f" 2>&1 || true
+    fi
+done
+echo "Signed embedded binaries"
+
+echo "--- Signing the app bundle ---"
+codesign -s "$SIGN_IDENTITY" --timestamp --force --options runtime \
+    --entitlements "$ENTITLEMENTS" "$APP_PATH"
+
+echo "--- Verifying signature ---"
+codesign -dvv "$APP_PATH"
+codesign --verify --strict "$APP_PATH"
+echo "Signature OK"
 
 echo ""
 echo "=== Creating DMG ==="
 hdiutil create -volname Ouroboros -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
 
+codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
+
 echo ""
 echo "=== Done ==="
-echo "App: $APP_PATH"
-echo "DMG: $DMG_PATH"
-echo ""
-echo "To install: open $DMG_PATH, drag Ouroboros to Desktop/Applications."
-echo "First launch: right-click -> Open (Gatekeeper bypass for ad-hoc signed apps)."
+echo "Signed app: $APP_PATH"
+echo "Signed DMG: $DMG_PATH"
+echo "(Not notarized — users need right-click → Open on first launch)"

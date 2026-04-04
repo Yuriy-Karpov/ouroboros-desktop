@@ -173,7 +173,7 @@ def generate_reflection(
             messages=[{"role": "user", "content": prompt}],
             model=light_model,
             reasoning_effort="low",
-            max_tokens=512,
+            max_tokens=4096,
         )
         reflection_text = (resp_msg.get("content") or "").strip()
     except Exception as e:
@@ -284,7 +284,7 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
         messages=[{"role": "user", "content": prompt}],
         model=light_model,
         reasoning_effort="low",
-        max_tokens=1024,
+        max_tokens=4096,
     )
     updated = (resp_msg.get("content") or "").strip()
     if not updated or "|" not in updated:

@@ -1,4 +1,4 @@
-# Ouroboros v4.10.2 — Architecture & Reference
+# Ouroboros v4.11.8 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -47,7 +47,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── local_model.py       ← Local LLM lifecycle (llama-cpp-python)
       ├── local_model_api.py   ← Local model HTTP endpoints
       ├── local_model_autostart.py ← Local model startup helper
-      ├── review.py            ← Code collection, complexity metrics, full-codebase review
+      ├── deep_self_review.py   ← Deep self-review: full git-tracked pack + memory → 1M-context model
+      ├── review.py            ← Code collection, complexity metrics, pre-commit review
       ├── review_state.py      ← Durable advisory pre-review state (advisory_review.json)
       ├── onboarding_wizard.py ← Shared desktop/web onboarding bootstrap + validation
       ├── owner_inject.py      ← Per-task user message mailbox (compat module name)
@@ -117,6 +118,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
 │   │   ├── identity_journal.jsonl    ← Identity update journal
 │   │   ├── scratchpad_journal.jsonl  ← Scratchpad block eviction journal
 │   │   ├── knowledge_journal.jsonl   ← Knowledge write journal
+│   │   ├── deep_review.md            ← Last deep self-review report (written by deep_self_review task)
 │   │   ├── registry.md              ← Source-of-truth awareness map (what data the agent has vs doesn't have)
 │   │   └── owner_mailbox/           ← Per-task user message files (compat path name)
 │   ├── logs/
@@ -156,9 +158,8 @@ Shown when `settings.json` does not contain any supported remote provider key an
 - Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, or local-model-source settings skip the wizard automatically.
 - The wizard is shared between desktop and web: one HTML/CSS/JS onboarding flow is rendered directly in pywebview for desktop and injected into a blocking web overlay for Docker/browser runs.
 - The wizard is multi-step and provider-aware: it starts with a single access step that accepts multiple remote keys plus optional local-model setup, then shows visible model defaults, a dedicated review-mode step, a dedicated budget step, and the final summary before save.
-- When an Anthropic key is present, onboarding shows an optional `Install Claude Code CLI` CTA plus `Skip for now`.
-  The copy is explicitly about the CLI, not the SDK.
-- Desktop first-run uses the same onboarding bundle and talks to Claude CLI install/status through `pywebview` bridge methods.
+- When an Anthropic key is present, onboarding shows an optional `Install Claude Agent SDK` CTA plus `Skip for now`.
+- Desktop first-run uses the same onboarding bundle and talks to Claude SDK install/status through `pywebview` bridge methods.
   Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install`.
 - The wizard blocks progression if nothing runnable is configured.
 - When OpenRouter is absent and official OpenAI is the only configured remote runtime, untouched default model values are auto-remapped to `openai::gpt-5.4` / `openai::gpt-5.4-mini` so first-run startup does not strand the app on OpenRouter-only defaults.
@@ -200,11 +201,11 @@ Navigation is a left sidebar with 7 pages (Chat, Files, Logs, Costs, Evolution, 
 
 - **Status badge** (top-right): "Online" (green) / "Thinking..." / "Working..." (amber pulse) / "Reconnecting..." (red).
   Driven by WebSocket connection state, typing events, and live task state.
-- **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic` — the canonical location for runtime controls.
+- **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic` — the canonical location for runtime controls. The chat header is a floating transparent overlay (`position: absolute`, gradient fade) so messages scroll beneath it.
 - **Budget pill**: compact amber pill in the header showing `$spent / $limit` with a mini progress bar, updated from `/api/state` polling every 3 seconds.
-- **Message input**: textarea + send button. Shift+Enter for newline, Enter to send.
+- **Message input**: textarea with inline "Send" text button (accent-colored, right-aligned inside the input field). Shift+Enter for newline, Enter to send.
 - **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea.
-- **Messages**: user bubbles (right, blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown.
+- **Messages**: user bubbles (right, steel-blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown. Live task card uses crimson accent glass matching the assistant palette.
 - **Multi-user visibility**: user messages are now session-aware. The current browser session stays labeled as `You`; other Web UI sessions render as `WebUI (<session>)`; Telegram-origin messages render with their Telegram sender label.
 - **Timestamps**: smart relative formatting (today: "HH:MM", yesterday: "Yesterday, HH:MM", older: "Mon DD, HH:MM"). Shown on hover.
 - **Live task card**: reasoning/progress/tool chatter no longer spams the transcript as many assistant bubbles.
@@ -250,8 +251,8 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Provider cards**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, plus optional Network Password. Cards are collapsible and use masked-secret inputs with show/hide toggles.
 - **API Keys**: OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, Telegram Bot Token, GitHub Token, and Network Password.
   Keys are displayed as masked values (e.g., `sk-or-v1...`), can be explicitly cleared, and are only overwritten on save if the user enters a new value (not containing `...`).
-- **Claude Code CLI CTA**: when Anthropic is configured, the Anthropic card exposes `Install Claude Code CLI` plus live install/status text.
-  This installs the `claude` binary, not the SDK.
+- **Claude Agent SDK CTA**: when Anthropic is configured, the Anthropic card exposes `Install Claude Agent SDK` plus live install/status text.
+  This installs the `claude-agent-sdk` Python package used for delegated code editing and advisory review.
 - **Models**: Main, Code, Light, Fallback.
 - **Model catalog**: optional `Refresh Model Catalog` action calls `/api/model-catalog`. Failures are non-fatal and surfaced as inline warnings.
 - **Model pickers**: searchable provider-aware pickers replace legacy raw dropdowns for remote models.
@@ -335,7 +336,7 @@ Two sub-tabs ("Chart" and "Versions"), switchable via pill buttons in the page h
 
 ### 3.9 About
 
-- Logo (large, centered)
+- Logo (large, centered — the only location for the logo image; sidebar shows only a compact version label above the About button)
 - "A self-creating AI agent" description
 - Created by Anton Razzhigaev & Andrew Kaznacheev
 - Links: @abstractDL (Telegram), GitHub repo
@@ -365,8 +366,8 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | POST | `/api/files/upload` | Multipart upload into current Files directory |
 | GET | `/api/settings` | Current settings with masked API keys |
 | POST | `/api/settings` | Update settings (partial update, only provided keys) |
-| GET | `/api/claude-code/status` | Claude Code CLI installed/busy/progress status |
-| POST | `/api/claude-code/install` | Run the shared native-first Claude Code CLI install flow |
+| GET | `/api/claude-code/status` | Claude Agent SDK installed/version info |
+| POST | `/api/claude-code/install` | Install `claude-agent-sdk` into the current Python interpreter |
 | GET | `/api/model-catalog` | Optional provider model catalog (OpenRouter/OpenAI/compatible/Cloud.ru) |
 | POST | `/api/command` | Send a slash command `{cmd: "/status"}` |
 | POST | `/api/reset` | Delete all runtime data, restart for fresh onboarding |
@@ -420,7 +421,7 @@ Each iteration (0.5s sleep):
 |---------|--------|
 | `/panic` | Kill workers (force), request restart exit |
 | `/restart` | Save state, safe_restart (git), kill workers, exit 42 |
-| `/review` | Queue a review task |
+| `/review` | Queue a deep self-review (1M-context single-pass Constitution review) |
 | `/evolve on\|off` | Toggle evolution mode in state, prune evolution tasks if off |
 | `/bg start\|stop\|status` | Control background consciousness |
 | `/status` | Send status text with budget breakdown |
@@ -472,10 +473,10 @@ backward compatibility but is not the runtime authority.
 - Multi-layer safety: hardcoded sandbox (registry.py) → deterministic whitelist → LLM safety supervisor
 - Tool results use explicit per-tool caps with visible truncation markers (`repo_read`/`data_read`/`knowledge_read`/`run_shell`: 80k, default: 15k chars). Cognitive reads (`memory/*`, prompts, BIBLE/docs, commit/review outputs) are exempt from silent clipping.
 - `run_shell` now treats non-zero exits as explicit failed tool outcomes and records exit/signal metadata in the tool trace.
-- `run_shell` rejects `cmd` as a plain string with a clear error. The `cmd` parameter must always be a JSON array of strings.
+- `run_shell` recovers `cmd` passed as a string via a three-step cascade: `json.loads` (JSON array strings) → `ast.literal_eval` (Python literal lists) → `shlex.split` (plain shell strings). Only truly unrecoverable input returns `SHELL_ARG_ERROR`. The `cmd` parameter schema remains `type: array` (intended contract), but the runtime gracefully handles LLM misformatting.
 - `set_tool_timeout` persists `OUROBOROS_TOOL_TIMEOUT_SEC` to `settings.json` and hot-applies it without restart.
-- `ensure_claude_cli`, `/api/claude-code/*`, and desktop onboarding all reuse the same Claude Code install/status helpers.
-- Claude Code install remains native-first (`install.sh` → Homebrew on macOS → npm fallback) and `claude_code_edit` still uses the installed CLI afterward.
+- `/api/claude-code/status` returns SDK version info; `/api/claude-code/install` installs `claude-agent-sdk` via pip.
+- Desktop onboarding CTA installs the `claude-agent-sdk` Python package (not the `claude` CLI binary).
 - **`seal_task_transcript`**: called after compaction and before each `call_llm_with_retry`. Marks one stable tool-result boundary with `cache_control: ephemeral` to improve Anthropic prompt cache hits. Reverts all previous seals first so compaction always sees plain strings. Provider handling: OpenRouter (Anthropic models) passes list content blocks through as-is; direct Anthropic path preserves list content for `tool_result` (Anthropic API supports content blocks there); `_strip_cache_control` in `llm.py` now flattens tool-role list content back to a plain string for OpenAI, OpenAI-compatible, Cloud.ru, and local providers.
 - **Reviewed mutative tool timeout handling** (v4.9.0): `repo_commit` and `repo_write_commit`
   are classified as `REVIEWED_MUTATIVE_TOOLS`. When they exceed the configured tool timeout,
@@ -488,7 +489,7 @@ backward compatibility but is not the runtime authority.
 
 - **Pure transport adapter** for delegated code editing and advisory review
 - Wraps the `claude-agent-sdk` Python package (`ClaudeSDKClient` with async message stream)
-- Raises `ImportError` at module level when SDK is absent — callers fall back to CLI
+- Raises `ImportError` at module level when SDK is absent — callers return an install hint; there is no CLI subprocess fallback
 - **Two execution modes:**
   - **Edit mode** (`run_edit`): `allowed_tools=["Read","Edit","Grep","Glob"]`,
     `disallowed_tools=["Bash","MultiEdit"]`, `permission_mode="acceptEdits"`,
@@ -503,8 +504,9 @@ backward compatibility but is not the runtime authority.
 - **Orchestration in callers**: project context injection (BIBLE.md, DEVELOPMENT.md,
   CHECKLISTS.md, ARCHITECTURE.md), git stat, and post-edit validation live in
   `ouroboros/tools/shell.py` helpers — the gateway stays a pure transport boundary
-- **Fallback**: if `claude-agent-sdk` is not installed, `claude_code_edit` and
-  `advisory_pre_review` fall back to the legacy CLI subprocess path
+- **SDK-only**: `claude-agent-sdk` is the sole transport for `claude_code_edit` and
+  `advisory_pre_review`. There is no CLI subprocess fallback. If the SDK is absent,
+  both tools return a clear install hint: `pip install 'ouroboros[claude-sdk]'`
 - **Defense-in-depth**: post-edit revert in `registry.py` remains as secondary safety layer
 - Safety-critical files mirror: `BIBLE.md`, `ouroboros/safety.py`,
   `ouroboros/tools/registry.py`, `prompts/SAFETY.md`
@@ -523,8 +525,12 @@ backward compatibility but is not the runtime authority.
   critical findings as hard gates; `Advisory` mode surfaces the same findings
   as warnings and lets the commit continue. Review history carried across
   blocking iterations. Quorum: at least 2 of 3 reviewers must succeed in
-  blocking mode. Deterministic preflight catches VERSION/README mismatches
-  before the expensive LLM call.
+  blocking mode. Deterministic preflight (uses `git diff --cached --name-status`;
+  renames expand to `D src + A dst`; copies expand to `A dst` only; deleted files excluded
+  from companion-file presence checks) catches VERSION/README mismatches; blocks when any
+  `.py` file under `ouroboros/` or `supervisor/` is added, modified, deleted, or renamed
+  but no `tests/` file is staged; blocks when a new `.py` appears under those dirs but
+  `docs/ARCHITECTURE.md` is not staged as a non-deleted file — all before the expensive LLM call.
 - **`pull_from_remote`**: fast-forward only pull from origin
 - **`restore_to_head`**: discard uncommitted changes (review-exempt)
 - **`revert_commit`**: create a revert commit for a specific SHA (review-exempt)
@@ -627,15 +633,29 @@ The commit pipeline runs three review stages before creating a git commit:
 3. **Blocking scope review** (`tools/scope_review.py`)
 
 Shared helpers live in `tools/review_helpers.py`: checklist section loader,
-touched-file pack builder, broader repo pack builder, goal/scope resolution.
+touched-file pack builder, HEAD snapshot section builder, broader repo pack builder, goal/scope resolution.
+
+All LLM calls in the review stack (triad `_query_model`, scope `run_scope_review`) route through
+the shared `LLMClient` from `ouroboros/llm.py` — the same layer used by the main agent. This ensures
+cost events flow through the standard `llm_usage` audit pipeline, budget is tracked uniformly, and
+errors surface via the same observability path.
 
 #### Advisory pre-review gate
 
-- **`advisory_pre_review`** tool: runs a read-only Claude Code CLI review of the current
+- **`advisory_pre_review`** tool: runs a read-only Claude Agent SDK review of the current
   worktree BEFORE `repo_commit`. Permitted tools: `Read`, `Grep`, `Glob` only (no Edit/Bash).
   Model pinned to `opus`. Prompt includes only the "Repo Commit Checklist" section from
-  CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, touched-file pack,
-  goal/scope sections, git status, and worktree diff.
+  CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, ARCHITECTURE.md,
+  touched-file pack, goal/scope sections, git status, and worktree diff.
+- **Blocking history injection** (v4.10.6): when the last `repo_commit` was blocked with
+  `critical_findings`, `scope_blocked`, or `parse_failure`, the advisory prompt includes a
+  "Previous blocking review findings" section extracted from `CommitAttemptRecord.block_details`.
+  This ensures advisory catches the same issues that blocking reviewers found, eliminating
+  the loop where advisory says PASS but blocking says FAIL.
+- **Prompt strictness alignment** (v4.10.6): advisory prompt uses the same severity language
+  as the blocking triad review — explicit instructions to read all changed files in full,
+  check every checklist item, report all issues found, and treat bible_compliance/security at
+  the same threshold as blocking reviewers.
 - **`review_status`** tool: read-only diagnostic showing the last 5 advisory runs AND the
   last commit attempt state (status, block reason, actionable guidance).
 - **`review_state.py`**: durable state. State file: `data/state/advisory_review.json`.
@@ -677,19 +697,28 @@ touched-file pack builder, broader repo pack builder, goal/scope resolution.
 - **Prompt includes**: "Intent / Scope Review Checklist" from CHECKLISTS.md, touched-file
   pack, broader repo pack (all tracked files minus touched), goal/scope sections,
   DEVELOPMENT.md, staged diff, review history.
+- **Pre-change (HEAD) snapshots** (best-effort): `build_head_snapshot_section` in `review_helpers.py`
+  fetches the HEAD version of each touched file via `git show HEAD:<path>`. New files get a "File is new"
+  note; deleted files and renamed files show the old content from the old path; modified files show
+  the before-state. When a snapshot cannot be fetched (file too large, git timeout, git error), an
+  explicit omission note is included in the prompt. This enriches scope reviewer context but is not
+  a hard gate — scope review proceeds even when individual snapshots are unavailable.
 - **Broader repo pack**: best-effort, up to 500K chars. Excludes touched files.
 - Runs AFTER triad review, BEFORE `git commit`.
 - Respects review enforcement setting (blocking/advisory).
 
-### Deep review (review.py)
+### Deep self-review (deep_self_review.py)
 
-- As of v3.16.1, the review task includes an explicit Constitution (BIBLE.md) compliance mandate as the highest-priority review criterion.
-- Full-codebase review for 1M-context models: all text files loaded without truncation
-- Dry-run size estimation before loading (avoids OOM on huge repos)
-- Fallback to chunked previews if codebase exceeds 600K token budget
-- Security: skips sensitive files (.env, .pem, credentials.json, etc.)
-- Per-file cap: 1MB
-- Multi-model review now uses the shared async `LLMClient` OpenRouter path instead of raw one-off HTTP calls, so provider routing, Anthropic parameter requirements, usage normalization, and cache metadata are aligned with the rest of the runtime.
+- Replaces the legacy `type="review"` task path with a dedicated deep review system.
+- **Separate task type** (`deep_self_review`): bypasses the tool loop entirely — one direct LLM call.
+- **Model**: `openai/gpt-5.4-pro` via OpenRouter (primary), or `openai::gpt-5.4-pro` via direct OpenAI (fallback). If neither key is configured, the review tool returns an availability error.
+- **Review pack**: all git-tracked files (via `git ls-files`) + a whitelist of core memory files (`identity.md`, `scratchpad.md`, `registry.md`, `WORLD.md`, `knowledge/index-full.md`, `knowledge/patterns.md`).
+- **No chunking, no silent truncation**. Files > 1MB are skipped with a note. If the total pack exceeds ~900K tokens, an explicit error is returned.
+- **System prompt**: Constitution-first review mandate (BIBLE.md as absolute reference).
+- **Invariants**: reasoning effort `high`, max_tokens `100000`, no tools, 1 round, 60-minute hard timeout.
+- **Output**: full report to chat + saved to `memory/deep_review.md`.
+- **Queue semantics**: `request_deep_self_review` tool → `deep_self_review_request` event → `queue_deep_self_review_task` → supervisor assigns to worker → `handle_task` branches on `task_type == "deep_self_review"`.
+- **Slash command**: `/review` triggers a deep self-review.
 
 ---
 
@@ -715,7 +744,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OPENAI_COMPATIBLE_BASE_URL | "" | Optional. Dedicated OpenAI-compatible provider base URL |
 | CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Optional. Cloud.ru Foundation Models provider key |
 | CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru provider base URL |
-| ANTHROPIC_API_KEY | "" | Optional. For Claude Code CLI |
+| ANTHROPIC_API_KEY | "" | Optional. Required for Claude Agent SDK (`claude_code_edit`, `advisory_pre_review`) |
 | TELEGRAM_BOT_TOKEN | "" | Optional. Enables Telegram bridge polling/sending |
 | TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
@@ -723,7 +752,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
 | OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |
 | OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
-| CLAUDE_CODE_MODEL | opus | Anthropic model for Claude Code CLI (sonnet, opus, or full name) |
+| CLAUDE_CODE_MODEL | opus | Anthropic model for Claude Agent SDK (sonnet, opus, or full name) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
@@ -806,7 +835,7 @@ The panic sequence (in `server.py:_execute_panic_stop()`):
 3. Write ~/Ouroboros/data/state/panic_stop.flag
 4. LocalModelManager.stop_server()   ← kill local model server if running
 5. kill_all_tracked_subprocesses()   ← os.killpg(SIGKILL) every tracked
-   │                                    subprocess process group (claude CLI,
+   │                                    subprocess process group (SDK agent,
    │                                    shell commands, and ALL their children)
 6. kill_workers(force=True)          ← SIGTERM+SIGKILL all multiprocessing workers
 7. os._exit(99)                      ← immediate hard exit, kills daemon threads
@@ -831,14 +860,14 @@ On next manual launch:
 
 ### 9.3 Subprocess Process Group Management
 
-All subprocesses spawned by agent tools (`run_shell`, `ensure_claude_cli`, `claude_code_edit`)
+All subprocesses spawned by agent tools (`run_shell`, `claude_code_edit`)
 use `start_new_session=True` (via `_tracked_subprocess_run()` in
 `ouroboros/tools/shell.py`). This creates a separate process group for each
 subprocess and all its children.
 
 On panic or timeout, the entire process tree is killed via
 `os.killpg(pgid, SIGKILL)` — no orphans possible, even for deeply nested
-subprocess trees (e.g., Claude CLI spawning node processes).
+subprocess trees (e.g., SDK agent processes spawned during `claude_code_edit`).
 
 Active subprocesses are tracked in a thread-safe global set and cleaned up
 automatically on completion or via `kill_all_tracked_subprocesses()` on panic.

@@ -25,12 +25,13 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
     drive_logs = tmp_path / "logs"
     drive_logs.mkdir(parents=True)
 
+    # Use rounds > 1 so the task is non-trivial and the LLM summary path is taken
     pipeline._run_task_summary(
         env=None,
         llm=FakeLlm(),
         task={"id": "task-123", "type": "task", "text": "Reply with exactly OK."},
-        usage={"rounds": 1, "cost": 0.01},
-        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        usage={"rounds": 3, "cost": 0.01},
+        llm_trace={"tool_calls": [{"tool": "repo_read", "args": {}}], "reasoning_notes": []},
         drive_logs=drive_logs,
     )
 
@@ -40,6 +41,9 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
     payload = json.loads(chat_lines[0])
     assert payload["type"] == "task_summary"
     assert payload["text"] == "direct summary ok"
+    # Non-trivial task metadata is persisted
+    assert payload["tool_calls"] == 1
+    assert payload["rounds"] == 3
 
 
 def test_task_summary_keeps_openrouter_model_when_key_present(monkeypatch):

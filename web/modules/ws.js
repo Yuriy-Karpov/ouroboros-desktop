@@ -100,11 +100,17 @@ export class WS {
 
     _refreshStateAfterOpen(previouslyConnected) {
         fetch('/api/state', { cache: 'no-store' }).then(r => r.json()).then(d => {
-            if (previouslyConnected && this._lastSha && d.sha && d.sha !== this._lastSha) {
-                this._refreshWindow('sha-change');
-                return;
+            const newSha = d.sha || '';
+            if (previouslyConnected && newSha) {
+                if (!this._lastSha || this._lastSha !== newSha) {
+                    // SHA changed (or was unknown before reconnect) — reload to pick up
+                    // new JS/CSS. This covers the PyWebView case where the window stays
+                    // open across server restarts but the JS state is lost.
+                    this._refreshWindow('sha-change');
+                    return;
+                }
             }
-            this._lastSha = d.sha || this._lastSha;
+            this._lastSha = newSha || this._lastSha;
         }).catch(() => {
             // Keep the socket usable even if the HTTP state probe fails once.
         });

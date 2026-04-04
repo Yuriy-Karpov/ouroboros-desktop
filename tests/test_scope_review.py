@@ -140,7 +140,10 @@ class TestBroaderRepoPack:
         (tmp_path / "a.py").write_text("AAA", encoding="utf-8")
         (tmp_path / "b.py").write_text("BBB", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=test@ouroboros", "-c", "user.name=TestBot", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
         mod = _get_module("ouroboros.tools.review_helpers")
         pack = mod.build_broader_repo_pack(tmp_path, exclude_paths={"a.py"})
         assert "BBB" in pack
@@ -154,24 +157,37 @@ class TestBroaderRepoPack:
 class TestScopeFailClosed:
     """Runtime tests for fail-closed scope review behavior."""
 
-    def test_build_scope_prompt_blocks_on_empty_touched(self, tmp_path):
-        """_build_scope_prompt returns '__empty__' when no touched files are readable."""
+    def test_build_scope_prompt_deletion_not_blocked(self, tmp_path):
+        """_build_scope_prompt must NOT block on deletion-only diffs.
+        
+        Deletion-only diffs are valid: the HEAD snapshot shows old content,
+        and the current_files_section has a deletion placeholder.
+        This test verifies the correct new behavior after the Phase 3 fix.
+        """
         import subprocess
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
         (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n")
         (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
-        # Stage a file then delete it so it's in git status but unreadable
-        (tmp_path / "gone.py").write_text("x")
+        # Commit a file, then stage its deletion
+        (tmp_path / "gone.py").write_text("CONTENT_BEFORE_DELETION")
         subprocess.run(["git", "add", "gone.py"], cwd=str(tmp_path), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T",
+             "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
         (tmp_path / "gone.py").unlink()
         subprocess.run(["git", "add", "gone.py"], cwd=str(tmp_path), capture_output=True)
 
         mod = _get_module("ouroboros.tools.scope_review")
         prompt, omitted = mod._build_scope_prompt(tmp_path, "test msg")
-        # With no readable touched files, omitted should signal empty
-        assert omitted is not None
+        # Deletion-only diffs must NOT block — omitted should be None
+        assert omitted is None
+        # HEAD snapshot must show old content
+        assert "CONTENT_BEFORE_DELETION" in prompt
+        # Current files section must note the deletion
+        assert "DELETED" in prompt
 
     def test_build_scope_prompt_blocks_on_partial_omission(self, tmp_path):
         """_build_scope_prompt returns omitted filenames when some files are binary."""
@@ -183,7 +199,10 @@ class TestScopeFailClosed:
         (tmp_path / "good.py").write_text("print('ok')")
         (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n" + b"\x00" * 100)
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=test@ouroboros", "-c", "user.name=TestBot", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
         # Stage both files
         (tmp_path / "good.py").write_text("print('v2')")
         (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n" + b"\x00" * 200)
@@ -203,7 +222,10 @@ class TestScopeFailClosed:
         (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
         (tmp_path / "a.py").write_text("aaa")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=test@ouroboros", "-c", "user.name=TestBot", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
         (tmp_path / "a.py").write_text("bbb")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
 
@@ -226,7 +248,10 @@ class TestRunScopeReviewFailClosed:
         (tmp_path / "ok.py").write_text("print(1)")
         (tmp_path / "bin.png").write_bytes(b"\x89PNG" + b"\x00" * 200)
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=test@ouroboros", "-c", "user.name=TestBot", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
         (tmp_path / "ok.py").write_text("print(2)")
         (tmp_path / "bin.png").write_bytes(b"\x89PNG" + b"\x00" * 300)
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
@@ -244,26 +269,36 @@ class TestRunScopeReviewFailClosed:
         assert "SCOPE_REVIEW_BLOCKED" in result
         assert "bin.png" in result
 
-    def test_run_scope_review_blocks_on_empty_touched(self, tmp_path):
-        """run_scope_review() must block when no touched files are readable."""
+    def test_build_scope_prompt_deletion_not_blocked_e2e(self, tmp_path):
+        """_build_scope_prompt must NOT signal empty for deletion-only diffs.
+        
+        After the Phase 3 fix, deletion-only commits reach the scope reviewer.
+        The prompt-builder must return omitted=None (not '__empty__') so
+        run_scope_review proceeds to the LLM instead of short-circuiting.
+        """
         import subprocess
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
         (tmp_path / "docs" / "CHECKLISTS.md").write_text("## Intent / Scope Review Checklist\n\nplaceholder\n")
         (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
-        (tmp_path / "gone.py").write_text("x")
+        (tmp_path / "gone.py").write_text("CONTENT_X")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T",
+             "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
         (tmp_path / "gone.py").unlink()
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
 
-        class MockCtx:
-            repo_dir = str(tmp_path)
-        ctx = MockCtx()
-
         mod = _get_module("ouroboros.tools.scope_review")
-        result = mod.run_scope_review(ctx, "test commit")
-        assert "SCOPE_REVIEW_BLOCKED" in result
+        prompt, omitted = mod._build_scope_prompt(tmp_path, "delete gone.py")
+        # Deletion-only must NOT trigger fail-closed (omitted=None means "proceed to LLM")
+        assert omitted is None, f"Expected omitted=None for deletion-only, got: {omitted!r}"
+        # HEAD snapshot must show old content
+        assert "CONTENT_X" in prompt
+        # Current files section must note the deletion
+        assert "DELETED" in prompt
 
 
 class TestScopeReviewModule:
@@ -445,6 +480,251 @@ class TestGitWiring:
         git = _get_module("ouroboros.tools.git")
         sig = inspect.signature(git._check_advisory_freshness)
         assert "paths" in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# HEAD snapshot section tests (Phase 3, item 5)
+# ---------------------------------------------------------------------------
+
+class TestHeadSnapshotSection:
+    def _git_commit(self, cwd, message, allow_empty=False):
+        """Helper to commit with identity configured for CI/clean machines."""
+        cmd = ["git", "-c", "user.email=test@ouroboros", "-c", "user.name=TestBot", "commit", "-m", message]
+        if allow_empty:
+            cmd.append("--allow-empty")
+        subprocess.run(cmd, cwd=str(cwd), capture_output=True)
+
+    def test_new_file_shows_no_head_snapshot(self, tmp_path):
+        """New files (not in HEAD) should note 'File is new — no HEAD snapshot'."""
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        self._git_commit(tmp_path, "empty init", allow_empty=True)
+        # Add a new file (not committed yet)
+        (tmp_path / "newfile.py").write_text("print('new')", encoding="utf-8")
+
+        mod = _get_module("ouroboros.tools.review_helpers")
+        result = mod.build_head_snapshot_section(tmp_path, ["newfile.py"])
+        assert "File is new" in result
+        assert "no HEAD snapshot" in result
+
+    def test_existing_file_shows_old_content(self, tmp_path):
+        """Modified files should show the HEAD (old) content in the snapshot."""
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "existing.py").write_text("OLD_CONTENT_V1", encoding="utf-8")
+        subprocess.run(["git", "add", "existing.py"], cwd=str(tmp_path), capture_output=True)
+        self._git_commit(tmp_path, "init")
+        # Modify the file
+        (tmp_path / "existing.py").write_text("NEW_CONTENT_V2", encoding="utf-8")
+
+        mod = _get_module("ouroboros.tools.review_helpers")
+        result = mod.build_head_snapshot_section(tmp_path, ["existing.py"])
+        assert "OLD_CONTENT_V1" in result
+        assert "NEW_CONTENT_V2" not in result  # HEAD snapshot, not current
+
+    def test_deleted_file_shows_old_content(self, tmp_path):
+        """Deleted files should show their old HEAD content."""
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "deleted.py").write_text("CONTENT_BEFORE_DELETE", encoding="utf-8")
+        subprocess.run(["git", "add", "deleted.py"], cwd=str(tmp_path), capture_output=True)
+        self._git_commit(tmp_path, "init")
+        (tmp_path / "deleted.py").unlink()
+
+        mod = _get_module("ouroboros.tools.review_helpers")
+        result = mod.build_head_snapshot_section(tmp_path, ["deleted.py"])
+        assert "CONTENT_BEFORE_DELETE" in result
+
+    def test_new_file_not_confused_with_git_error(self, tmp_path, monkeypatch):
+        """git show non-zero for a new file must say 'File is new', not 'error'."""
+        import subprocess as sp_module
+
+        class FakeNewFileResult:
+            returncode = 128
+            stdout = ""
+            stderr = "fatal: path 'newfile.py' does not exist in 'HEAD'"
+
+        original_run = sp_module.run
+        def mock_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and "show" in cmd:
+                return FakeNewFileResult()
+            return original_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(sp_module, "run", mock_run)
+
+        mod = _get_module("ouroboros.tools.review_helpers")
+        result = mod.build_head_snapshot_section(tmp_path, ["newfile.py"])
+        assert "File is new" in result
+        assert "no HEAD snapshot" in result
+        # Must NOT render as a git error
+        assert "HEAD snapshot error" not in result
+
+    def test_real_git_error_not_mislabeled_as_new_file(self, tmp_path, monkeypatch):
+        """Real git failures (bad object, corrupt repo) must render as 'HEAD snapshot error',
+        not silently as 'File is new — no HEAD snapshot'.
+        """
+        import subprocess as sp_module
+
+        class FakeGitErrorResult:
+            returncode = 128
+            stdout = ""
+            stderr = "fatal: bad object HEAD"
+
+        original_run = sp_module.run
+        def mock_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and "show" in cmd:
+                return FakeGitErrorResult()
+            return original_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(sp_module, "run", mock_run)
+
+        mod = _get_module("ouroboros.tools.review_helpers")
+        result = mod.build_head_snapshot_section(tmp_path, ["existing.py"])
+        # Must render as an error, not as a new file
+        assert "HEAD snapshot error" in result
+        assert "File is new" not in result
+
+    def test_binary_file_omitted_cleanly(self, tmp_path):
+        """Binary files (e.g. .png) must produce an omission note, not garbage bytes."""
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00\xff" * 100)
+        subprocess.run(["git", "add", "logo.png"], cwd=str(tmp_path), capture_output=True)
+        self._git_commit(tmp_path, "init")
+        (tmp_path / "logo.png").unlink()
+
+        mod = _get_module("ouroboros.tools.review_helpers")
+        result = mod.build_head_snapshot_section(tmp_path, ["logo.png"])
+        # Must produce an omission note, not binary garbage
+        assert "omitted" in result.lower() or "binary" in result.lower()
+        # Must not contain raw binary bytes
+        assert "\x00" not in result
+        assert "\xff" not in result
+
+    def test_empty_paths_returns_placeholder(self, tmp_path):
+        """Empty paths list returns a placeholder."""
+        mod = _get_module("ouroboros.tools.review_helpers")
+        result = mod.build_head_snapshot_section(tmp_path, [])
+        assert "no touched files" in result
+
+    def test_scope_prompt_includes_head_snapshots_section(self, tmp_path):
+        """_build_scope_prompt must include the pre-change snapshots section."""
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n"
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
+        (tmp_path / "a.py").write_text("ORIGINAL", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        self._git_commit(tmp_path, "init")
+        (tmp_path / "a.py").write_text("MODIFIED", encoding="utf-8")
+        subprocess.run(["git", "add", "a.py"], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        prompt, _ = mod._build_scope_prompt(tmp_path, "test commit")
+        # HEAD snapshot section header must be present
+        assert "Pre-change snapshots" in prompt
+        # Old content must appear in HEAD snapshot section
+        assert "ORIGINAL" in prompt
+        # New content must appear in current files section
+        assert "MODIFIED" in prompt
+
+    def test_scope_prompt_head_snapshots_uses_helper(self):
+        """_build_scope_prompt must call build_head_snapshot_section."""
+        mod = _get_module("ouroboros.tools.scope_review")
+        source = inspect.getsource(mod._build_scope_prompt)
+        assert "build_head_snapshot_section" in source
+
+    def test_deletion_only_diff_not_blocked(self, tmp_path):
+        """Deletion-only diffs must reach scope reviewer, not be fail-closed."""
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T",
+             "commit", "--allow-empty", "-m", "empty init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n"
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
+        (tmp_path / "to_delete.py").write_text("CONTENT_TO_DELETE", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T",
+             "commit", "-m", "add file"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        # Stage a deletion
+        (tmp_path / "to_delete.py").unlink()
+        subprocess.run(["git", "add", "to_delete.py"], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        prompt, omitted = mod._build_scope_prompt(tmp_path, "delete to_delete.py")
+        # Must NOT be blocked (omitted should be None for deletion-only)
+        assert omitted is None
+        # HEAD snapshot must show old content
+        assert "CONTENT_TO_DELETE" in prompt
+        # Current files section must note the deletion
+        assert "DELETED" in prompt
+
+    def test_renamed_file_shows_old_head_content(self, tmp_path):
+        """Renamed files must show old HEAD content (from old path), not 'File is new'."""
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n"
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n")
+        (tmp_path / "old_name.py").write_text("ORIGINAL_RENAME_CONTENT", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T",
+             "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        # Rename the file
+        (tmp_path / "old_name.py").rename(tmp_path / "new_name.py")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        prompt, omitted = mod._build_scope_prompt(tmp_path, "rename old_name to new_name")
+        # Omission must be None — rename is handled correctly
+        assert omitted is None
+        # Old content must appear in HEAD snapshot (from old_name.py HEAD)
+        assert "ORIGINAL_RENAME_CONTENT" in prompt
+
+
+# ---------------------------------------------------------------------------
+# LLM routing validation (Phase 3, item 6)
+# ---------------------------------------------------------------------------
+
+class TestSharedLLMRouting:
+    def test_triad_review_uses_llm_client(self):
+        """Triad review (_query_model) must use LLMClient, not ad-hoc HTTP."""
+        mod = _get_module("ouroboros.tools.review")
+        source = inspect.getsource(mod._query_model)
+        assert "LLMClient" in source or "llm_client" in source.lower()
+        # Must NOT use requests or httpx directly
+        assert "requests.post" not in source
+        assert "httpx" not in source
+
+    def test_triad_emits_llm_usage_events(self):
+        """_emit_usage_event must write to event_queue or pending_events."""
+        mod = _get_module("ouroboros.tools.review")
+        source = inspect.getsource(mod._emit_usage_event)
+        assert "event_queue" in source or "pending_events" in source
+        assert "llm_usage" in source
+
+    def test_scope_review_uses_llm_client(self):
+        """Scope review must use LLMClient for its model call."""
+        mod = _get_module("ouroboros.tools.scope_review")
+        source = inspect.getsource(mod.run_scope_review)
+        assert "LLMClient" in source
+
+    def test_scope_review_emits_usage(self):
+        """Scope review must emit llm_usage event for cost tracking."""
+        mod = _get_module("ouroboros.tools.scope_review")
+        source = inspect.getsource(mod._emit_usage)
+        assert "llm_usage" in source
+        assert "event_queue" in source or "eq" in source
 
 
 # ---------------------------------------------------------------------------

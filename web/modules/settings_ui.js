@@ -171,10 +171,10 @@ export function renderSettingsPage() {
                             })}</div>
                             <div class="settings-inline-note">Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route models directly through Anthropic. Claude tooling still reuses this key.</div>
                             <div class="settings-toolbar" id="settings-claude-code-panel" hidden>
-                                <button type="button" class="settings-ghost-btn" id="btn-claude-code-install">Install Claude Code CLI</button>
-                                <span id="settings-claude-code-status" class="settings-inline-status">Claude Code CLI is not installed.</span>
+                                <button type="button" class="settings-ghost-btn" id="btn-claude-code-install">Install Claude Agent SDK</button>
+                                <span id="settings-claude-code-status" class="settings-inline-status">Claude Agent SDK is not installed.</span>
                             </div>
-                            <div class="settings-inline-note" id="settings-claude-code-copy" hidden>This installs the <code>claude</code> CLI, not the SDK.</div>
+                            <div class="settings-inline-note" id="settings-claude-code-copy" hidden>Installs the <code>claude-agent-sdk</code> Python package used for delegated code editing and advisory review.</div>
                         `,
                     })}
                     <div class="form-section compact">

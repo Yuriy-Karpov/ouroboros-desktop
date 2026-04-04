@@ -20,9 +20,11 @@
     --red: #ef4444;
     --red-dim: rgba(239, 68, 68, 0.15);
     --divider: rgba(255, 255, 255, 0.06);
-    --radius: 12px;
+    --radius-xs: 3px;
     --radius-sm: 8px;
+    --radius: 12px;
     --radius-lg: 16px;
+    --radius-xl: 20px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -49,60 +51,47 @@ body {
 #matrix-rain {
     position: fixed;
     top: 0;
-    left: 80px;
-    width: calc(100% - 80px);
+    left: 0;
+    width: 100%;
     height: 100%;
     opacity: 0.12;
     pointer-events: none;
     z-index: 0;
 }
 
-/* Navigation Rail */
+/* Navigation Rail — floating overlay */
 #nav-rail {
+    position: fixed;
+    left: 0;
+    top: 0;
+    height: 100vh;
     width: 80px;
     display: flex;
     flex-direction: column;
     align-items: center;
     padding: 12px 0;
     gap: 4px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
-    backdrop-filter: blur(20px);
+    background: transparent;
+    backdrop-filter: none;
     border-right: none;
     box-shadow: none;
-    flex-shrink: 0;
-    z-index: 2;
+    z-index: 10;
 }
 
 #nav-logo {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    padding: 8px 0 16px;
-}
-
-.logo-img {
-    width: 36px;
-    height: 36px;
-    border-radius: 8px;
-    object-fit: cover;
-    border: 2px solid transparent;
-    animation: logo-pulse 4s ease-in-out infinite;
-}
-
-@keyframes logo-pulse {
-    0%, 100% { border-color: transparent; }
-    50% { border-color: rgba(201, 53, 69, 0.45); }
+    display: none;
 }
 
 #nav-version {
     display: block;
-    max-width: 62px;
+    max-width: 64px;
     text-align: center;
-    line-height: 1.2;
+    line-height: 1.15;
     white-space: normal;
     font-size: 8px;
     color: var(--text-muted);
+    padding: 4px 0 8px;
+    opacity: 0.6;
 }
 
 .nav-btn {
@@ -112,8 +101,8 @@ body {
     gap: 4px;
     padding: 10px 6px;
     width: 64px;
-    border: 1px solid rgba(255, 255, 255, 0.04);
-    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(201, 53, 69, 0.08);
+    background: rgba(201, 53, 69, 0.04);
     backdrop-filter: blur(8px);
     color: var(--text-secondary);
     cursor: pointer;
@@ -143,11 +132,11 @@ body {
 }
 
 .nav-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.10);
+    background: rgba(201, 53, 69, 0.10);
+    border-color: rgba(201, 53, 69, 0.18);
     color: var(--text-primary);
     transform: scale(1.04);
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 2px 12px rgba(201, 53, 69, 0.08);
 }
 .nav-btn.active {
     background: rgba(201, 53, 69, 0.12);
@@ -162,18 +151,19 @@ body {
     display: none;
 }
 
-/* Main content */
+/* Main content — full width with left padding for floating nav */
 #content {
-    flex: 1;
+    width: 100%;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     min-width: 0;
     position: relative;
     z-index: 1;
+    padding-left: 84px;
 }
 
-.page { display: none; flex-direction: column; height: 100%; }
+.page { display: none; flex-direction: column; height: 100%; position: relative; }
 .page.active { display: flex; }
 
 .files-layout {
@@ -541,10 +531,10 @@ body {
     align-items: center;
     gap: 8px;
     padding: 12px 20px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
-    backdrop-filter: blur(12px);
+    background: transparent;
+    backdrop-filter: none;
     flex-shrink: 0;
-    border-bottom: 1px solid var(--divider);
+    border-bottom: none;
 }
 
 .page-header h2 {
@@ -555,8 +545,19 @@ body {
 .page-header .spacer { flex: 1; }
 
 .chat-page-header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 5;
     flex-wrap: wrap;
     row-gap: 10px;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgba(13, 11, 15, 0.7) 0%, rgba(13, 11, 15, 0.3) 70%, transparent 100%);
+}
+
+.chat-page-header > * {
+    pointer-events: auto;
 }
 
 .chat-header-actions {
@@ -570,12 +571,13 @@ body {
 }
 
 .chat-header-btn {
-    border: 1px solid rgba(255,255,255,0.08);
-    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(13, 11, 15, 0.55);
+    backdrop-filter: blur(8px);
     color: var(--text-secondary);
     border-radius: 999px;
-    padding: 5px 10px;
-    font-size: 11px;
+    padding: 7px 14px;
+    font-size: 12px;
     line-height: 1.2;
     font-weight: 600;
     cursor: pointer;
@@ -613,7 +615,8 @@ body {
     padding: 4px 12px;
     border-radius: 999px;
     border: 1px solid rgba(245, 158, 11, 0.18);
-    background: rgba(245, 158, 11, 0.08);
+    background: rgba(13, 11, 15, 0.55);
+    backdrop-filter: blur(8px);
     cursor: default;
     min-width: 100px;
 }
@@ -651,9 +654,9 @@ body {
 
 .evo-subtab {
     padding: 6px 16px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(201, 53, 69, 0.10);
     border-radius: 999px;
-    background: transparent;
+    background: rgba(201, 53, 69, 0.03);
     color: var(--text-secondary);
     font-size: 12px;
     font-weight: 600;
@@ -663,7 +666,8 @@ body {
 }
 
 .evo-subtab:hover {
-    border-color: rgba(255, 255, 255, 0.16);
+    border-color: rgba(201, 53, 69, 0.22);
+    background: rgba(201, 53, 69, 0.08);
     color: var(--text-primary);
 }
 
@@ -768,6 +772,7 @@ body {
     flex: 1;
     overflow-y: auto;
     padding: 20px;
+    padding-top: 56px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -781,9 +786,9 @@ body {
 }
 
 .chat-bubble.user {
-    background: linear-gradient(135deg, rgba(59, 130, 246, 0.20), rgba(37, 99, 235, 0.14));
-    border: 1px solid rgba(96, 165, 250, 0.28);
-    box-shadow: inset 0 1px 0 rgba(191, 219, 254, 0.08);
+    background: linear-gradient(135deg, rgba(80, 120, 190, 0.14), rgba(55, 85, 155, 0.12));
+    border: 1px solid rgba(110, 150, 210, 0.18);
+    box-shadow: inset 0 1px 0 rgba(160, 190, 245, 0.04);
     align-self: flex-end;
     margin-left: 20%;
 }
@@ -808,8 +813,8 @@ body {
     font-weight: 600;
     margin-bottom: 4px;
 }
-.chat-bubble.user .sender { color: rgba(191, 219, 254, 0.88); }
-.chat-bubble.assistant .sender { color: rgba(248, 113, 113, 0.95); }
+.chat-bubble.user .sender { color: rgba(155, 185, 240, 0.95); }
+.chat-bubble.assistant .sender { color: rgba(250, 125, 125, 0.95); }
 .chat-bubble.system .sender { color: rgba(245, 158, 11, 0.9); }
 
 .chat-bubble .message {
@@ -819,8 +824,8 @@ body {
     white-space: pre-wrap;
 }
 
-.chat-bubble.user .message { color: rgba(239, 246, 255, 0.82); }
-.chat-bubble.assistant .message { color: rgba(255, 228, 232, 0.80); }
+.chat-bubble.user .message { color: rgba(215, 230, 255, 0.96); }
+.chat-bubble.assistant .message { color: rgba(255, 235, 238, 0.96); }
 .chat-bubble.system .message { color: rgba(255, 240, 210, 0.78); }
 
 .chat-bubble.pending {
@@ -887,20 +892,16 @@ body {
     margin-right: 20%;
     padding: 0;
     border-radius: 16px;
-    border: 1px solid rgba(201, 53, 69, 0.16);
-    background:
-        linear-gradient(135deg, rgba(201, 53, 69, 0.10), rgba(255,255,255,0.02)),
-        rgba(255,255,255,0.02);
-    backdrop-filter: blur(14px);
-    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(201, 53, 69, 0.15);
+    background: rgba(201, 53, 69, 0.04);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 200, 210, 0.03);
     overflow: hidden;
 }
 
 .chat-live-card[data-finished="1"] {
-    border-color: rgba(255, 255, 255, 0.08);
-    background:
-        linear-gradient(135deg, rgba(34, 197, 94, 0.06), rgba(255,255,255,0.015)),
-        rgba(255,255,255,0.015);
+    border-color: rgba(201, 53, 69, 0.08);
+    background: rgba(201, 53, 69, 0.02);
 }
 
 .chat-live-card[hidden] {
@@ -922,7 +923,7 @@ body {
 }
 
 .chat-live-summary-button:hover {
-    background: rgba(255,255,255,0.02);
+    background: rgba(201, 53, 69, 0.06);
 }
 
 .chat-live-summary {
@@ -977,9 +978,9 @@ body {
 .chat-live-line-phase.thought,
 .chat-live-line-phase.thinking,
 .chat-live-line-phase.boot {
-    color: var(--blue);
-    border-color: rgba(59, 130, 246, 0.24);
-    background: rgba(59, 130, 246, 0.10);
+    color: rgba(248, 130, 140, 0.95);
+    border-color: rgba(201, 53, 69, 0.24);
+    background: rgba(201, 53, 69, 0.10);
 }
 
 /* Active (non-finished) live card: pulse the Working/Thinking phase badge */
@@ -1040,7 +1041,7 @@ body {
     width: 4px;
     height: 4px;
     border-radius: 50%;
-    background: rgba(59, 130, 246, 0.7);
+    background: rgba(201, 53, 69, 0.55);
     animation: typing-bounce 1.4s ease-in-out infinite;
 }
 
@@ -1253,12 +1254,20 @@ body {
     align-items: center;
 }
 
+.chat-input-wrap {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
 #chat-input {
     flex: 1;
-    padding: 10px 16px;
+    padding: 10px 60px 10px 16px;
     border-radius: 24px;
-    border: 1px solid var(--divider);
-    background: var(--bg-secondary);
+    border: 1px solid rgba(201, 53, 69, 0.12);
+    background: rgba(26, 21, 32, 0.75);
+    backdrop-filter: blur(8px);
     color: var(--text-primary);
     font-size: 15px;
     font-family: inherit;
@@ -1269,28 +1278,32 @@ body {
     transition: border-color 0.2s, box-shadow 0.2s;
 }
 #chat-input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-dim);
+    border-color: rgba(232, 93, 111, 0.4);
+    box-shadow: 0 0 0 3px rgba(201, 53, 69, 0.10);
 }
 #chat-input::placeholder { color: var(--text-muted); }
 
-.icon-btn {
-    width: 42px;
-    height: 42px;
-    border-radius: 50%;
+.chat-send-inline {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
     border: none;
-    background: var(--accent);
-    color: white;
+    background: transparent;
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 700;
+    font-family: inherit;
+    letter-spacing: 0.04em;
     cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    transition: opacity 0.15s, box-shadow 0.15s;
+    padding: 6px 10px;
+    border-radius: 12px;
+    transition: color 0.15s, background 0.15s;
+    opacity: 0.7;
 }
-.icon-btn:hover {
-    opacity: 0.85;
-    box-shadow: 0 0 10px var(--accent-glow);
+.chat-send-inline:hover {
+    opacity: 1;
+    background: rgba(201, 53, 69, 0.10);
 }
 
 /* Shared UI components (stat cards used by Costs, section titles by Evolution) */
@@ -1576,10 +1589,12 @@ body {
 .log-entry .log-phase.context,
 .log-entry .log-phase.progress,
 .log-entry .log-phase.thought,
-.log-entry .log-phase.boot {
-    color: var(--blue);
-    border-color: rgba(59, 130, 246, 0.25);
-    background: rgba(59, 130, 246, 0.10);
+.log-entry .log-phase.boot,
+.log-entry .log-phase.working,
+.log-entry .log-phase.thinking {
+    color: rgba(248, 130, 140, 0.95);
+    border-color: rgba(201, 53, 69, 0.25);
+    background: rgba(201, 53, 69, 0.10);
 }
 
 .log-entry .log-phase.done,
@@ -1799,10 +1814,10 @@ body {
 .evo-runtime-card,
 .evo-chart-wrap {
     background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+        linear-gradient(180deg, rgba(201, 53, 69, 0.05), rgba(255, 255, 255, 0.02)),
         rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 16px;
+    border: 1px solid rgba(201, 53, 69, 0.12);
+    border-radius: var(--radius-lg);
     box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
     backdrop-filter: blur(14px);
 }
@@ -1905,4 +1920,116 @@ body {
         min-height: 320px;
         max-height: none;
     }
+}
+
+/* About page */
+.about-body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 24px;
+    padding: 40px 20px;
+    text-align: center;
+}
+.about-logo {
+    width: 96px;
+    height: 96px;
+    border-radius: var(--radius-xl);
+    object-fit: cover;
+}
+.about-title { font-size: 28px; font-weight: 700; margin: 0; }
+.about-version { color: var(--text-muted); font-size: 13px; margin: 4px 0 0; }
+.about-desc { max-width: 480px; color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
+.about-credits { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.about-links { display: flex; gap: 16px; justify-content: center; margin-top: 4px; }
+.about-links a { color: var(--accent); text-decoration: none; }
+.about-footer { margin-top: auto; padding-top: 32px; color: var(--text-muted); font-size: 12px; }
+
+/* Costs page layout */
+.costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
+.costs-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+}
+.costs-tables-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+.costs-table-label { font-size: 14px; color: var(--text-secondary); margin: 0 0 8px; }
+.cost-cell-name { font-size: 12px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cost-cell-right { text-align: right; }
+.cost-top-model { font-size: 12px; }
+.cost-bar-cell { width: 60px; }
+.cost-bar { background: var(--accent); height: 6px; border-radius: var(--radius-xs); opacity: 0.7; }
+.cost-empty-cell { color: var(--text-muted); text-align: center; }
+
+/* Evolution Versions sub-tab layout */
+.evo-versions-content {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 20px;
+}
+
+.evo-versions-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.evo-versions-branch {
+    flex: 1;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.evo-versions-cols {
+    display: flex;
+    gap: 24px;
+    flex: 1;
+    overflow: hidden;
+}
+
+.evo-versions-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.evo-versions-list {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.evo-versions-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.evo-versions-row-label {
+    min-width: 70px;
+    text-align: center;
+}
+
+.evo-versions-row-msg {
+    flex: 1;
+}
+
+/* Extra-small button variant */
+.btn-xs {
+    padding: 2px 8px;
+    font-size: 11px;
+}
+
+.evo-empty-error {
+    color: var(--red);
 }

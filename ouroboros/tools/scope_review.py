@@ -14,13 +14,14 @@ import json
 import logging
 import os
 import pathlib
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from ouroboros.llm import LLMClient
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.review_helpers import (
     build_broader_repo_pack,
     build_goal_section,
+    build_head_snapshot_section,
     build_scope_section,
     build_touched_file_pack,
     load_checklist_section,
@@ -30,7 +31,7 @@ from ouroboros.utils import run_cmd, utc_now_iso, append_jsonl
 log = logging.getLogger(__name__)
 
 _SCOPE_MODEL_DEFAULT = "anthropic/claude-opus-4.6"
-_SCOPE_MAX_TOKENS = 8192
+_SCOPE_MAX_TOKENS = 65536
 
 
 def _get_scope_model() -> str:
@@ -70,6 +71,86 @@ def _build_review_history_section(history: list) -> str:
                 lines.append(f"- Advisory: {f}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _parse_staged_name_status(repo_dir: pathlib.Path) -> list:
+    """Parse staged changes with name-status for rename/delete/copy awareness.
+
+    Returns list of (status_char, current_path, head_lookup_path) tuples:
+    - status_char: A=added, M=modified, D=deleted, R=renamed, C=copied
+    - current_path: path in current working tree (new path for renames)
+    - head_lookup_path: path to use for git show HEAD (old path for renames)
+    """
+    try:
+        name_status_raw = run_cmd(
+            ["git", "diff", "--cached", "--name-status"], cwd=repo_dir
+        )
+    except Exception:
+        name_status_raw = ""
+
+    entries = []
+    for line in name_status_raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if not parts:
+            continue
+        status_char = parts[0][0].upper()
+        if status_char in ("R", "C") and len(parts) >= 3:
+            old_path, new_path = parts[1], parts[-1]
+            entries.append((status_char, new_path, old_path))
+        elif len(parts) >= 2:
+            path = parts[1]
+            entries.append((status_char, path, path))
+        else:
+            entries.append(("M", parts[0], parts[0]))
+
+    # Fallback to --name-only if --name-status produced nothing
+    if not entries:
+        try:
+            changed = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=repo_dir)
+            for p in changed.strip().splitlines():
+                p = p.strip()
+                if p:
+                    entries.append(("M", p, p))
+        except Exception:
+            pass
+
+    return entries
+
+
+def _add_deletion_placeholders(current_files_section: str, deleted_paths: list) -> str:
+    """Append deletion placeholders to the current-files section for reviewer awareness."""
+    if not deleted_paths:
+        return current_files_section
+    notes = [
+        f"### {dp}\n\n*(File was DELETED — see HEAD snapshot section above for its content)*\n"
+        for dp in deleted_paths
+    ]
+    joint = "\n".join(notes)
+    if current_files_section.strip():
+        return current_files_section + "\n\n" + joint
+    return joint
+
+
+def _compute_omission_signal(
+    current_files_section: str,
+    deleted_paths: list,
+    omitted: list,
+    current_paths: list,
+) -> Optional[str]:
+    """Return omission signal string for fail-closed check, or None if OK.
+
+    Deletion-only diffs are valid (HEAD snapshot provides context).
+    Block only when the current-files section is truly empty with no deletions,
+    or when readable non-deleted files couldn't be read.
+    """
+    if not current_files_section.strip() and not deleted_paths:
+        return "__empty__"
+    if omitted and current_paths:
+        return ", ".join(omitted)
+    return None
 
 
 def _build_scope_prompt(
@@ -112,24 +193,25 @@ def _build_scope_prompt(
     except Exception:
         diff_text = "(failed to get staged diff)"
 
-    try:
-        changed = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=repo_dir)
-    except Exception:
-        changed = ""
+    # Parse staged changes using name-status for rename/delete/copy awareness
+    touched_entries = _parse_staged_name_status(repo_dir)
+    current_paths = [ep[1] for ep in touched_entries if ep[0] != "D"]
+    deleted_paths = [ep[1] for ep in touched_entries if ep[0] == "D"]
+    head_snapshot_paths = [ep[2] for ep in touched_entries]
+    all_touched_paths = [ep[1] for ep in touched_entries]
 
-    # Build touched-file pack — omission data returned to caller for fail-closed check
-    touched_paths = [f.strip() for f in changed.strip().splitlines() if f.strip()]
-    current_files_section, omitted = build_touched_file_pack(repo_dir, touched_paths)
+    # Build current-file pack (non-deleted files from working tree)
+    current_files_section, omitted = build_touched_file_pack(repo_dir, current_paths)
+    current_files_section = _add_deletion_placeholders(current_files_section, deleted_paths)
 
-    # Compute omission signal for caller
-    touched_omitted = None
-    if not current_files_section.strip():
-        touched_omitted = "__empty__"
-    elif omitted:
-        touched_omitted = ", ".join(omitted)
+    # Best-effort HEAD snapshots for before/after context
+    head_snapshots_section = build_head_snapshot_section(repo_dir, head_snapshot_paths)
+
+    # Compute fail-closed omission signal (deletion-only diffs are valid, not empty)
+    touched_omitted = _compute_omission_signal(current_files_section, deleted_paths, omitted, current_paths)
 
     # Build broader repo pack (best-effort)
-    exclude_set = set(touched_paths)
+    exclude_set = set(all_touched_paths)
     try:
         repo_pack_section = build_broader_repo_pack(repo_dir, exclude_set)
         if not repo_pack_section.strip():
@@ -181,7 +263,15 @@ Severity rules:
 
 {rebuttal_section}{history_section}
 
-## Current touched files
+## Pre-change snapshots (HEAD versions — before this diff)
+
+These are the versions of each touched file AS THEY EXISTED IN HEAD before this change.
+Use them to judge the correctness of the transformation: what was there before vs. what is there now.
+For new files (status A), the note says "File is new — no HEAD snapshot".
+
+{head_snapshots_section}
+
+## Current touched files (post-change — what the file looks like NOW)
 
 {current_files_section}
 

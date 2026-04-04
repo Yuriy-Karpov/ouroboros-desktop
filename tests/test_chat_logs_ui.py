@@ -164,17 +164,20 @@ def test_chat_history_replays_task_summaries_into_live_cards():
     assert "if (role !== 'user' && !opts.isProgress && opts.taskId) {" in chat_source
 
 
-def test_chat_history_forces_live_card_for_historical_task_summaries():
-    """Historical task_summary messages must force the live card visible.
+def test_chat_history_conditionally_forces_live_card_for_task_summaries():
+    """Historical task_summary messages must force the live card visible
+    only for non-trivial tasks (tool_calls > 0 or rounds > 1).
 
     After a restart taskState.toolCalls is 0, so revealBufferedCardIfNeeded
-    would silently skip the card unless forceCard is set before the call.
+    would silently skip the card unless forceCard is set.  But trivial tasks
+    (simple replies) should not show a card at all.
     """
     source = _read("web/modules/chat.js")
-    # forceCard must be set to true immediately before appendTaskSummaryToLiveCard
-    # in the syncHistory loop
+    # forceCard is conditional — only set when the task was non-trivial
     assert "taskState.forceCard = true;" in source
-    # The force must happen inside the task_summary branch of syncHistory
+    assert "(msg.tool_calls || 0) > 0" in source
+    assert "(msg.rounds || 0) > 1" in source
+    # The condition + force must happen inside the task_summary branch of syncHistory
     idx_force = source.index("taskState.forceCard = true;")
     idx_append = source.index("appendTaskSummaryToLiveCard(msg);")
     assert idx_force < idx_append, "forceCard must be set before appendTaskSummaryToLiveCard"
@@ -202,3 +205,226 @@ def test_progress_messages_force_live_card_visible():
     idx_queue = func_body.index("queueTaskLiveUpdate(")
     assert idx_force < idx_queue, \
         "forceCard must be set before queueTaskLiveUpdate in updateLiveCardFromProgressMessage"
+
+
+def test_task_summary_live_card_uses_last_headline_not_finished_task():
+    """appendTaskSummaryToLiveCard must NOT use 'Finished task' as headline.
+
+    Instead it should use lastHumanHeadline from the live card record
+    and not add a visible timeline entry (the summary text duplicates
+    the assistant reply bubble).
+    """
+    source = _read("web/modules/chat.js")
+    func_start = source.index("function appendTaskSummaryToLiveCard(")
+    func_body_end = source.index("\n    function ", func_start + 1)
+    func_body = source[func_start:func_body_end]
+    # Must NOT contain "Finished task" headline
+    assert "Finished task" not in func_body, \
+        "appendTaskSummaryToLiveCard should not use 'Finished task' as headline"
+    # Must use lastHumanHeadline
+    assert "lastHumanHeadline" in func_body, \
+        "appendTaskSummaryToLiveCard should use record.lastHumanHeadline"
+    # Must set visible: false to avoid adding a timeline entry
+    assert "visible: false" in func_body, \
+        "appendTaskSummaryToLiveCard should set visible: false"
+
+
+def test_chat_input_has_glassmorphism():
+    """#chat-input should use backdrop-filter and crimson border — not flat bg-secondary."""
+    css = _read("web/style.css")
+    # Must have glassmorphism applied
+    assert "backdrop-filter: blur(8px)" in css
+    # Border should be crimson-tinted, not plain --divider
+    assert "rgba(201, 53, 69, 0.12)" in css
+    # Flat bg-secondary should not be on chat-input any longer
+    # (verify the old pattern is gone from chat-input block)
+    chat_input_block = css[css.index("#chat-input {"):css.index("#chat-input:focus")]
+    assert "var(--bg-secondary)" not in chat_input_block
+
+
+def test_log_phases_use_crimson_not_blue():
+    """Active log phases (start/progress/working/thinking) should use crimson, not blue."""
+    css = _read("web/style.css")
+    # Find the active-phase block
+    assert "log-phase.working" in css
+    assert "log-phase.thinking" in css
+    # The active-phase color must be crimson, not --blue
+    active_block_start = css.index(".log-entry .log-phase.start,")
+    active_block_end = css.index("}", active_block_start)
+    active_block = css[active_block_start:active_block_end]
+    assert "var(--blue)" not in active_block
+    assert "rgba(248, 130, 140" in active_block
+
+
+def test_about_uses_css_classes_not_inline():
+    """about.js must use CSS classes, not inline style= attributes."""
+    src = _read("web/modules/about.js")
+    assert 'class="about-body"' in src
+    assert 'class="about-logo"' in src
+    assert 'class="about-title"' in src
+    assert 'class="about-credits"' in src
+    assert 'class="about-footer"' in src
+    # No inline style= should remain
+    assert 'style="' not in src
+
+
+def test_costs_uses_css_classes_not_inline():
+    """costs.js must use CSS classes for layout; bar width via DOM .style.width is acceptable."""
+    src = _read("web/modules/costs.js")
+    # Static HTML uses class= attributes
+    assert 'class="costs-stats-grid"' in src
+    assert 'class="costs-tables-grid"' in src
+    assert 'class="costs-table-label"' in src
+    # DOM-built cells use .className assignments (not class= in innerHTML)
+    assert "className = 'cost-cell-name'" in src
+    assert "className = 'cost-bar'" in src
+    # renderBreakdownTable must use DOM creation (no innerHTML for user data)
+    assert "document.createElement('tr')" in src
+    assert "textContent = name" in src
+    # Only the dynamic bar width remains as .style.width — that's the sole acceptable exception
+    assert "bar.style.width" in src
+
+
+def test_costs_about_css_classes_defined():
+    """All CSS classes used by about.js and costs.js must be defined in style.css."""
+    css = _read("web/style.css")
+    for cls in [".about-body", ".about-logo", ".about-title", ".about-footer",
+                ".costs-stats-grid", ".costs-tables-grid", ".costs-table-label",
+                ".cost-cell-name", ".cost-bar-cell", ".cost-bar", ".cost-empty-cell"]:
+        assert cls in css, f"Missing CSS class: {cls}"
+
+
+def test_trivial_task_summary_skip_in_backend():
+    """_run_task_summary must skip the LLM call for trivial tasks (0 tool calls, ≤1 round)."""
+    source = (REPO / "ouroboros" / "agent_task_pipeline.py").read_text(encoding="utf-8")
+    # Early return for trivial tasks
+    assert "n_tool_calls == 0 and rounds <= 1" in source
+    # Metadata must be written to chat.jsonl even for trivial tasks
+    assert '"tool_calls": n_tool_calls' in source
+    assert '"rounds": rounds' in source
+
+
+def test_history_api_passes_task_summary_metadata():
+    """server_history_api must pass tool_calls and rounds fields for task_summary entries."""
+    source = (REPO / "ouroboros" / "server_history_api.py").read_text(encoding="utf-8")
+    assert 'entry.get("type") == "task_summary"' in source
+    assert 'rec["tool_calls"]' in source
+    assert 'rec["rounds"]' in source
+
+
+# ---------------------------------------------------------------------------
+# Evolution Versions sub-tab: no inline styles, CSS-class-based structure
+# ---------------------------------------------------------------------------
+
+def test_evolution_versions_subtab_uses_css_classes_not_inline_styles():
+    """Evolution Versions sub-tab must use CSS classes, not inline style="" attributes."""
+    source = _read("web/modules/evolution.js")
+
+    # Container and layout classes must be present
+    assert 'class="evo-versions-content"' in source
+    assert 'class="evo-versions-header"' in source
+    assert 'class="evo-versions-branch"' in source
+    assert 'class="evo-versions-cols"' in source
+    assert 'class="evo-versions-col"' in source
+
+    # Row helper must use CSS classes, not inline styles
+    assert 'evo-versions-row' in source
+    assert 'evo-versions-row-label' in source
+    assert 'evo-versions-row-msg' in source
+    assert 'btn-xs' in source
+
+    # Error/empty states must use CSS class, not inline style
+    assert 'evo-empty-error' in source
+
+    import re
+    # renderRow innerHTML must not contain inline style= attributes
+    # (row.style.xxx JS property assignments are irrelevant — only template literal innerHTML is checked)
+    render_row_match = re.search(
+        r'function renderRow\(.*?\{(.*?)\n    \}', source, re.DOTALL
+    )
+    assert render_row_match, "renderRow function not found in evolution.js"
+    render_row_body = render_row_match.group(1)
+    inner_html_parts = re.findall(r'innerHTML\s*=\s*`(.+?)`', render_row_body, re.DOTALL)
+    assert inner_html_parts, "renderRow should set innerHTML via template literal"
+    for part in inner_html_parts:
+        assert 'style=' not in part, f"renderRow innerHTML still contains inline style=: {part[:120]}"
+
+    # Versions sub-tab container HTML: confirm class-based markers are present and no inline styles
+    # Extract between the two known comment anchors that exist in the file
+    versions_block_match = re.search(
+        r'<!-- Versions sub-tab -->(.*?)<!-- Chart sub-tab|<!-- Versions sub-tab -->(.*?)$',
+        source, re.DOTALL
+    )
+    if versions_block_match:
+        versions_html = versions_block_match.group(1) or versions_block_match.group(2) or ''
+        # Verify class markers are present
+        assert 'evo-versions-content' in versions_html
+        assert 'evo-versions-header' in versions_html
+        # Verify no inline style= in the static template HTML
+        # (JS .style property assignments are not in the template string)
+        template_literal_match = re.search(r'page\.innerHTML\s*=\s*`(.*?)`\s*;', source, re.DOTALL)
+        if template_literal_match:
+            template = template_literal_match.group(1)
+            # Find the versions section in the template and assert no style= there
+            versions_in_template = template[template.find('<!-- Versions sub-tab -->'):]
+            assert 'style=' not in versions_in_template[:2000], \
+                "Versions sub-tab template still contains inline style= attributes"
+
+
+def test_evolution_versions_css_classes_defined():
+    """CSS classes introduced for Versions sub-tab must be defined in style.css."""
+    css = _read("web/style.css")
+    for cls in [
+        ".evo-versions-content",
+        ".evo-versions-header",
+        ".evo-versions-branch",
+        ".evo-versions-cols",
+        ".evo-versions-col",
+        ".evo-versions-list",
+        ".evo-versions-row",
+        ".evo-versions-row-label",
+        ".evo-versions-row-msg",
+        ".evo-empty-error",
+        ".btn-xs",
+    ]:
+        assert cls in css, f"Missing CSS class in style.css: {cls}"
+
+
+def test_evolution_load_versions_error_handling():
+    """loadVersions() must guard resp.ok and clear all three UI surfaces on error."""
+    source = _read("web/modules/evolution.js")
+
+    # Must check resp.ok before parsing JSON (guards non-2xx responses)
+    assert "if (!resp.ok) throw new Error" in source, \
+        "loadVersions must throw on non-OK HTTP response"
+
+    # Extract the loadVersions function body (up to rollback)
+    load_versions_start = source.find("async function loadVersions()")
+    rollback_start = source.find("async function rollback(", load_versions_start)
+    assert load_versions_start != -1 and rollback_start != -1
+    fn_body = source[load_versions_start:rollback_start]
+
+    # The catch branch must clear all three surfaces
+    catch_start = fn_body.rfind("} catch (e) {")
+    assert catch_start != -1, "loadVersions catch block not found"
+    catch_body = fn_body[catch_start:]
+    assert 'commitsDiv.innerHTML' in catch_body, "catch must clear commitsDiv"
+    assert 'tagsDiv.innerHTML' in catch_body, "catch must clear tagsDiv"
+    assert 'currentDiv.textContent' in catch_body, "catch must reset currentDiv"
+    assert 'versionsLoaded = false' in catch_body, "catch must reset versionsLoaded"
+
+
+def test_evolution_runtime_card_uses_crimson_border():
+    """evo-runtime-card and evo-chart-wrap must use crimson accent border, not neutral white."""
+    css = _read("web/style.css")
+    # The rule should contain a crimson rgba border, not the old neutral white
+    import re
+    rule_match = re.search(
+        r'\.evo-runtime-card,\s*\.evo-chart-wrap\s*\{(.+?)\}', css, re.DOTALL
+    )
+    assert rule_match, ".evo-runtime-card rule not found in style.css"
+    rule_body = rule_match.group(1)
+    # Must have a crimson border (201, 53, 69)
+    assert "201, 53, 69" in rule_body, "evo-runtime-card should use crimson accent border"
+    # Must NOT use the old neutral white border
+    assert "255, 255, 255, 0.08" not in rule_body, "evo-runtime-card should not use neutral white border"

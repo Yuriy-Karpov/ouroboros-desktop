@@ -132,13 +132,13 @@ def test_build_onboarding_html_adapts_to_multi_provider_access():
     assert "LOCAL_ROUTING_MODE: trim(state.localSource) ? (trim(state.localRoutingMode) || 'cloud') : 'cloud'" in html
 
 
-def test_build_onboarding_html_includes_claude_cli_cta_and_host_transports():
+def test_build_onboarding_html_includes_claude_sdk_cta_and_host_transports():
     desktop_html = build_onboarding_html({}, host_mode="desktop")
     web_html = build_onboarding_html({}, host_mode="web")
 
-    assert "Install Claude Code CLI" in desktop_html
+    assert "Install Claude Agent SDK" in desktop_html
     assert "Skip for now" in desktop_html
-    assert "not the SDK" in desktop_html
+    assert "claude-agent-sdk" in desktop_html
     assert "window.pywebview.api.claude_code_status" in desktop_html
     assert "window.pywebview.api.install_claude_code" in desktop_html
     assert "/api/claude-code/status" in web_html

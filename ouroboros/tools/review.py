@@ -136,8 +136,8 @@ async def _query_model(llm_client: LLMClient, model: str, messages: list, semaph
             msg, usage = await llm_client.chat_async(
                 messages=messages,
                 model=model,
-                reasoning_effort="low",
-                max_tokens=4096,
+                reasoning_effort="medium",
+                max_tokens=32768,
                 temperature=0.2,
             )
             payload = {
@@ -325,12 +325,29 @@ _REVIEW_PREAMBLE = (
 
 _REVIEW_PROMPT_TEMPLATE = """\
 {preamble}
-You must review the staged change and produce a JSON array.
-Each element has:
+
+## Review instructions — READ CAREFULLY
+
+- Read the ENTIRE staged diff carefully, line by line. Do NOT skim.
+- Use BOTH the staged diff AND the full current text of every changed file provided below.
+  Do NOT review from the diff alone — the full file context is essential for correctness.
+- Look for ALL bugs, logic errors, off-by-one mistakes, missing error handling,
+  race conditions, resource leaks, and regressions.
+- Report ALL problems you find — not just the single most critical one.
+  If there are 5 bugs, list all 5.
+- Do NOT stop after finding the first issue.
+  Do NOT summarize multiple distinct problems into one finding.
+  Each distinct problem gets its own entry in the output array.
+- PASS reasons may be brief (one sentence). FAIL reasons must be detailed and actionable:
+  include the file, the line or symbol, what is wrong, and a concrete suggestion for how to fix it.
+- For every FAIL, include a concrete how-to-fix suggestion so the developer knows exactly
+  what change is needed.
+
+You must produce a JSON array. Each element has:
 - "item"
 - "verdict": "PASS" or "FAIL"
 - "severity": "critical" or "advisory"
-- "reason"
+- "reason": for FAIL — specific file/line, what is wrong, how to fix it
 
 {checklist_section}
 
@@ -342,7 +359,7 @@ Each element has:
 
 {dev_guide_text}
 
-## Current touched files
+## Current touched files (full content)
 
 {current_files_section}
 
@@ -384,31 +401,123 @@ def _preflight_check(commit_message: str, staged_files: str,
                      repo_dir) -> Optional[str]:
     """Deterministic pre-review sanity check — catches common mismatches
     before calling expensive LLM reviewers.
+
+    Checks (in order):
+      1. VERSION staged but README.md not staged
+      2. Commit message references a version but VERSION file not staged
+      3. Python code in ouroboros/ or supervisor/ changed but no tests/ files staged
+      4. New files added in ouroboros/ or supervisor/ but ARCHITECTURE.md not staged
     """
     import re
-    staged_set = set(f.strip() for f in staged_files.strip().splitlines() if f.strip())
+
+    # Parse the staged_files string. We accept two deterministic formats:
+    #
+    # 1. "name-status"-style (produced by _run_unified_review after conversion):
+    #    "A  path/to/file.py"  (status char + 2 spaces + path)
+    #    "M  path/to/file.py"
+    #
+    # 2. Plain filename (produced as fallback or from unit-test callers):
+    #    "path/to/file.py"
+    #
+    # We detect format 1 by checking that:
+    #   - The line is at least 4 chars
+    #   - Character at index 0 is a letter (git status char: A/M/D/R/C/T/?)
+    #   - Characters at index 1 and 2 are spaces ("  ")
+    # This avoids the filename-with-space ambiguity of the old raw[2]==' ' check.
+    import string as _string
+    raw_lines = staged_files.strip().splitlines()
+    file_status: list[tuple[str, str]] = []  # (status_char, filepath)
+    for raw in raw_lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        # Format 1: "X  path" — status char + exactly two spaces
+        if (len(raw) >= 4
+                and raw[0] in _string.ascii_uppercase
+                and raw[1:3] == "  "):
+            status = raw[0].upper()
+            path = raw[3:].strip()
+            # Handle renames: "R  old -> new"
+            if " -> " in path:
+                path = path.split(" -> ")[-1].strip()
+            file_status.append((status, path))
+        else:
+            # Format 2: plain filename — treat as modified
+            file_status.append(("M", raw))
+
+    # staged_set: all paths that appear in the diff (used for existence/coupling checks).
+    # active_staged: exclude Deleted (D) entries — a deleted file cannot satisfy a
+    # "companion file must be present" requirement.
+    staged_set = {path for _, path in file_status}
+    active_staged = {path for status, path in file_status if status != "D"}
+    # Treat both Added (A) and Copied (C) as "new" files for preflight check 4.
+    # Renamed (R) files are not new-module additions — the old path disappears.
+    new_files = {path for status, path in file_status if status in ("A", "C")}
     msg_lower = commit_message.lower()
 
     has_version_ref = bool(re.search(r'v?\d+\.\d+\.\d+', commit_message)) or "version" in msg_lower
-    version_staged = "VERSION" in staged_set
+    # Use active_staged (excludes deleted files) for companion-file presence checks.
+    # staged_set includes all paths (for "currently staged" display and couping checks).
+    version_staged = "VERSION" in active_staged
 
     missing = []
-    if has_version_ref and not version_staged:
-        if any(f.endswith(('.py', '.md')) and f != 'VERSION' for f in staged_set):
-            missing.append("VERSION")
-    if version_staged and "README.md" not in staged_set:
+
+    # Check 1: VERSION staged (and not deleted) but README missing
+    if version_staged and "README.md" not in active_staged:
         missing.append("README.md (badge + changelog)")
 
-    if not missing:
-        return None
+    # Check 2: Version reference in message but VERSION not staged
+    if has_version_ref and not version_staged:
+        if any(f.endswith(('.py', '.md')) and f != 'VERSION' for f in active_staged):
+            missing.append("VERSION")
 
-    return (
-        f"⚠️ PREFLIGHT_BLOCKED: Staged diff is incomplete — fix before review.\n"
-        f"  Missing from staged: {', '.join(missing)}\n"
-        f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}\n\n"
-        "Stage all related files together. Use repo_write for all files first,\n"
-        "then repo_commit to stage and commit everything in one diff."
+    if missing:
+        return (
+            f"⚠️ PREFLIGHT_BLOCKED: Staged diff is incomplete — fix before review.\n"
+            f"  Missing from staged: {', '.join(missing)}\n"
+            f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}\n\n"
+            "Stage all related files together. Use repo_write for all files first,\n"
+            "then repo_commit to stage and commit everything in one diff."
+        )
+
+    # Check 3: Python logic touched (added, modified, or deleted) in ouroboros/ or
+    # supervisor/ but no tests/ files are staged (active, non-deleted).
+    # We include deleted .py files because deleting a module is a behaviour change
+    # that must be reflected in tests (e.g. removing a call site or deleting
+    # a test that covered the deleted module).
+    _LOGIC_DIRS = ("ouroboros/", "supervisor/")
+    logic_changed = any(
+        f.startswith(_LOGIC_DIRS) and f.endswith(".py")
+        for f in staged_set  # all statuses including D
     )
+    tests_staged = any(f.startswith("tests/") for f in active_staged)
+    if logic_changed and not tests_staged:
+        return (
+            "⚠️ PREFLIGHT_BLOCKED: Python logic changed in ouroboros/ or supervisor/ "
+            "but no tests/ files are staged.\n"
+            "  Add or update tests to cover the changed behaviour, then re-stage.\n"
+            "  If this is a docs/config-only change that triggered a false positive, "
+            "check that no .py files from ouroboros/ or supervisor/ are in your staged set.\n"
+            f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+        )
+
+    # Check 4: New files added/copied in ouroboros/ or supervisor/ but
+    # ARCHITECTURE.md is not in active_staged (must not be deleted).
+    new_logic_files = [
+        f for f in new_files
+        if f.startswith(_LOGIC_DIRS) and f.endswith(".py")
+    ]
+    if new_logic_files and "docs/ARCHITECTURE.md" not in active_staged:
+        return (
+            "⚠️ PREFLIGHT_BLOCKED: New files added in ouroboros/ or supervisor/ "
+            "but docs/ARCHITECTURE.md is not staged.\n"
+            "  New structural additions must be documented in ARCHITECTURE.md "
+            "(Bible P4: authenticity / architectural mirror).\n"
+            f"  New files: {new_logic_files[:5]}\n"
+            f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+        )
+
+    return None
 
 
 def _build_review_history_section(history: list) -> str:
@@ -602,7 +711,52 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     except Exception:
         changed = ""
 
-    preflight_err = _preflight_check(commit_message, changed, target_repo)
+    # Build a status-bearing string for preflight (uses porcelain "XY path" format).
+    # We use --name-status (tab-separated "STATUS\tpath") and convert to
+    # a two-char porcelain-like prefix so _preflight_check can detect added files.
+    try:
+        name_status = run_cmd(
+            ["git", "diff", "--cached", "--name-status"], cwd=target_repo
+        )
+        # Convert git --name-status tab-separated lines to "X  path" format.
+        # Formats emitted by git:
+        #   "A\tpath"          → added
+        #   "M\tpath"          → modified
+        #   "D\tpath"          → deleted
+        #   "R100\told\tnew"   → renamed (similarity score prefix, two paths)
+        #   "C100\told\tnew"   → copied  (similarity score prefix, two paths)
+        preflight_input_lines = []
+        for line in name_status.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            if not parts:
+                continue
+            status_char = parts[0][0].upper()  # first char of status code (strips similarity %)
+            if status_char in ("R", "C") and len(parts) >= 3:
+                src_path, dst_path = parts[1], parts[-1]
+                if status_char == "R":
+                    # Rename: source was deleted, destination is a new file.
+                    #   "D src" — triggers check 3 if src was in a guarded dir
+                    #   "A dst" — triggers check 3 and check 4 if dst is in a guarded dir
+                    preflight_input_lines.append(f"D  {src_path}")
+                    preflight_input_lines.append(f"A  {dst_path}")
+                else:
+                    # Copy (C): source is unchanged — only emit the new destination.
+                    # Do NOT emit "D src" here; the source file was NOT deleted or modified.
+                    # A copy into a guarded dir still constitutes a new module (check 4).
+                    preflight_input_lines.append(f"A  {dst_path}")
+            elif len(parts) >= 2:
+                path = parts[1]
+                preflight_input_lines.append(f"{status_char}  {path}")
+            else:
+                preflight_input_lines.append(f"M  {parts[0]}")
+        preflight_staged = "\n".join(preflight_input_lines) if preflight_input_lines else changed
+    except Exception:
+        preflight_staged = changed  # fallback to name-only (check 4 may not fire, but checks 1-3 still work)
+
+    preflight_err = _preflight_check(commit_message, preflight_staged, target_repo)
     if preflight_err:
         ctx._last_review_block_reason = "preflight"
         result = _handle_review_block_or_warning(

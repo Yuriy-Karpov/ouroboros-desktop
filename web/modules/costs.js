@@ -9,27 +9,27 @@ export function initCosts({ ws, state }) {
             <div class="spacer"></div>
             <button class="btn btn-default btn-sm" id="btn-refresh-costs">Refresh</button>
         </div>
-        <div class="costs-scroll" style="overflow-y:auto;flex:1;padding:16px 20px">
-            <div class="stat-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px">
-                <div class="stat-card"><div class="stat-label">Total Spent</div><div class="stat-value" id="cost-total">$0.00</div></div>
-                <div class="stat-card"><div class="stat-label">Total Calls</div><div class="stat-value" id="cost-calls">0</div></div>
-                <div class="stat-card"><div class="stat-label">Top Model</div><div class="stat-value" id="cost-top-model" style="font-size:12px">-</div></div>
+        <div class="costs-scroll">
+            <div class="costs-stats-grid">
+                <div class="stat-card"><div class="label">Total Spent</div><div class="value" id="cost-total">$0.00</div></div>
+                <div class="stat-card"><div class="label">Total Calls</div><div class="value" id="cost-calls">0</div></div>
+                <div class="stat-card"><div class="label">Top Model</div><div class="value cost-top-model" id="cost-top-model">-</div></div>
             </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+            <div class="costs-tables-grid">
                 <div>
-                    <h3 style="font-size:14px;color:var(--text-secondary);margin:0 0 8px">By Model</h3>
+                    <h3 class="costs-table-label">By Model</h3>
                     <table class="cost-table" id="cost-by-model"><thead><tr><th>Model</th><th>Calls</th><th>Cost</th><th></th></tr></thead><tbody></tbody></table>
                 </div>
                 <div>
-                    <h3 style="font-size:14px;color:var(--text-secondary);margin:0 0 8px">By API Key</h3>
+                    <h3 class="costs-table-label">By API Key</h3>
                     <table class="cost-table" id="cost-by-key"><thead><tr><th>Key</th><th>Calls</th><th>Cost</th><th></th></tr></thead><tbody></tbody></table>
                 </div>
                 <div>
-                    <h3 style="font-size:14px;color:var(--text-secondary);margin:0 0 8px">By Model Category</h3>
+                    <h3 class="costs-table-label">By Model Category</h3>
                     <table class="cost-table" id="cost-by-model-cat"><thead><tr><th>Category</th><th>Calls</th><th>Cost</th><th></th></tr></thead><tbody></tbody></table>
                 </div>
                 <div>
-                    <h3 style="font-size:14px;color:var(--text-secondary);margin:0 0 8px">By Task Category</h3>
+                    <h3 class="costs-table-label">By Task Category</h3>
                     <table class="cost-table" id="cost-by-task-cat"><thead><tr><th>Category</th><th>Calls</th><th>Cost</th><th></th></tr></thead><tbody></tbody></table>
                 </div>
             </div>
@@ -43,17 +43,38 @@ export function initCosts({ ws, state }) {
         for (const [name, info] of Object.entries(data)) {
             const pct = totalCost > 0 ? (info.cost / totalCost * 100) : 0;
             const tr = document.createElement('tr');
-            tr.innerHTML = `
-                <td style="font-size:12px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${name}</td>
-                <td style="text-align:right">${info.calls}</td>
-                <td style="text-align:right">$${info.cost.toFixed(3)}</td>
-                <td style="width:60px"><div style="background:var(--accent);height:6px;border-radius:3px;width:${Math.min(100,pct)}%;opacity:0.7"></div></td>
-            `;
+
+            const tdName = document.createElement('td');
+            tdName.className = 'cost-cell-name';
+            tdName.setAttribute('title', name);
+            tdName.textContent = name;
+
+            const tdCalls = document.createElement('td');
+            tdCalls.className = 'cost-cell-right';
+            tdCalls.textContent = info.calls;
+
+            const tdCost = document.createElement('td');
+            tdCost.className = 'cost-cell-right';
+            tdCost.textContent = '$' + info.cost.toFixed(3);
+
+            const bar = document.createElement('div');
+            bar.className = 'cost-bar';
+            bar.style.width = Math.min(100, pct) + '%';
+
+            const tdBar = document.createElement('td');
+            tdBar.className = 'cost-bar-cell';
+            tdBar.appendChild(bar);
+
+            tr.append(tdName, tdCalls, tdCost, tdBar);
             tbody.appendChild(tr);
         }
         if (Object.keys(data).length === 0) {
             const tr = document.createElement('tr');
-            tr.innerHTML = '<td colspan="4" style="color:var(--text-muted);text-align:center">No data</td>';
+            const td = document.createElement('td');
+            td.className = 'cost-empty-cell';
+            td.setAttribute('colspan', '4');
+            td.textContent = 'No data';
+            tr.appendChild(td);
             tbody.appendChild(tr);
         }
     }

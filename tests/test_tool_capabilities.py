@@ -222,17 +222,20 @@ def test_code_search_invalid_regex(tmp_path):
 
 
 def test_run_shell_string_cmd_is_hard_error(tmp_path):
-    """run_shell must return an error when cmd is a string, not silently recover."""
+    """run_shell recovers string cmd via cascade (shlex.split for plain strings)."""
     from ouroboros.tools.shell import _run_shell
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, patch
+    from subprocess import CompletedProcess
     from ouroboros.tools.registry import ToolContext
     ctx = MagicMock(spec=ToolContext)
     ctx.repo_dir = tmp_path
     ctx.drive_logs.return_value = tmp_path
-    result = _run_shell(ctx, "echo hello")
-    assert "SHELL_ARG_ERROR" in result
-    assert "JSON array" in result
-    assert "code_search" in result
+    with patch("ouroboros.tools.shell._tracked_subprocess_run",
+               return_value=CompletedProcess(["echo", "hello"], 0, "hello", "")), \
+         patch("ouroboros.tools.shell.load_settings", return_value={}):
+        result = _run_shell(ctx, "echo hello")
+    assert "SHELL_ARG_ERROR" not in result
+    assert "exit_code=0" in result
 
 
 def test_run_shell_list_cmd_works(tmp_path):

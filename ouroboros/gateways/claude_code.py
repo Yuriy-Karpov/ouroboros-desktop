@@ -13,8 +13,9 @@ Safety model:
      PreToolUse hooks for path guards
   2. Post-edit revert (registry.py) remains as defense-in-depth
 
-Raises ImportError early if claude-agent-sdk is not installed,
-so callers can fall back to CLI subprocess.
+The claude-agent-sdk package is a required dependency. If it is absent,
+callers receive an ImportError-derived error result with an install hint;
+there is no CLI subprocess fallback path.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
-# Import SDK eagerly — ImportError propagates to callers for fallback
+# Import SDK eagerly — ImportError surfaces SDK unavailability so callers return an install hint (no CLI fallback)
 from claude_agent_sdk import (  # noqa: E402
     ClaudeAgentOptions, ClaudeSDKClient, HookMatcher,
     AssistantMessage, ResultMessage, query,
@@ -236,13 +237,17 @@ async def _run_readonly_async(
     cwd: str,
     model: str = "opus",
     max_turns: int = 8,
+    effort: Optional[str] = "high",
 ) -> ClaudeCodeResult:
     """Run a read-only SDK query for advisory review.
 
     Uses the simpler query() function since no hooks are needed —
     disallowed_tools already blocks mutating operations at the CLI level.
+
+    effort: "low" | "medium" | "high" | "max" — controls reasoning depth.
+    Default "high" so advisory reviewer thinks as deeply as blocking reviewers.
     """
-    options = ClaudeAgentOptions(
+    options_kwargs: Dict[str, Any] = dict(
         cwd=cwd,
         model=model,
         permission_mode="default",  # no auto-approve
@@ -250,6 +255,28 @@ async def _run_readonly_async(
         disallowed_tools=["Bash", "Edit", "Write", "MultiEdit"],
         max_turns=max_turns,
     )
+    if effort is not None:
+        # Guard against older SDK versions that may not support the 'effort' kwarg.
+        # We probe ClaudeAgentOptions.__init__ signature at call time; if 'effort'
+        # is absent we silently omit it so advisory still runs (just without the
+        # reasoning-depth hint). This keeps pyproject.toml at >=0.1.50 without
+        # coupling to a specific version that first added 'effort'.
+        import inspect as _inspect
+        try:
+            _sig = _inspect.signature(ClaudeAgentOptions.__init__)
+            if "effort" in _sig.parameters:
+                options_kwargs["effort"] = effort
+        except (ValueError, TypeError):
+            # Signature introspection failed (e.g. built extension type) — try anyway
+            # and fall through to the except-TypeError below.
+            options_kwargs["effort"] = effort
+
+    try:
+        options = ClaudeAgentOptions(**options_kwargs)
+    except TypeError:
+        # SDK version does not accept 'effort' — retry without it
+        options_kwargs.pop("effort", None)
+        options = ClaudeAgentOptions(**options_kwargs)
 
     result = ClaudeCodeResult(success=True)
     text_parts: List[str] = []
@@ -331,11 +358,17 @@ def run_readonly(
     cwd: str,
     model: str = "opus",
     max_turns: int = 8,
+    effort: Optional[str] = "high",
 ) -> ClaudeCodeResult:
-    """Synchronous entry point for read-only advisory review."""
+    """Synchronous entry point for read-only advisory review.
+
+    effort: "low" | "medium" | "high" | "max". Default "high" to match
+    the reasoning depth of the downstream blocking reviewers.
+    """
     return _run_async(_run_readonly_async(
         prompt=prompt,
         cwd=cwd,
         model=model,
         max_turns=max_turns,
+        effort=effort,
     ))

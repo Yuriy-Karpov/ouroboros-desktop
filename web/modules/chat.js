@@ -48,7 +48,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     page.className = 'page active';
     page.innerHTML = `
         <div class="page-header chat-page-header">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h10"/><path d="M7 15h6"/><path d="M7 7h8"/></svg>
             <h2>Chat</h2>
             <div class="spacer"></div>
             <div class="chat-header-actions" id="chat-header-actions">
@@ -68,10 +68,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         </div>
         <div id="chat-messages"></div>
         <div id="chat-input-area">
-            <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1"></textarea>
-            <button class="icon-btn" id="chat-send">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-            </button>
+            <div class="chat-input-wrap">
+                <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1"></textarea>
+                <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
+            </div>
         </div>
     `;
     container.appendChild(page);
@@ -688,8 +688,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
 
     function appendTaskSummaryToLiveCard(msg) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
-        const text = msg?.content || msg?.text || '';
-        if (!taskId || !text) {
+        if (!taskId) {
             finishLiveCard(taskId, 'done');
             return;
         }
@@ -703,18 +702,19 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             markAssistantReply(taskId);
             return;
         }
+        const record = liveCardRecords.get(taskId);
+        const doneHeadline = (record && record.lastHumanHeadline) || 'Done';
         applyLiveCardState(
             {
                 phase: 'done',
-                headline: 'Finished task',
-                body: text,
-                human: true,
+                headline: doneHeadline,
+                visible: false,
+                human: false,
                 promote: true,
-                dedupeKey: `task_summary|${text}`,
             },
             taskId,
             normalizeLogTs(msg.ts || new Date().toISOString()),
-            `task_summary|${text}`,
+            `task_done|${taskId}`,
         );
         finishLiveCard(taskId, 'done');
         scheduleTaskUiCleanup(taskState);
@@ -868,9 +868,14 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                         if (!taskId) continue;
                         const taskState = getTaskUiState(taskId, true);
                         if (taskState.completed) continue;
-                        // Force the card visible for historical tasks — toolCalls is 0 after
-                        // a restart so revealBufferedCardIfNeeded would otherwise skip it.
-                        taskState.forceCard = true;
+                        // Force the card visible for historical tasks only when the task
+                        // was non-trivial (had tool calls or multiple rounds).  Trivial
+                        // tasks (simple replies) should not show a card at all.
+                        const hadToolCalls = (msg.tool_calls || 0) > 0;
+                        const hadMultipleRounds = (msg.rounds || 0) > 1;
+                        if (hadToolCalls || hadMultipleRounds) {
+                            taskState.forceCard = true;
+                        }
                         appendTaskSummaryToLiveCard(msg);
                         continue;
                     }
@@ -886,7 +891,15 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                         taskId,
                     });
                 }
+                const wasFirstLoad = !historyLoaded;
                 historyLoaded = true;
+                // On first load (page open / restart), scroll to the latest
+                // message. On subsequent reconnect syncs, only scroll if the
+                // user was already near the bottom to avoid hijacking scroll
+                // position when they are reading older messages.
+                if (wasFirstLoad || isNearBottom()) {
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                }
                 return messages.length > 0;
             } catch (err) {
                 const socketState = ws?.ws?.readyState;

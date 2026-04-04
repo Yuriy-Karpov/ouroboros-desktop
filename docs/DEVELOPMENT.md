@@ -136,10 +136,71 @@ Before every commit, verify the following:
 - [ ] No gratuitous abstract layers (Bible P5)
 
 #### Structural Rules
-- [ ] New Tool? `get_tools()` exports it.
+- [ ] New Tool? `get_tools()` exports it using the `ToolEntry` pattern from `registry.py`.
 - [ ] New Gateway (if extracted)? Contains no business logic, only transport.
 - [ ] New memory/data files? Should they appear in LLM context (`context.py`)?
+
+#### LLM Call Rules
+- [ ] New LLM calls go through the shared `LLMClient` / `llm.py` layer — no ad-hoc HTTP clients or direct provider SDKs outside that layer.
+
+#### Cognitive Artifact Integrity
+- [ ] Cognitive artifacts (identity.md, scratchpad, task reflections, review outputs, pattern register) must NOT use hardcoded `[:N]` truncation. If content must be shortened, include an explicit omission note (e.g. `⚠️ OMISSION NOTE: truncated at N chars`).
 
 ---
 
 *This section is the authoritative definition of "DEVELOPMENT.md compliance" referenced in the `development_compliance` item in `docs/CHECKLISTS.md`.*
+
+---
+
+## Design System
+
+Ouroboros uses **glassmorphism** as its visual language. All interactive surfaces follow this pattern:
+
+```css
+background: rgba(26, 21, 32, 0.75–0.88);
+backdrop-filter: blur(8–12px);
+border: 1px solid rgba(255, 255, 255, 0.06–0.12);
+```
+
+### Accent colors
+
+| Role | Value | Usage |
+|------|-------|-------|
+| Primary | `rgba(201, 53, 69, ...)` = `#c93545` | Nav buttons, chat cards, borders |
+| Hover/focus | `rgba(232, 93, 111, ...)` = `#e85d6f` | Focus glow, settings hover |
+
+Use the primary accent for new features. Avoid introducing additional red/crimson shades.
+
+### Border radius scale
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--radius-xs` | `3px` | Micro accents (progress bars) |
+| `--radius-sm` | `8px` | Small controls, filter chips |
+| `--radius` | `12px` | Inputs, inner cards |
+| `--radius-lg` | `16px` | Nav buttons, chat/live cards |
+| `--radius-xl` | `20px` | Logo images, large media |
+| *(no token)* | `18px` | Section cards (settings, form panels) |
+| *(no token)* | `24px` | Modal/wizard shells, chat input |
+
+Use CSS variables where possible. Do not introduce new hardcoded radius values.
+When a new radius value is needed, add it to `:root` in `web/style.css` first.
+
+### Interactive states
+
+```css
+hover:  transform: scale(1.02–1.04) + border-color +1 step brightness
+active: background rgba(201,53,69, 0.12) + crimson glow
+focus:  border-color rgba(232,93,111,0.4) + box-shadow 0 0 0 3px rgba(201,53,69,0.10)
+```
+
+### "Working" phase color
+
+Use **crimson** (`rgba(248, 130, 140, ...)`) for active/working states everywhere — not blue.
+The Logs page phase badges now match Chat live card colors.
+
+### No inline styles in JS
+
+JS modules that generate HTML must use CSS class names, not `style=""` attributes.
+Existing classes (`.stat-card`, `.page-header`, `.about-*`, `.costs-*`) cover common layouts.
+Add new classes to `web/style.css` when needed.

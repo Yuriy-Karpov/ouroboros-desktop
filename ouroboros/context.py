@@ -782,6 +782,21 @@ def build_llm_messages(
     except Exception:
         pass
 
+    # Last deep self-review (if available)
+    deep_review_path = env.drive_path("memory/deep_review.md")
+    try:
+        if deep_review_path.exists():
+            dr_text = deep_review_path.read_text(encoding="utf-8")
+            if dr_text.strip():
+                # Cap at 8K chars to avoid bloating context
+                if len(dr_text) > 8000:
+                    dr_text = dr_text[:8000] + "\n\n[... truncated — full report in memory/deep_review.md]"
+                semi_stable_parts.append(
+                    "## Last Deep Self-Review\n\n" + dr_text
+                )
+    except Exception:
+        pass
+
     registry_digest = _build_registry_digest(env)
     if registry_digest:
         semi_stable_parts.append(registry_digest)
@@ -798,15 +813,6 @@ def build_llm_messages(
     ])
 
     dynamic_parts.extend(build_recent_sections(memory, env, task_id=task.get("id", "")))
-
-    if str(task.get("type") or "") == "review" and review_context_builder is not None:
-        try:
-            review_ctx = review_context_builder()
-            if review_ctx:
-                dynamic_parts.append(review_ctx)
-        except Exception:
-            log.debug("Failed to build review context", exc_info=True)
-            pass
 
     # Advisory pre-review status — helps agent see pending findings before committing
     try:

@@ -171,6 +171,7 @@ class TestRepoWriteMultiFile:
 class TestPreflightCheck:
     def test_missing_version(self):
         review = _get_review_module()
+        # Plain filenames without porcelain prefix also work (fallback to "M")
         result = review._preflight_check(
             "v3.24.0: big change",
             "ouroboros/tools/git.py\nREADME.md",
@@ -182,19 +183,22 @@ class TestPreflightCheck:
 
     def test_missing_readme(self):
         review = _get_review_module()
+        # VERSION + ouroboros .py → needs README (check 1) and tests (check 3)
+        # Check 1 fires first, so we get README error
         result = review._preflight_check(
             "some change",
-            "VERSION\nouroboros/tools/git.py",
+            "M  VERSION\nM  ouroboros/tools/git.py",
             "/tmp",
         )
         assert result is not None
         assert "README.md" in result
 
     def test_all_present_passes(self):
+        # git.py is an ouroboros/ .py change so tests/ must also be present
         review = _get_review_module()
         result = review._preflight_check(
             "v3.24.0: change",
-            "VERSION\nREADME.md\nouroboros/tools/git.py",
+            "M  VERSION\nM  README.md\nM  ouroboros/tools/git.py\nM  tests/test_commit_gate.py",
             "/tmp",
         )
         assert result is None
@@ -203,7 +207,87 @@ class TestPreflightCheck:
         review = _get_review_module()
         result = review._preflight_check(
             "fix typo in docs",
-            "docs/ARCHITECTURE.md",
+            "M  docs/ARCHITECTURE.md",
+            "/tmp",
+        )
+        assert result is None
+
+    # --- New preflight check 3: tests_affected ---
+
+    def test_logic_changed_without_tests_blocked(self):
+        """Python code in ouroboros/ changed but no tests/ staged → blocked."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "fix something",
+            "M  ouroboros/tools/shell.py\nM  VERSION\nM  README.md",
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "tests/" in result
+
+    def test_logic_changed_with_tests_passes(self):
+        """Python code in ouroboros/ AND tests/ staged → passes."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "fix something",
+            "M  ouroboros/tools/shell.py\nM  tests/test_shell_recovery.py\nM  VERSION\nM  README.md",
+            "/tmp",
+        )
+        assert result is None
+
+    def test_supervisor_logic_without_tests_blocked(self):
+        """Python code in supervisor/ changed but no tests/ staged → blocked."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "update supervisor",
+            "M  supervisor/workers.py",
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+
+    def test_docs_only_change_no_tests_required(self):
+        """Docs-only change (no .py in ouroboros/) should not require tests."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "update docs",
+            "M  docs/ARCHITECTURE.md\nM  README.md",
+            "/tmp",
+        )
+        assert result is None
+
+    # --- New preflight check 4: architecture_doc ---
+
+    def test_new_module_without_architecture_blocked(self):
+        """New .py file added in ouroboros/ but ARCHITECTURE.md not staged → blocked."""
+        review = _get_review_module()
+        # Porcelain format with "A " prefix indicates a new (added) file
+        result = review._preflight_check(
+            "add new module",
+            "A  ouroboros/new_module.py\nM  tests/test_new_module.py",
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "ARCHITECTURE.md" in result
+
+    def test_new_module_with_architecture_passes(self):
+        """New .py file added AND ARCHITECTURE.md staged → passes."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "add new module",
+            "A  ouroboros/new_module.py\nM  tests/test_new_module.py\nM  docs/ARCHITECTURE.md",
+            "/tmp",
+        )
+        assert result is None
+
+    def test_modified_module_without_architecture_passes(self):
+        """Modified (not new) .py file without ARCHITECTURE.md → passes (check 4 not triggered)."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "update existing module",
+            "M  ouroboros/tools/shell.py\nM  tests/test_shell_recovery.py",
             "/tmp",
         )
         assert result is None
@@ -291,9 +375,23 @@ class TestReviewEnforcementModes:
         })
 
     @staticmethod
-    def _mock_staged(monkeypatch, review_mod, changed_files="x.py", diff_text="diff --cached"):
+    def _mock_staged(monkeypatch, review_mod, changed_files="x.py", diff_text="diff --cached",
+                     name_status_files=None):
+        """Mock git commands for _run_unified_review.
+
+        name_status_files: if provided, used as the --name-status output.
+        Defaults to converting changed_files lines to "M  path" format.
+        """
+        if name_status_files is None:
+            # Convert plain filenames to M\tpath format (what git --name-status emits)
+            name_status_files = "\n".join(
+                f"M\t{f.strip()}" for f in changed_files.splitlines() if f.strip()
+            )
+
         def _fake_run_cmd(cmd, cwd=None):
             cmd = list(cmd)
+            if cmd[:5] == ["git", "diff", "--cached", "--name-status"]:
+                return name_status_files
             if cmd[:4] == ["git", "diff", "--cached", "--name-only"]:
                 return changed_files
             if cmd[:3] == ["git", "diff", "--cached"]:
@@ -374,6 +472,216 @@ class TestReviewEnforcementModes:
         result = review._run_unified_review(ctx, "version update", repo_dir=ctx.repo_dir)
         assert result is None
         assert any("preflight warning did not block commit" in w.lower() for w in ctx._review_advisory)
+
+    def test_new_module_triggers_architecture_preflight_through_run_unified_review(self, tmp_path, monkeypatch):
+        """Check 4 (architecture_doc) fires through the real _run_unified_review caller.
+
+        This proves the name-status conversion in _run_unified_review feeds
+        _preflight_check correctly, so added files are detected.
+        """
+        review = _get_review_module()
+        ctx = _make_ctx(tmp_path)
+        # Simulate: new ouroboros module added + tests staged, but ARCHITECTURE.md absent
+        # name-status format: git emits "A\tpath" for added files
+        self._mock_staged(
+            monkeypatch, review,
+            changed_files="ouroboros/new_module.py\ntests/test_new_module.py",
+            name_status_files="A\touroboros/new_module.py\nA\ttests/test_new_module.py",
+        )
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+        result = review._run_unified_review(ctx, "add new module", repo_dir=ctx.repo_dir)
+        # Should be blocked by preflight because ARCHITECTURE.md is not staged
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "ARCHITECTURE.md" in result
+
+    def test_rename_out_of_ouroboros_triggers_check3(self):
+        """Renaming a .py file OUT of ouroboros/ is treated as a deletion and triggers check 3."""
+        review = _get_review_module()
+        # Source side should appear as D ouroboros/old.py in preflight
+        result = review._preflight_check(
+            "move module out of ouroboros",
+            "D  ouroboros/old.py\nR  docs/old.py",  # src deleted, dest not in ouroboros/
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "tests/" in result
+
+    def test_rename_out_of_ouroboros_with_tests_passes(self):
+        """Renaming a .py file out of ouroboros/ + staging tests passes check 3."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "move module out of ouroboros",
+            "D  ouroboros/old.py\nR  docs/old.py\nM  tests/test_old.py",
+            "/tmp",
+        )
+        assert result is None
+
+    def test_rename_into_ouroboros_triggers_architecture_check(self):
+        """Renaming a .py file INTO ouroboros/ without ARCHITECTURE.md triggers check 4."""
+        review = _get_review_module()
+        # Destination becomes "A ouroboros/new_module.py" → triggers new-module check
+        result = review._preflight_check(
+            "move module into ouroboros",
+            "D  docs/old_module.py\nA  ouroboros/new_module.py\nM  tests/test_new.py",
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "ARCHITECTURE.md" in result
+
+    def test_rename_into_ouroboros_with_architecture_passes(self):
+        """Renaming a .py file into ouroboros/ + staging ARCHITECTURE.md passes check 4."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "move module into ouroboros",
+            "D  docs/old_module.py\nA  ouroboros/new_module.py\nM  tests/test_new.py\nM  docs/ARCHITECTURE.md",
+            "/tmp",
+        )
+        assert result is None
+
+    def test_rename_lines_parsed_correctly_by_preflight(self, tmp_path, monkeypatch):
+        """Rename entries (R100\told\tnew) use the destination path for preflight checks."""
+        review = _get_review_module()
+        # Direct unit test of _preflight_check with a rename line
+        # Renamed VERSION to VERSIONX — preflight should not care (it's not "VERSION")
+        result = review._preflight_check(
+            "rename version file",
+            "R  VERSIONX",
+            "/tmp",
+        )
+        # No version-ref in commit message, so no preflight block expected
+        assert result is None
+
+    def test_rename_of_readme_counts_as_present(self, tmp_path, monkeypatch):
+        """If README.md appears as a rename destination, preflight sees it as staged."""
+        review = _get_review_module()
+        # Simulate: VERSION staged + README.md arrived via rename
+        result = review._preflight_check(
+            "v1.0.0: rename readme",
+            "M  VERSION\nR  README.md",
+            "/tmp",
+        )
+        # Both VERSION and README.md present → no check 1 block
+        # No ouroboros .py → no check 3 block
+        assert result is None
+
+    def test_copied_module_without_architecture_blocked(self):
+        """Copied .py file in ouroboros/ (status C) triggers architecture-doc preflight."""
+        review = _get_review_module()
+        # C status means a new file that was copied from somewhere else — still a new module
+        result = review._preflight_check(
+            "add copied module",
+            "C  ouroboros/new_copy.py\nM  tests/test_new_copy.py",
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "ARCHITECTURE.md" in result
+
+    def test_copied_module_with_architecture_passes(self):
+        """Copied .py file in ouroboros/ + ARCHITECTURE.md staged → passes."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "add copied module",
+            "C  ouroboros/new_copy.py\nM  tests/test_new_copy.py\nM  docs/ARCHITECTURE.md",
+            "/tmp",
+        )
+        assert result is None
+
+    def test_deleted_tests_file_does_not_satisfy_check3(self):
+        """Deleting a test file (D status) does not count as 'tests staged'."""
+        review = _get_review_module()
+        # Logic file modified, old test deleted — check 3 should still block
+        result = review._preflight_check(
+            "refactor module",
+            "M  ouroboros/some_module.py\nD  tests/test_old.py",
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "tests/" in result
+
+    def test_deleted_logic_file_without_tests_blocked(self):
+        """Deleting a .py file in ouroboros/ without staged tests is blocked (check 3)."""
+        review = _get_review_module()
+        # Only a deletion — no tests staged
+        result = review._preflight_check(
+            "remove old module",
+            "D  ouroboros/old_module.py",
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "tests/" in result
+
+    def test_deleted_logic_file_with_tests_passes(self):
+        """Deleting a .py file + staging a test file passes check 3."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "remove old module",
+            "D  ouroboros/old_module.py\nM  tests/test_old_module.py",
+            "/tmp",
+        )
+        assert result is None
+
+    def test_deleted_architecture_does_not_satisfy_check4(self):
+        """Deleting ARCHITECTURE.md does not count as 'architecture doc staged'."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "add new module",
+            "A  ouroboros/new_module.py\nM  tests/test_new.py\nD  docs/ARCHITECTURE.md",
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "ARCHITECTURE.md" in result
+
+    def test_deleted_readme_does_not_satisfy_check1(self):
+        """Deleting README.md while VERSION is staged triggers check 1."""
+        review = _get_review_module()
+        result = review._preflight_check(
+            "v1.0.0: bump version",
+            "M  VERSION\nD  README.md",
+            "/tmp",
+        )
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "README.md" in result
+
+    def test_copied_module_triggers_via_run_unified_review(self, tmp_path, monkeypatch):
+        """Check 4 fires for C-status copy via _run_unified_review, but source NOT treated as deleted."""
+        review = _get_review_module()
+        ctx = _make_ctx(tmp_path)
+        # Copy from ouroboros/base.py to ouroboros/new_copy.py.
+        # The source (ouroboros/base.py) is unchanged — only the destination is new.
+        # Architecture doc is absent → check 4 should fire.
+        self._mock_staged(
+            monkeypatch, review,
+            changed_files="ouroboros/new_copy.py\ntests/test_new_copy.py",
+            name_status_files="C100\touroboros/base.py\touroboros/new_copy.py\nA\ttests/test_new_copy.py",
+        )
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+        result = review._run_unified_review(ctx, "add copied module", repo_dir=ctx.repo_dir)
+        assert result is not None
+        assert "PREFLIGHT_BLOCKED" in result
+        assert "ARCHITECTURE.md" in result
+
+    def test_copy_source_not_treated_as_deletion(self):
+        """Copy source in ouroboros/ does NOT falsely trigger check 3 (source is not deleted)."""
+        review = _get_review_module()
+        # C100 ouroboros/base.py → docs/base_copy.py
+        # The copy source (ouroboros/base.py) was NOT modified or deleted — no logic change.
+        # The destination (docs/base_copy.py) is not in ouroboros/ → no new module.
+        # Result: preflight should NOT block for missing tests.
+        result = review._preflight_check(
+            "copy base to docs",
+            "A  docs/base_copy.py",  # only the destination; no D entry for C source
+            "/tmp",
+        )
+        # No .py logic change in ouroboros/ → check 3 should not fire
+        assert result is None
 
 
 # --- Unified review wired into commit functions ---

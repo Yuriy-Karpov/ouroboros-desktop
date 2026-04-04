@@ -24,14 +24,6 @@ import threading
 import time
 from typing import Optional
 
-from ouroboros.compat import (
-    IS_WINDOWS, IS_MACOS,
-    embedded_python_candidates, kill_process_on_port, force_kill_pid,
-    git_install_hint,
-    create_kill_on_close_job, assign_pid_to_job, terminate_job, close_job,
-    resume_process,
-)
-
 # ---------------------------------------------------------------------------
 # Paths (single source of truth: ouroboros.config)
 # ---------------------------------------------------------------------------
@@ -65,25 +57,6 @@ log = logging.getLogger("launcher")
 
 APP_VERSION = read_version()
 
-# Windows: prevent console windows when spawning subprocesses from the GUI app.
-_SUBPROCESS_NO_WINDOW = (
-    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
-)
-
-
-def _hidden_run(command, **kwargs):
-    if _SUBPROCESS_NO_WINDOW:
-        kwargs = dict(kwargs)
-        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _SUBPROCESS_NO_WINDOW
-    return subprocess.run(command, **kwargs)
-
-
-def _hidden_popen(command, **kwargs):
-    if _SUBPROCESS_NO_WINDOW:
-        kwargs = dict(kwargs)
-        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _SUBPROCESS_NO_WINDOW
-    return subprocess.Popen(command, **kwargs)
-
 
 # ---------------------------------------------------------------------------
 # Embedded Python
@@ -91,10 +64,16 @@ def _hidden_popen(command, **kwargs):
 def _find_embedded_python() -> str:
     """Locate the embedded python-build-standalone interpreter."""
     if getattr(sys, "frozen", False):
-        base = pathlib.Path(sys._MEIPASS)
+        candidates = [
+            pathlib.Path(sys._MEIPASS) / "python-standalone" / "bin" / "python3",
+            pathlib.Path(sys._MEIPASS) / "python-standalone" / "bin" / "python",
+        ]
     else:
-        base = pathlib.Path(__file__).parent
-    for p in embedded_python_candidates(base):
+        candidates = [
+            pathlib.Path(__file__).parent / "python-standalone" / "bin" / "python3",
+            pathlib.Path(__file__).parent / "python-standalone" / "bin" / "python",
+        ]
+    for p in candidates:
         if p.exists():
             return str(p)
     return sys.executable
@@ -104,119 +83,10 @@ EMBEDDED_PYTHON = _find_embedded_python()
 
 
 # ---------------------------------------------------------------------------
-# Windows UI runtime
-# ---------------------------------------------------------------------------
-_windows_dll_dir_handles: list = []
-
-
-def _show_windows_message(title: str, message: str) -> None:
-    if not IS_WINDOWS:
-        return
-    try:
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
-    except Exception:
-        pass
-
-
-def _prepare_windows_webview_runtime() -> tuple[bool, str]:
-    """Prepare pythonnet/pywebview runtime before importing webview on Windows."""
-    if not IS_WINDOWS:
-        return True, ""
-
-    base_dir = pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(sys.executable).parent))
-    exe_dir = pathlib.Path(sys.executable).parent
-    runtime_dir = base_dir / "pythonnet" / "runtime"
-    webview_lib_dir = base_dir / "webview" / "lib"
-    py_dll_name = f"python{sys.version_info[0]}{sys.version_info[1]}.dll"
-
-    def _unblock_file(path: pathlib.Path) -> None:
-        try:
-            os.remove(f"{path}:Zone.Identifier")
-        except OSError:
-            pass
-
-    def _unblock_tree(root: pathlib.Path) -> None:
-        if not root.is_dir():
-            return
-        for child in root.rglob("*"):
-            if child.is_file() and child.suffix.lower() in {".dll", ".exe", ".pyd"}:
-                _unblock_file(child)
-
-    py_dll_candidates = [
-        base_dir / py_dll_name,
-        exe_dir / py_dll_name,
-    ]
-    for root, _dirs, files in os.walk(base_dir):
-        if py_dll_name in files:
-            py_dll_candidates.append(pathlib.Path(root) / py_dll_name)
-            if len(py_dll_candidates) >= 6:
-                break
-
-    py_dll_path = next((p for p in py_dll_candidates if p.is_file()), None)
-    runtime_dll_path = runtime_dir / "Python.Runtime.dll"
-    if not runtime_dll_path.is_file():
-        for root, _dirs, files in os.walk(base_dir):
-            if "Python.Runtime.dll" in files:
-                runtime_dll_path = pathlib.Path(root) / "Python.Runtime.dll"
-                break
-
-    if py_dll_path is None:
-        return False, f"Bundled {py_dll_name} was not found."
-    if not runtime_dll_path.is_file():
-        return False, "Bundled Python.Runtime.dll was not found."
-
-    _unblock_file(py_dll_path)
-    _unblock_file(runtime_dll_path)
-    _unblock_tree(runtime_dll_path.parent)
-    _unblock_tree(webview_lib_dir)
-
-    os.environ["PYTHONNET_RUNTIME"] = "netfx"
-    os.environ["PYTHONNET_PYDLL"] = str(py_dll_path)
-
-    search_dirs = []
-    for candidate in (base_dir, exe_dir, runtime_dir, runtime_dll_path.parent, py_dll_path.parent, webview_lib_dir):
-        candidate_str = str(candidate)
-        if candidate.is_dir() and candidate_str not in search_dirs:
-            search_dirs.append(candidate_str)
-
-    current_path_parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
-    os.environ["PATH"] = os.pathsep.join(search_dirs + [p for p in current_path_parts if p and p not in search_dirs])
-
-    if hasattr(os, "add_dll_directory"):
-        global _windows_dll_dir_handles
-        for candidate in search_dirs:
-            try:
-                _windows_dll_dir_handles.append(os.add_dll_directory(candidate))
-            except (FileNotFoundError, OSError):
-                pass
-
-    try:
-        from clr_loader import get_netfx
-        from pythonnet import set_runtime
-        set_runtime(get_netfx())
-    except Exception as exc:
-        return False, f"Windows .NET runtime init failed: {exc}"
-
-    return True, ""
-
-
-# ---------------------------------------------------------------------------
 # Bootstrap
 # ---------------------------------------------------------------------------
 def check_git() -> bool:
-    if shutil.which("git") is not None:
-        return True
-    if IS_WINDOWS:
-        for _candidate in (
-            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "cmd", "git.exe"),
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "cmd", "git.exe"),
-        ):
-            if os.path.isfile(_candidate):
-                git_dir = os.path.dirname(_candidate)
-                os.environ["PATH"] = git_dir + ";" + os.environ.get("PATH", "")
-                return True
-    return False
+    return shutil.which("git") is not None
 
 
 def _sync_core_files() -> None:
@@ -244,17 +114,16 @@ def _commit_synced_files() -> None:
     """Commit sync'd safety files so git reset --hard doesn't revert them."""
     try:
         for rel in ["ouroboros/safety.py", "prompts/SAFETY.md", "ouroboros/tools/registry.py"]:
-            _hidden_run(["git", "add", rel], cwd=str(REPO_DIR), check=False, capture_output=True)
-        status = _hidden_run(
-            ["git", "status", "--porcelain", "--",
-             "ouroboros/safety.py", "prompts/SAFETY.md", "ouroboros/tools/registry.py"],
-            cwd=str(REPO_DIR), capture_output=True, text=True,
-        )
+            subprocess.run(["git", "add", rel], cwd=str(REPO_DIR),
+                           check=False, capture_output=True)
+        status = subprocess.run(["git", "status", "--porcelain", "--",
+                                 "ouroboros/safety.py", "prompts/SAFETY.md",
+                                 "ouroboros/tools/registry.py"],
+                                cwd=str(REPO_DIR), capture_output=True, text=True)
         if status.stdout.strip():
-            _hidden_run(
-                ["git", "commit", "-m", "safety-sync: restore protected files from bundle"],
-                cwd=str(REPO_DIR), check=False, capture_output=True,
-            )
+            subprocess.run(["git", "commit", "-m",
+                            "safety-sync: restore protected files from bundle"],
+                           cwd=str(REPO_DIR), check=False, capture_output=True)
             log.info("Committed synced safety files.")
     except Exception as e:
         log.warning("Failed to commit synced files: %s", e)
@@ -348,13 +217,13 @@ def bootstrap_repo() -> None:
     if needs_full_bootstrap:
         _ensure_repo_gitignore(REPO_DIR)
         try:
-            _hidden_run(["git", "init"], cwd=str(REPO_DIR), check=True, capture_output=True)
-            _hidden_run(["git", "config", "user.name", "Ouroboros"], cwd=str(REPO_DIR), check=True, capture_output=True)
-            _hidden_run(["git", "config", "user.email", "ouroboros@local.mac"], cwd=str(REPO_DIR), check=True, capture_output=True)
-            _hidden_run(["git", "add", "-A"], cwd=str(REPO_DIR), check=True, capture_output=True)
-            _hidden_run(["git", "commit", "-m", "Initial commit from app bundle"], cwd=str(REPO_DIR), check=False, capture_output=True)
-            _hidden_run(["git", "branch", "-M", "ouroboros"], cwd=str(REPO_DIR), check=False, capture_output=True)
-            _hidden_run(["git", "branch", "ouroboros-stable"], cwd=str(REPO_DIR), check=False, capture_output=True)
+            subprocess.run(["git", "init"], cwd=str(REPO_DIR), check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Ouroboros"], cwd=str(REPO_DIR), check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "ouroboros@local.mac"], cwd=str(REPO_DIR), check=True, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=str(REPO_DIR), check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "Initial commit from app bundle"], cwd=str(REPO_DIR), check=False, capture_output=True)
+            subprocess.run(["git", "branch", "-M", "ouroboros"], cwd=str(REPO_DIR), check=False, capture_output=True)
+            subprocess.run(["git", "branch", "ouroboros-stable"], cwd=str(REPO_DIR), check=False, capture_output=True)
         except Exception as e:
             log.error("Git init failed: %s", e)
 
@@ -366,7 +235,7 @@ def bootstrap_repo() -> None:
         if not world_path.exists():
             env = os.environ.copy()
             env["PYTHONPATH"] = str(REPO_DIR)
-            _hidden_run(
+            subprocess.run(
                 [EMBEDDED_PYTHON, "-c",
                  f"import sys; sys.path.insert(0, '{REPO_DIR}'); "
                  f"from ouroboros.world_profiler import generate_world_profile; "
@@ -434,7 +303,7 @@ def _install_deps() -> None:
         return
     log.info("Installing agent dependencies...")
     try:
-        _hidden_run(
+        subprocess.run(
             [EMBEDDED_PYTHON, "-m", "pip", "install", "-q", "-r", str(req_file)],
             timeout=300, capture_output=True,
         )
@@ -446,14 +315,13 @@ def _install_deps() -> None:
 # Agent process management
 # ---------------------------------------------------------------------------
 _agent_proc: Optional[subprocess.Popen] = None
-_agent_job: Optional[object] = None          # Windows Job Object handle
 _agent_lock = threading.Lock()
 _shutdown_event = threading.Event()
 
 
 def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     """Start the agent server.py as a subprocess."""
-    global _agent_proc, _agent_job
+    global _agent_proc
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_DIR)
     env["OUROBOROS_SERVER_PORT"] = str(port)
@@ -471,49 +339,14 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     server_py = REPO_DIR / "server.py"
     log.info("Starting agent: %s %s (port=%d)", EMBEDDED_PYTHON, server_py, port)
 
-    popen_kwargs: dict = dict(
+    proc = subprocess.Popen(
+        [EMBEDDED_PYTHON, str(server_py)],
         cwd=str(REPO_DIR),
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    if IS_WINDOWS:
-        from ouroboros.compat import _CREATE_SUSPENDED
-        popen_kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
-        )
-
-    proc = _hidden_popen([EMBEDDED_PYTHON, str(server_py)], **popen_kwargs)
     _agent_proc = proc
-
-    if IS_WINDOWS:
-        job = create_kill_on_close_job()
-        if job is None:
-            log.error(
-                "Failed to create Windows Job Object; refusing to run "
-                "without process-tree ownership."
-            )
-            proc.kill()
-            return proc
-        if not assign_pid_to_job(job, proc.pid):
-            log.error(
-                "Failed to assign agent pid %d to Windows Job Object; "
-                "refusing to run without process-tree ownership.",
-                proc.pid,
-            )
-            close_job(job)
-            proc.kill()
-            return proc
-        _agent_job = job
-        if not resume_process(proc.pid):
-            log.error("Failed to resume agent process %d — killing", proc.pid)
-            with _agent_lock:
-                if _agent_job is job:
-                    _agent_job = None
-            terminate_job(job)
-            close_job(job)
-            return proc
-        log.info("Agent pid %d assigned to Windows Job Object", proc.pid)
 
     # Stream agent stdout to log file in background
     def _stream_output():
@@ -533,28 +366,22 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
 
 def stop_agent() -> None:
     """Gracefully stop the agent process."""
-    global _agent_proc, _agent_job
+    global _agent_proc
     with _agent_lock:
         if _agent_proc is None:
             return
         proc = _agent_proc
-        job = _agent_job
-        _agent_proc = None
-        _agent_job = None
     log.info("Stopping agent (pid=%s)...", proc.pid)
     try:
         proc.terminate()
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        if IS_WINDOWS and job is not None:
-            terminate_job(job)
-        else:
-            proc.kill()
+        proc.kill()
         proc.wait(timeout=5)
     except Exception:
         pass
-    if IS_WINDOWS and job is not None:
-        close_job(job)
+    with _agent_lock:
+        _agent_proc = None
 
 
 def _read_port_file() -> int:
@@ -569,7 +396,22 @@ def _read_port_file() -> int:
 
 def _kill_stale_on_port(port: int) -> None:
     """Kill any process listening on the given port (cleanup from previous runs)."""
-    kill_process_on_port(port)
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = result.stdout.strip().split()
+        for pid_str in pids:
+            try:
+                pid = int(pid_str)
+                if pid != os.getpid():
+                    os.kill(pid, 9)
+                    log.info("Killed stale process %d on port %d", pid, port)
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass
+    except Exception:
+        pass
 
 
 def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
@@ -608,7 +450,6 @@ _webview_window = None  # set by main(), used by lifecycle loop
 
 def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
     """Main loop: start agent, monitor, restart on exit code 42 or crash."""
-    global _agent_proc, _agent_job
     crash_times: list = []
 
     # Kill anything left over from a previous launcher session
@@ -634,9 +475,6 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
 
         with _agent_lock:
             _agent_proc = None
-            if IS_WINDOWS and _agent_job is not None:
-                close_job(_agent_job)
-                _agent_job = None
 
         if _shutdown_event.is_set():
             break
@@ -648,7 +486,10 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             _kill_stale_on_port(port)
             import multiprocessing as _mp
             for child in _mp.active_children():
-                force_kill_pid(child.pid)
+                try:
+                    os.kill(child.pid, 9)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
             if _webview_window:
                 try:
                     _webview_window.destroy()
@@ -688,185 +529,9 @@ def _load_settings() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# First-run wizard
-# ---------------------------------------------------------------------------
-_WIZARD_HTML = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:#0d0b0f; color:#e2e8f0; font-family:-apple-system,system-ui,sans-serif;
-       display:flex; align-items:center; justify-content:center; min-height:100vh; padding:20px 0; }
-.card { background:rgba(255,255,255,.06); border-radius:16px; padding:28px 32px; width:480px;
-        max-height:90vh; overflow-y:auto; }
-h2 { font-size:22px; margin-bottom:4px; color:#e85d6f; }
-.sub { color:rgba(255,255,255,.5); font-size:13px; margin-bottom:16px; }
-h3 { font-size:14px; color:rgba(255,255,255,.6); margin-top:18px; margin-bottom:8px;
-     border-top:1px solid rgba(255,255,255,.08); padding-top:14px; }
-label { display:block; font-size:12px; color:rgba(255,255,255,.5); margin-bottom:4px; margin-top:10px; }
-input, select { width:100%; padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.12);
-        background:#1a1520; color:#e2e8f0; font-size:14px; outline:none; font-family:inherit; }
-input:focus, select:focus { border-color:#e85d6f; }
-.row { display:flex; gap:12px; }
-.row .field { flex:1; }
-.hint { font-size:11px; color:rgba(255,255,255,.35); margin-top:3px; }
-.btn { margin-top:20px; width:100%; padding:11px; border-radius:8px; border:none;
-       background:#dc2626; color:#fff; font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; }
-.btn:hover { background:#b91c1c; }
-.btn:disabled { opacity:.4; cursor:default; background:#7f1d1d; }
-.err { color:#ef4444; font-size:12px; margin-top:8px; display:none; }
-a { color:#e85d6f; }
-.opt { font-size:11px; color:rgba(255,255,255,.35); font-style:italic; }
-</style></head><body>
-<div class="card">
-  <h2>Ouroboros</h2>
-  <p class="sub">Configure your LLM provider. Everything can be changed later in Settings.</p>
-
-  <h3>Cloud LLM (OpenRouter)</h3>
-  <label>OpenRouter API Key <span class="opt">— required for cloud models</span></label>
-  <input id="api-key" type="password" placeholder="sk-or-v1-..." autofocus>
-  <p class="hint">Get one at <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></p>
-  <div class="row">
-    <div class="field"><label>Main Model</label><input id="model" value="anthropic/claude-opus-4.6"></div>
-    <div class="field"><label>Budget ($)</label><input id="budget" type="number" value="10" min="1" step="1" style="width:100px"></div>
-  </div>
-
-  <label>OpenAI API Key <span class="opt">— for web search</span></label>
-  <input id="openai-key" type="password" placeholder="sk-...">
-  <p class="hint">Enables the web_search tool. <a href="https://platform.openai.com/api-keys" target="_blank">Get key</a></p>
-
-  <h3>Local Model (optional)</h3>
-  <label>Preset</label>
-  <select id="local-preset">
-    <option value="">None — use cloud only</option>
-    <option value="qwen25-7b">Qwen2.5-7B Instruct Q3_K_M (~3.9 GB, 16 GB RAM)</option>
-    <option value="qwen3-14b">Qwen3-14B Instruct Q4_K_M (~9 GB, 32 GB RAM)</option>
-    <option value="qwen3-32b">Qwen3-32B Instruct Q4_K_M (~20 GB, 64 GB RAM)</option>
-    <option value="custom">Custom — I'll enter HuggingFace repo</option>
-  </select>
-  <div id="custom-fields" style="display:none">
-    <label>HuggingFace Source</label>
-    <input id="local-source" placeholder="Qwen/Qwen2.5-7B-Instruct-GGUF">
-    <label>GGUF Filename</label>
-    <input id="local-filename" placeholder="qwen2.5-7b-instruct-q3_k_m.gguf">
-  </div>
-
-  <p class="err" id="err"></p>
-  <button class="btn" id="save-btn" disabled>Start Ouroboros</button>
-</div>
-<script>
-const PRESETS = {
-    'qwen25-7b':  { source: 'Qwen/Qwen2.5-7B-Instruct-GGUF', filename: 'qwen2.5-7b-instruct-q3_k_m.gguf', ctx: 16384 },
-    'qwen3-14b':  { source: 'Qwen/Qwen3-14B-GGUF', filename: 'Qwen3-14B-Q4_K_M.gguf', ctx: 16384 },
-    'qwen3-32b':  { source: 'Qwen/Qwen3-32B-GGUF', filename: 'Qwen3-32B-Q4_K_M.gguf', ctx: 32768 },
-};
-const keyInput = document.getElementById('api-key');
-const preset = document.getElementById('local-preset');
-const btn = document.getElementById('save-btn');
-
-function validate() {
-    const hasKey = keyInput.value.trim().length >= 10;
-    const hasLocal = preset.value !== '';
-    btn.disabled = !(hasKey || hasLocal);
-}
-keyInput.addEventListener('input', validate);
-preset.addEventListener('change', () => {
-    document.getElementById('custom-fields').style.display = preset.value === 'custom' ? '' : 'none';
-    validate();
-});
-
-btn.addEventListener('click', async () => {
-    btn.disabled = true; btn.textContent = 'Saving...';
-    const data = {
-        TOTAL_BUDGET: parseFloat(document.getElementById('budget').value) || 10,
-        OUROBOROS_MODEL: document.getElementById('model').value.trim() || 'anthropic/claude-opus-4.6',
-    };
-    const orKey = keyInput.value.trim();
-    if (orKey.length >= 10) data.OPENROUTER_API_KEY = orKey;
-    const oaiKey = document.getElementById('openai-key').value.trim();
-    if (oaiKey.length >= 10) data.OPENAI_API_KEY = oaiKey;
-    const p = preset.value;
-    const defaultGpuLayers = navigator.platform.startsWith('Mac') ? -1 : 0;
-    if (p && p !== 'custom' && PRESETS[p]) {
-        data.LOCAL_MODEL_SOURCE = PRESETS[p].source;
-        data.LOCAL_MODEL_FILENAME = PRESETS[p].filename;
-        data.LOCAL_MODEL_CONTEXT_LENGTH = PRESETS[p].ctx;
-        data.LOCAL_MODEL_N_GPU_LAYERS = defaultGpuLayers;
-        data.USE_LOCAL_MAIN = !orKey;
-        data.USE_LOCAL_LIGHT = !orKey;
-        data.USE_LOCAL_CODE = !orKey;
-        data.USE_LOCAL_FALLBACK = true;
-    } else if (p === 'custom') {
-        data.LOCAL_MODEL_SOURCE = document.getElementById('local-source').value.trim();
-        data.LOCAL_MODEL_FILENAME = document.getElementById('local-filename').value.trim();
-        data.LOCAL_MODEL_N_GPU_LAYERS = defaultGpuLayers;
-        data.USE_LOCAL_MAIN = !orKey;
-        data.USE_LOCAL_LIGHT = !orKey;
-        data.USE_LOCAL_CODE = !orKey;
-        data.USE_LOCAL_FALLBACK = true;
-    }
-    const result = await window.pywebview.api.save_wizard(data);
-    if (result === 'ok') { btn.textContent = 'Starting...'; }
-    else { document.getElementById('err').style.display='block';
-           document.getElementById('err').textContent=result; btn.disabled=false; btn.textContent='Start Ouroboros'; }
-});
-</script></body></html>"""
-
-
-def _save_settings(settings: dict) -> None:
-    save_settings(settings)
-
-
-def _run_first_run_wizard() -> bool:
-    """Show setup wizard if no API key or local model configured. Returns True if configured."""
-    settings = _load_settings()
-    if settings.get("OPENROUTER_API_KEY") or settings.get("LOCAL_MODEL_SOURCE"):
-        return True
-
-    import webview
-    _wizard_done = {"ok": False}
-
-    class WizardApi:
-        def save_wizard(self, data: dict) -> str:
-            key = str(data.get("OPENROUTER_API_KEY", "")).strip()
-            has_local = bool(data.get("LOCAL_MODEL_SOURCE", "").strip())
-            if len(key) < 10 and not has_local:
-                return "Provide an OpenRouter API key or select a local model."
-            settings.update(data)
-            try:
-                _save_settings(settings)
-                _wizard_done["ok"] = True
-                for w in webview.windows:
-                    w.destroy()
-                return "ok"
-            except Exception as e:
-                return f"Failed to save: {e}"
-
-    webview.create_window(
-        "Ouroboros — Setup",
-        html=_WIZARD_HTML,
-        js_api=WizardApi(),
-        width=520,
-        height=480,
-    )
-    webview.start()
-    return _wizard_done["ok"]
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    if IS_WINDOWS:
-        ok, reason = _prepare_windows_webview_runtime()
-        if not ok:
-            log.error("Windows UI runtime initialization failed: %s", reason)
-            _show_windows_message(
-                "Ouroboros — Startup Failed",
-                "Windows UI runtime initialization failed.\n\n"
-                f"{reason}\n\n"
-                "Check launcher.log for details.",
-            )
-            return
-
     import webview
 
     if not acquire_pid_lock():
@@ -887,30 +552,18 @@ def main():
     if not check_git():
         log.warning("Git not found.")
         _result = {"installed": False}
-        _hint = git_install_hint()
 
         def _git_page(window):
             window.evaluate_js("""
                 document.getElementById('install-btn').onclick = function() {
-                    document.getElementById('status').textContent = 'Installing... Please wait.';
+                    document.getElementById('status').textContent = 'Installing... A system dialog may appear.';
                     window.pywebview.api.install_git();
                 };
             """)
 
         class GitApi:
             def install_git(self):
-                if IS_MACOS:
-                    _hidden_popen(["xcode-select", "--install"])
-                elif IS_WINDOWS:
-                    _hidden_popen(["winget", "install", "Git.Git", "--source", "winget", "--accept-source-agreements"])
-                else:
-                    for cmd in [["sudo", "apt", "install", "-y", "git"],
-                                ["sudo", "dnf", "install", "-y", "git"]]:
-                        try:
-                            _hidden_popen(cmd)
-                            break
-                        except FileNotFoundError:
-                            continue
+                subprocess.Popen(["xcode-select", "--install"])
                 for _ in range(300):
                     time.sleep(3)
                     if shutil.which("git"):
@@ -920,13 +573,12 @@ def main():
 
         git_window = webview.create_window(
             "Ouroboros — Setup Required",
-            html=f"""<html><body style="background:#1a1a2e;color:white;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+            html="""<html><body style="background:#1a1a2e;color:white;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
             <div style="text-align:center">
                 <h2>Git is required</h2>
                 <p>Ouroboros needs Git to manage its local repository.</p>
-                <p style="color:#94a3b8;font-size:13px;margin-top:8px">{_hint}</p>
-                <button id="install-btn" style="padding:10px 24px;border-radius:8px;border:none;background:#0ea5e9;color:white;cursor:pointer;font-size:14px;margin-top:12px">
-                    Install Git
+                <button id="install-btn" style="padding:10px 24px;border-radius:8px;border:none;background:#0ea5e9;color:white;cursor:pointer;font-size:14px">
+                    Install Git (Xcode CLI Tools)
                 </button>
                 <p id="status" style="color:#fbbf24;margin-top:12px"></p>
             </div></body></html>""",
@@ -940,10 +592,6 @@ def main():
     # Bootstrap
     bootstrap_repo()
 
-    # First-run wizard (API key)
-    if not _run_first_run_wizard():
-        log.info("Wizard was closed without saving. Launching anyway (Settings page available).")
-
     global _webview_window
     port = AGENT_SERVER_PORT
 
@@ -952,36 +600,12 @@ def main():
     lifecycle_thread.start()
 
     # Wait for server to be ready, then read actual port (may differ if default was busy)
-    server_ready = _wait_for_server(port, timeout=15)
+    _wait_for_server(port, timeout=15)
     actual_port = _read_port_file()
     if actual_port != port:
-        server_ready = _wait_for_server(actual_port, timeout=45)
+        _wait_for_server(actual_port, timeout=45)
     else:
-        server_ready = server_ready or _wait_for_server(port, timeout=45)
-
-    if not server_ready:
-        log.error("Agent failed to become healthy on port %d; aborting UI startup.", actual_port)
-        _shutdown_event.set()
-        stop_agent()
-        lifecycle_thread.join(timeout=5)
-        webview.create_window(
-            "Ouroboros — Startup Failed",
-            html=(
-                "<html><body style='background:#1a1a2e;color:white;font-family:system-ui;"
-                "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
-                "<div style='text-align:center;max-width:460px;padding:24px'>"
-                "<h2>Ouroboros failed to start</h2>"
-                "<p>The local agent server did not become ready.</p>"
-                "<p style='color:#94a3b8;font-size:13px;margin-top:10px'>"
-                "Check launcher.log and agent_stdout.log in the Ouroboros data directory "
-                "for details.</p>"
-                "</div></body></html>"
-            ),
-            width=520,
-            height=260,
-        )
-        webview.start()
-        return
+        _wait_for_server(port, timeout=45)
 
     url = f"http://127.0.0.1:{actual_port}"
 
@@ -1006,14 +630,19 @@ def main():
     def _kill_orphaned_children():
         """Final safety net: kill any processes still on the server port.
 
-        After stop_agent() terminates server.py, worker grandchildren may
-        survive as orphans.  Sweeping the port guarantees nothing lingers.
+        After stop_agent() sends SIGTERM/SIGKILL to server.py, worker
+        grandchildren may survive as orphans (fork on macOS). Sweeping
+        the port guarantees nothing lingers.
         """
         _kill_stale_on_port(port)
         _kill_stale_on_port(8766)
+        import signal
         for child in __import__('multiprocessing').active_children():
-            force_kill_pid(child.pid)
-            log.info("Killed orphaned child pid=%d", child.pid)
+            try:
+                os.kill(child.pid, signal.SIGKILL)
+                log.info("Killed orphaned child pid=%d", child.pid)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
 
     window.events.closing += _on_closing
     _webview_window = window

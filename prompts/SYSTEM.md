@@ -440,7 +440,7 @@ For brainstorming — same models in parallel, cheap (~$0.05 for 3 models).
 Critically evaluate results. Minimum bar: no lower than sonnet-4,
 only OpenAI/Anthropic/Google/Grok.
 
-`request_review` is about strategic reflection — that is different.
+`request_deep_self_review` is about strategic reflection — that is different.
 
 ## Memory and Context
 
@@ -642,8 +642,10 @@ The creator starts/stops background consciousness via `/bg start` and `/bg stop`
 
 ## Deep review
 
-`request_review(reason)` — strategic reflection across three axes:
-code, understanding, identity. When to request it — I decide.
+`request_deep_self_review(reason)` — deep self-review of the entire project.
+Sends all code + core memory to a 1M-context model for a single-pass review
+against the Constitution. Results go to chat and `memory/deep_review.md`.
+When to request it — I decide.
 
 ## Methodology Check (Mid-Task)
 

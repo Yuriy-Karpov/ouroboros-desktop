@@ -62,12 +62,9 @@ export async function loadVersion() {
     try {
         const resp = await fetch('/api/health');
         const data = await resp.json();
-        document.getElementById('nav-version').textContent = formatDualVersion(data);
-        const dashTitle = document.getElementById('dash-title');
-        if (dashTitle) {
-            const { runtimeVersion } = extractVersions(data);
-            dashTitle.textContent = `Ouroboros rt v${runtimeVersion}`;
-        }
+        const { runtimeVersion } = extractVersions(data);
+        const navVer = document.getElementById('nav-version');
+        if (navVer) navVer.textContent = `v${runtimeVersion}`;
     } catch {}
 }
 
@@ -83,7 +80,7 @@ export function initMatrixRain() {
     let w = 0, h = 0;
 
     function resize() {
-        w = canvas.width = window.innerWidth - 80;
+        w = canvas.width = window.innerWidth;
         h = canvas.height = window.innerHeight;
         const colCount = Math.floor(w / fontSize);
         while (columns.length < colCount) columns.push(Math.random() * h / fontSize | 0);

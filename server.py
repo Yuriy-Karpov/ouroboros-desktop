@@ -94,16 +94,6 @@ _SECRET_SETTING_KEYS = {
 # ---------------------------------------------------------------------------
 _ws_clients: List[WebSocket] = []
 _ws_lock = threading.Lock()
-_claude_code_state_lock = threading.Lock()
-_claude_code_state: Dict[str, Any] = {
-    "busy": False,
-    "status": "",
-    "message": "",
-    "error": "",
-    "freshly_installed": False,
-}
-
-
 def _has_ws_clients() -> bool:
     with _ws_lock:
         return bool(_ws_clients)
@@ -170,43 +160,37 @@ def _restart_current_process(host: str, port: int) -> None:
     _restart_current_process_impl(host, port, repo_dir=REPO_DIR, log=log)
 
 
-def _update_claude_code_state(**updates: Any) -> Dict[str, Any]:
-    with _claude_code_state_lock:
-        _claude_code_state.update(updates)
-        return dict(_claude_code_state)
-
-
-def _get_claude_code_state() -> Dict[str, Any]:
-    with _claude_code_state_lock:
-        return dict(_claude_code_state)
-
-
 def _claude_code_status_payload() -> Dict[str, Any]:
-    from ouroboros.tools.shell import get_claude_code_cli_status
+    """Return Claude Agent SDK availability and version details."""
+    import sys
+    sdk_version = ""
+    installed = False
+    try:
+        import importlib.metadata
+        sdk_version = importlib.metadata.version("claude-agent-sdk")
+        installed = bool(sdk_version)
+    except Exception:
+        pass
 
-    payload = dict(get_claude_code_cli_status())
-    transient = _get_claude_code_state()
-    if transient.get("busy"):
-        payload.update({
-            "status": "installing",
-            "busy": True,
-            "message": transient.get("message") or "Installing Claude Code CLI...",
+    if installed:
+        return {
+            "status": "installed",
+            "installed": True,
+            "busy": False,
+            "version": sdk_version,
+            "path": sys.executable,
+            "message": f"Claude Agent SDK installed: {sdk_version}",
             "error": "",
-        })
-        return payload
-
-    payload["busy"] = False
-    if transient.get("status") == "error" and not payload.get("installed"):
-        payload.update({
-            "status": "error",
-            "message": transient.get("message") or payload.get("message"),
-            "error": transient.get("error") or payload.get("error", ""),
-        })
-    elif transient.get("message"):
-        payload["message"] = transient["message"]
-    if transient.get("freshly_installed"):
-        payload["freshly_installed"] = True
-    return payload
+        }
+    return {
+        "status": "missing",
+        "installed": False,
+        "busy": False,
+        "version": "",
+        "path": "",
+        "message": "Claude Agent SDK not installed. Install: pip install 'ouroboros[claude-sdk]'",
+        "error": "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +343,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             ctx.kill_workers(force=True)
             _request_restart_exit()
         elif lowered.startswith("/review"):
-            ctx.queue_review_task(reason="owner:/review", force=True)
+            ctx.queue_deep_self_review_task(reason="owner:/review", force=True)
         elif lowered.startswith("/evolve"):
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "on"
@@ -483,7 +467,7 @@ def _run_supervisor(settings: dict) -> None:
         from supervisor.queue import (
             enqueue_task, enforce_task_timeouts, enqueue_evolution_task_if_needed,
             persist_queue_snapshot, restore_pending_from_snapshot,
-            cancel_task_by_id, queue_review_task, sort_pending,
+            cancel_task_by_id, queue_deep_self_review_task, sort_pending,
         )
         from supervisor.workers import (
             init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
@@ -547,7 +531,7 @@ def _run_supervisor(settings: dict) -> None:
             send_with_budget=send_with_budget, load_state=load_state, save_state=save_state,
             update_budget_from_usage=update_budget_from_usage, append_jsonl=append_jsonl,
             enqueue_task=enqueue_task, cancel_task_by_id=cancel_task_by_id,
-            queue_review_task=queue_review_task, persist_queue_snapshot=persist_queue_snapshot,
+            queue_deep_self_review_task=queue_deep_self_review_task, persist_queue_snapshot=persist_queue_snapshot,
             safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
             sort_pending=sort_pending, consciousness=_consciousness,
             soft_timeout=soft_timeout, hard_timeout=hard_timeout,
@@ -778,57 +762,45 @@ async def api_claude_code_status(request: Request) -> JSONResponse:
             "status": "error",
             "installed": False,
             "busy": False,
-            "message": "Failed to read Claude Code CLI status.",
+            "message": "Failed to read Claude Agent SDK status.",
             "error": str(e),
         }, status_code=500)
 
 
 async def api_claude_code_install(request: Request) -> JSONResponse:
-    state = _get_claude_code_state()
-    if state.get("busy"):
-        payload = await asyncio.to_thread(_claude_code_status_payload)
-        return JSONResponse(payload, status_code=202)
-
-    def _progress(text: str) -> None:
-        _update_claude_code_state(
-            busy=True,
-            status="installing",
-            message=str(text or "").strip() or "Installing Claude Code CLI...",
-            error="",
-            freshly_installed=False,
-        )
-
-    _update_claude_code_state(
-        busy=True,
-        status="installing",
-        message="Starting Claude Code CLI installation...",
-        error="",
-        freshly_installed=False,
-    )
+    """Install Claude Agent SDK via pip if not already installed."""
+    payload = await asyncio.to_thread(_claude_code_status_payload)
+    if payload.get("installed"):
+        return JSONResponse(payload)
 
     try:
-        from ouroboros.tools.shell import ensure_claude_code_cli
-
-        result = await asyncio.to_thread(ensure_claude_code_cli, _progress)
-    except Exception as e:
-        result = {
+        import subprocess as _sp
+        import sys as _sys
+        result = await asyncio.to_thread(
+            lambda: _sp.run(
+                [_sys.executable, "-m", "pip", "install", "claude-agent-sdk>=0.1.50"],
+                capture_output=True, text=True, timeout=120,
+            )
+        )
+        if result.returncode == 0:
+            payload = await asyncio.to_thread(_claude_code_status_payload)
+            payload["freshly_installed"] = True
+            return JSONResponse(payload)
+        return JSONResponse({
             "status": "error",
             "installed": False,
             "busy": False,
-            "message": "Claude Code CLI installation failed.",
+            "message": "claude-agent-sdk installation failed.",
+            "error": (result.stderr or result.stdout or "")[:500],
+        }, status_code=500)
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "installed": False,
+            "busy": False,
+            "message": "claude-agent-sdk installation failed.",
             "error": f"{type(e).__name__}: {e}",
-            "freshly_installed": False,
-        }
-
-    _update_claude_code_state(
-        busy=False,
-        status=result.get("status") or "",
-        message=result.get("message") or "",
-        error=result.get("error") or "",
-        freshly_installed=bool(result.get("freshly_installed")),
-    )
-    status_code = 500 if result.get("status") == "error" else 200
-    return JSONResponse(result, status_code=status_code)
+        }, status_code=500)
 
 
 async def api_settings_post(request: Request) -> JSONResponse:

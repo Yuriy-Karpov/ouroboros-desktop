@@ -305,9 +305,10 @@ def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
         log.debug("Failed to forward task_metrics to live logs", exc_info=True)
 
 
-def _handle_review_request(evt: Dict[str, Any], ctx: Any) -> None:
-    ctx.queue_review_task(
-        reason=str(evt.get("reason") or "agent_review_request"), force=False
+def _handle_deep_self_review_request(evt: Dict[str, Any], ctx: Any) -> None:
+    ctx.queue_deep_self_review_task(
+        reason=str(evt.get("reason") or "agent_self_review"),
+        model=str(evt.get("model") or ""),
     )
 
 
@@ -606,7 +607,7 @@ EVENT_HANDLERS = {
     "send_message": _handle_send_message,
     "task_done": _handle_task_done,
     "task_metrics": _handle_task_metrics,
-    "review_request": _handle_review_request,
+    "deep_self_review_request": _handle_deep_self_review_request,
     "promote_to_stable": _handle_promote_to_stable,
     "schedule_task": _handle_schedule_task,
     "cancel_task": _handle_cancel_task,

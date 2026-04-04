@@ -213,6 +213,76 @@ def build_goal_section(
 # 6. build_scope_section
 # ---------------------------------------------------------------------------
 
+def build_head_snapshot_section(
+    repo_dir: Path,
+    paths: list[str],
+) -> str:
+    """Build a section with pre-change (HEAD) content of touched files.
+
+    For each path:
+    - If the file is new (no HEAD version): notes it as new.
+    - If the file was deleted: shows the old content from HEAD.
+    - If the file was modified: shows the old content from HEAD.
+
+    Returns formatted text ready for injection into a scope review prompt.
+    """
+    if not paths:
+        return "(no touched files)"
+
+    parts: list[str] = []
+    for rel in paths:
+        suffix = Path(rel).suffix.lower()
+        # Skip binary files — git show with text=True can produce garbage or UnicodeDecodeError
+        if suffix in BINARY_EXTENSIONS:
+            parts.append(f"### {rel}\n\n*(HEAD snapshot omitted — binary file ({suffix}))*\n")
+            continue
+        ext = Path(rel).suffix.lstrip(".")
+        lang = ext if ext else ""
+        try:
+            result = subprocess.run(
+                ["git", "show", f"HEAD:{rel}"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
+            if result.returncode != 0:
+                # Distinguish "file not in HEAD" (genuinely new file) from real git failures.
+                # Only match known messages that mean the path is absent from HEAD.
+                stderr_lower = result.stderr.lower() if result.stderr else ""
+                is_new_file = (
+                    "does not exist" in stderr_lower
+                    or "exists on disk" in stderr_lower
+                    or "path not in" in stderr_lower
+                    or "not in 'head'" in stderr_lower
+                )
+                if is_new_file:
+                    parts.append(f"### {rel}\n\n*(File is new — no HEAD snapshot)*\n")
+                else:
+                    # Real git failure — emit explicit error so reviewer knows the snapshot is missing
+                    short_err = (result.stderr or "").strip()[:200]
+                    parts.append(f"### {rel}\n\n*(HEAD snapshot error — git exited {result.returncode}: {short_err})*\n")
+            else:
+                content = result.stdout
+                if len(content) > _FILE_SIZE_LIMIT:
+                    parts.append(
+                        f"### {rel}\n\n"
+                        f"*(HEAD snapshot omitted — {len(content):,} bytes exceeds 100 KB limit)*\n"
+                    )
+                elif not content.strip():
+                    parts.append(f"### {rel}\n\n*(HEAD snapshot was empty)*\n")
+                else:
+                    parts.append(f"### {rel}\n```{lang}\n{content}\n```\n")
+        except subprocess.TimeoutExpired:
+            parts.append(f"### {rel}\n\n*(HEAD snapshot timeout)*\n")
+        except Exception as exc:
+            parts.append(f"### {rel}\n\n*(HEAD snapshot error: {exc})*\n")
+
+    return "\n".join(parts)
+
+
 def build_scope_section(scope: str = "") -> str:
     """Format the 'Scope of this change' section. Empty string if no scope."""
     if not scope.strip():

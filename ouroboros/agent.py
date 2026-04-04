@@ -282,39 +282,89 @@ class OuroborosAgent:
             task_type_str = str(task.get("type") or "").lower()
             initial_effort = resolve_effort(task_type_str)
 
-            try:
-                text, usage, llm_trace = run_llm_loop(
-                    messages=messages,
-                    tools=self.tools,
-                    llm=self.llm,
-                    drive_logs=drive_logs,
-                    emit_progress=self._emit_progress,
-                    incoming_messages=self._incoming_messages,
-                    task_type=task_type_str,
-                    task_id=str(task.get("id") or ""),
-                    budget_remaining_usd=budget_remaining,
-                    event_queue=self._event_queue,
-                    initial_effort=initial_effort,
-                    drive_root=self.env.drive_root,
-                )
-            except Exception as e:
-                tb = traceback.format_exc()
-                append_jsonl(drive_logs / "events.jsonl", {
-                    "ts": utc_now_iso(), "type": "task_error",
-                    "task_id": task.get("id"), "error": repr(e),
-                    "traceback": truncate_for_log(tb, 2000),
-                })
-                text = f"⚠️ Error during processing: {type(e).__name__}: {e}"
+            if task_type_str == "deep_self_review":
+                # Deep self-review: bypass tool loop, direct single LLM call
                 try:
-                    from ouroboros.task_results import STATUS_FAILED, write_task_result
-                    write_task_result(
-                        self.env.drive_root,
-                        str(task.get("id") or ""),
-                        STATUS_FAILED,
-                        result=text,
+                    from ouroboros.deep_self_review import run_deep_self_review, is_review_available
+                    self._emit_progress("Starting deep self-review... This may take several minutes.")
+                    review_model = str(task.get("model") or "")
+                    if not review_model:
+                        avail, review_model = is_review_available()
+                        if not avail:
+                            review_model = ""
+                    if not review_model:
+                        text = "❌ Deep self-review unavailable: no OPENROUTER_API_KEY or OPENAI_API_KEY configured."
+                        usage = {}
+                    else:
+                        text, usage = run_deep_self_review(
+                            repo_dir=self.env.repo_dir,
+                            drive_root=self.env.drive_root,
+                            llm=self.llm,
+                            emit_progress=self._emit_progress,
+                            event_queue=self._event_queue,
+                            model=review_model,
+                        )
+                    # Emit usage event for budget tracking
+                    if usage:
+                        self._pending_events.append({
+                            "type": "llm_usage",
+                            "ts": utc_now_iso(),
+                            "task_id": str(task.get("id") or ""),
+                            "model": review_model,
+                            "usage": usage,
+                            "category": "deep_self_review",
+                        })
+                    # Save to memory
+                    try:
+                        review_path = pathlib.Path(self.env.drive_root) / "memory" / "deep_review.md"
+                        review_path.write_text(text, encoding="utf-8")
+                    except Exception as save_err:
+                        log.warning("Failed to save deep review to memory: %s", save_err)
+                    llm_trace = {"reasoning_notes": ["deep_self_review"], "tool_calls": []}
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    append_jsonl(drive_logs / "events.jsonl", {
+                        "ts": utc_now_iso(), "type": "task_error",
+                        "task_id": task.get("id"), "error": repr(e),
+                        "traceback": truncate_for_log(tb, 2000),
+                    })
+                    text = f"⚠️ Deep self-review error: {type(e).__name__}: {e}"
+                    usage = {}
+                    llm_trace = {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
+            else:
+                try:
+                    text, usage, llm_trace = run_llm_loop(
+                        messages=messages,
+                        tools=self.tools,
+                        llm=self.llm,
+                        drive_logs=drive_logs,
+                        emit_progress=self._emit_progress,
+                        incoming_messages=self._incoming_messages,
+                        task_type=task_type_str,
+                        task_id=str(task.get("id") or ""),
+                        budget_remaining_usd=budget_remaining,
+                        event_queue=self._event_queue,
+                        initial_effort=initial_effort,
+                        drive_root=self.env.drive_root,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    append_jsonl(drive_logs / "events.jsonl", {
+                        "ts": utc_now_iso(), "type": "task_error",
+                        "task_id": task.get("id"), "error": repr(e),
+                        "traceback": truncate_for_log(tb, 2000),
+                    })
+                    text = f"⚠️ Error during processing: {type(e).__name__}: {e}"
+                    try:
+                        from ouroboros.task_results import STATUS_FAILED, write_task_result
+                        write_task_result(
+                            self.env.drive_root,
+                            str(task.get("id") or ""),
+                            STATUS_FAILED,
+                            result=text,
+                        )
+                    except Exception:
+                        pass
 
             if not isinstance(text, str) or not text.strip():
                 text = "⚠️ Model returned an empty response. Try rephrasing your request."
