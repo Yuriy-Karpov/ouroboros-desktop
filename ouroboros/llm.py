@@ -963,7 +963,7 @@ class LLMClient:
     @staticmethod
     def _build_anthropic_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         anthropic_tools: List[Dict[str, Any]] = []
-        for tool in tools or []:
+        for tool in LLMClient._sanitize_chat_completion_tools(tools):
             function = tool.get("function") or {}
             name = str(function.get("name") or "").strip()
             if not name:
@@ -980,6 +980,7 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]],
     ) -> List[Dict[str, Any]]:
         sanitized_tools: List[Dict[str, Any]] = []
+        seen_tool_names: Set[str] = set()
         for tool in tools or []:
             if not isinstance(tool, dict):
                 continue
@@ -987,13 +988,22 @@ class LLMClient:
             function = tool_copy.get("function") or {}
             if isinstance(function, dict):
                 function_copy = dict(function)
-                function_copy["name"] = str(function_copy.get("name") or "")
+                name = str(function_copy.get("name") or "").strip()
+                if not name:
+                    continue
+                if name in seen_tool_names:
+                    log.warning("Dropping duplicate tool schema: %s", name)
+                    continue
+                seen_tool_names.add(name)
+                function_copy["name"] = name
                 function_copy["description"] = LLMClient._stringify_tool_description(
                     function_copy.get("description")
                 )
                 if not isinstance(function_copy.get("parameters"), dict):
                     function_copy["parameters"] = {"type": "object", "properties": {}}
                 tool_copy["function"] = function_copy
+            else:
+                continue
             sanitized_tools.append(tool_copy)
         return sanitized_tools
 
