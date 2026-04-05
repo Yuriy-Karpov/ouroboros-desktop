@@ -549,9 +549,9 @@ def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
     (drive_root / "state").mkdir()
     subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
 
-    # Create a blocked commit attempt with critical findings
+    # Create a blocked commit attempt with structured critical findings
     state = rs_mod.AdvisoryReviewState()
-    state.last_commit_attempt = rs_mod.CommitAttemptRecord(
+    attempt = rs_mod.CommitAttemptRecord(
         ts="2026-04-02T22:00:00",
         commit_message="test blocked commit",
         status="blocked",
@@ -562,7 +562,14 @@ def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
             "  CRITICAL: [gpt-5.4] tests_affected: No tests for new function\n"
             "  WARN: [opus] self_consistency: Minor doc drift"
         ),
+        critical_findings=[
+            {"verdict": "FAIL", "severity": "critical",
+             "item": "bible_compliance", "reason": "Missing BIBLE.md update", "model": "m"},
+            {"verdict": "FAIL", "severity": "critical",
+             "item": "tests_affected", "reason": "No tests for new function", "model": "m"},
+        ],
     )
+    state.add_blocking_attempt(attempt)
     rs_mod.save_state(drive_root, state)
 
     # Build the advisory prompt with drive_root
@@ -570,11 +577,11 @@ def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
         repo_dir, "test commit", drive_root=drive_root
     )
 
-    # Must contain blocking history section
-    assert "Previous blocking review findings" in prompt
+    # Must contain obligations section (new format)
+    assert "Unresolved obligations" in prompt
     assert "bible_compliance" in prompt
     assert "tests_affected" in prompt
-    assert "MUST catch these same issues" in prompt
+    assert "should explicitly address" in prompt
 
 
 def test_advisory_prompt_no_blocking_history_when_succeeded(tmp_path):
@@ -602,7 +609,7 @@ def test_advisory_prompt_no_blocking_history_when_succeeded(tmp_path):
         repo_dir, "test commit", drive_root=drive_root
     )
 
-    assert "Previous blocking review findings" not in prompt
+    assert "Unresolved obligations from previous blocking rounds" not in prompt
 
 
 def test_advisory_prompt_no_blocking_history_without_drive_root(tmp_path):
@@ -615,7 +622,7 @@ def test_advisory_prompt_no_blocking_history_without_drive_root(tmp_path):
     subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
 
     prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
-    assert "Previous blocking review findings" not in prompt
+    assert "Unresolved obligations from previous blocking rounds" not in prompt
 
 
 def test_advisory_prompt_strictness_formulations():
@@ -693,7 +700,7 @@ def test_blocking_history_section_with_scope_blocked(tmp_path):
     (drive_root / "state").mkdir(parents=True)
 
     state = rs_mod.AdvisoryReviewState()
-    state.last_commit_attempt = rs_mod.CommitAttemptRecord(
+    attempt = rs_mod.CommitAttemptRecord(
         ts="2026-04-02T22:00:00",
         commit_message="scope blocked commit",
         status="blocked",
@@ -702,11 +709,16 @@ def test_blocking_history_section_with_scope_blocked(tmp_path):
             "⚠️ SCOPE_REVIEW_BLOCKED: Missing touchpoint.\n"
             "CRITICAL: [opus] forgotten_touchpoints: ARCHITECTURE.md not updated"
         ),
+        critical_findings=[
+            {"verdict": "FAIL", "severity": "critical",
+             "item": "forgotten_touchpoints", "reason": "ARCHITECTURE.md not updated", "model": "opus"},
+        ],
     )
+    state.add_blocking_attempt(attempt)
     rs_mod.save_state(drive_root, state)
 
     section = adv_mod._build_blocking_history_section(drive_root)
-    assert "Previous blocking review findings" in section
+    assert "Unresolved obligations" in section
     assert "scope_blocked" in section
     assert "ARCHITECTURE.md" in section
 

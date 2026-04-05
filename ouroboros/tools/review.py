@@ -595,6 +595,8 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
     critical_fails: List[str] = []
     advisory_warns: List[str] = []
     errored_models: List[str] = []
+    # Structured critical findings for obligation tracking (list of dicts)
+    structured_critical: List[dict] = []
 
     for mr in model_results:
         model_name = mr.get("model", "?")
@@ -635,8 +637,18 @@ def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[lis
             desc = f"[{model_name}] {item_name}: {reason}"
             if severity == "critical":
                 critical_fails.append(desc)
+                structured_critical.append({
+                    "verdict": "FAIL",
+                    "severity": "critical",
+                    "item": item_name,
+                    "reason": reason,
+                    "model": model_name,
+                })
             else:
                 advisory_warns.append(desc)
+
+    # Store structured findings on ctx for obligation tracking
+    ctx._last_review_critical_findings = structured_critical
 
     return critical_fails, advisory_warns, errored_models
 
@@ -695,6 +707,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     target_repo = repo_dir or ctx.repo_dir
     ctx._review_iteration_count += 1
     ctx._last_review_block_reason = ""  # reset per attempt
+    ctx._last_review_critical_findings = []  # reset to avoid stale findings from previous attempts
     review_enforcement = _cfg.get_review_enforcement()
     blocking_review = review_enforcement == "blocking"
 

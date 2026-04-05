@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.11.14](https://img.shields.io/badge/version-4.11.14-green.svg)](VERSION)
+[![Version 4.12.0](https://img.shields.io/badge/version-4.12.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -374,6 +374,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.12.0 | 2026-04-05 | Review workflow overhaul: `repo_write`/`str_replace_editor` auto-invalidate advisory after any worktree write (partial-write edge cases covered); triad-review blocking attempts accumulate as structured `ObligationItem` list in durable state; scope-review blocks now also produce structured findings; advisory bypasses `already_fresh` fast-path when open obligations exist; `_check_advisory_freshness` gates on both snapshot freshness and empty obligations; advisory prompt injects unresolved obligations with explicit per-obligation verdict requirement; `review_status` shows staleness, open obligations, and concrete next-step guidance; `CHECKLISTS.md` corrected to match real implementation (auto-stale wired for `repo_write`/`str_replace_editor`, `claude_code_edit` noted as not-yet-wired); `review_state.py` extended with `blocking_history` (last 10), `open_obligations`, `last_stale_from_edit_ts`; `commit_gate.py` extracted from `git.py` to maintain module size limit; 32 new tests. |
 | 4.11.14 | 2026-04-05 | Docs & packaging: I5 Anthropic documented as direct runtime provider (not CLI-only) with `anthropic::` prefix; A3 add `providers/*.png` and `providers/*.ico` to pyproject.toml package-data; A4 add missing modules (`provider_models`, `server_auth`, `server_control`, `server_entrypoint`, `server_web`, `task_results`, `launcher_bootstrap`) to ARCHITECTURE.md module tree. |
 | 4.11.13 | 2026-04-05 | deep_self_review: fix SIGSEGV crash (macOS fork-safety, confirmed via crashlog). Root cause: first httpx HTTP request in a forked child process calls `SCDynamicStoreCopyProxiesWithOptions()` / `CFPreferences` which is not fork-safe — confirmed by `"crashed on child side of fork pre-exec"` in `asi` field of macOS crash report. Fix: `run_deep_self_review` passes `no_proxy=True` to `llm.chat()`; `LLMClient._chat_remote()` builds a one-shot `httpx.Client(trust_env=False, mounts={})` closed in `finally`; `_normalize_remote_response` called with `skip_cost_fetch=True` to also suppress the `requests.get()` generation-cost call (same proxy path). All proxy/OS-lookup code skipped; cost estimated from token counts. Localised to deep_self_review only; regular LLM calls unaffected. v4.11.12 dulwich fix remains. 6 new regression tests. |
 | 4.11.12 | 2026-04-04 | deep_self_review: replace `subprocess.run(["git", "ls-files"])` with `dulwich.repo.Repo(path).open_index()` — pure Python git index reader, no subprocess. Tests updated: all 30 `test_deep_self_review.py` tests now mock dulwich instead of subprocess. |

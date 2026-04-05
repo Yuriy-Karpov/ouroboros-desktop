@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import pathlib
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from ouroboros.llm import LLMClient
@@ -32,6 +33,23 @@ log = logging.getLogger(__name__)
 
 _SCOPE_MODEL_DEFAULT = "anthropic/claude-opus-4.6"
 _SCOPE_MAX_TOKENS = 65536
+
+
+@dataclass
+class ScopeReviewResult:
+    """Structured outcome from run_scope_review.
+
+    blocked: True if the commit is blocked.
+    block_message: Human-readable block string (non-empty when blocked=True).
+    critical_findings: List of structured finding dicts (same schema as triad review):
+        {"verdict": "FAIL", "severity": "critical", "item": <real_item_name>,
+         "reason": <str>, "model": "scope_reviewer"}
+    advisory_findings: Advisory (non-blocking) finding dicts.
+    """
+    blocked: bool = False
+    block_message: str = ""
+    critical_findings: List[dict] = field(default_factory=list)
+    advisory_findings: List[dict] = field(default_factory=list)
 
 
 def _get_scope_model() -> str:
@@ -341,11 +359,13 @@ def run_scope_review(
     scope: str = "",
     review_rebuttal: str = "",
     review_history: Optional[list] = None,
-) -> Optional[str]:
-    """Run the blocking scope review. Returns None if commit may proceed.
+) -> ScopeReviewResult:
+    """Run the blocking scope review. Returns a ScopeReviewResult.
 
-    Returns a blocking error string if the scope review rejects the commit
-    or if the review fails to run (fail-closed).
+    result.blocked is True if the commit must not proceed.
+    result.critical_findings contains structured dicts with real checklist item
+    names (not synthetic strings), so callers can pass them directly into
+    obligation tracking without any string parsing.
     """
     repo_dir = pathlib.Path(ctx.repo_dir)
 
@@ -356,14 +376,17 @@ def run_scope_review(
         review_history=review_history,
     )
 
+    def _blocked(msg: str) -> ScopeReviewResult:
+        return ScopeReviewResult(blocked=True, block_message=msg)
+
     # Fail-closed: incomplete touched-file context blocks immediately
     if touched_omitted is not None:
         if touched_omitted == "__empty__":
-            return (
+            return _blocked(
                 "⚠️ SCOPE_REVIEW_BLOCKED: Could not read any touched files — "
                 "scope review requires direct file context. Commit blocked."
             )
-        return (
+        return _blocked(
             f"⚠️ SCOPE_REVIEW_BLOCKED: Some touched file(s) could not be included "
             f"in direct context (binary/oversize/unreadable): {touched_omitted}.\n"
             "Scope review requires complete touched-file context. Commit blocked.\n"
@@ -410,8 +433,7 @@ def run_scope_review(
                 )
             )
     except Exception as e:
-        # Fail-closed: API failure blocks commit
-        return (
+        return _blocked(
             f"⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer ({scope_model}) failed — commit blocked.\n"
             f"Error: {type(e).__name__}: {e}\n"
             "Retry the commit, or check API key and network connectivity."
@@ -422,21 +444,21 @@ def run_scope_review(
 
     raw_text = str(msg.get("content") or "")
     if not raw_text.strip():
-        return (
+        return _blocked(
             "⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer returned empty response — commit blocked.\n"
             "Retry the commit."
         )
 
     items = _parse_scope_json(raw_text)
     if items is None:
-        return (
+        return _blocked(
             "⚠️ SCOPE_REVIEW_BLOCKED: Could not parse scope reviewer output as JSON — commit blocked.\n"
             f"Raw preview: {raw_text[:500]}"
         )
 
-    # Classify findings
-    critical_fails: List[str] = []
-    advisory_warns: List[str] = []
+    # Classify findings into structured dicts (real item names, same schema as triad review)
+    critical_findings: List[dict] = []
+    advisory_findings: List[dict] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -444,11 +466,17 @@ def run_scope_review(
         severity = str(item.get("severity", "advisory")).lower()
         if verdict != "FAIL":
             continue
-        desc = f"[scope:{item.get('item', '?')}] {item.get('reason', '')}"
+        finding = {
+            "verdict": "FAIL",
+            "severity": severity,
+            "item": str(item.get("item", "scope_review")),
+            "reason": str(item.get("reason", "")),
+            "model": "scope_reviewer",
+        }
         if severity == "critical":
-            critical_fails.append(desc)
+            critical_findings.append(finding)
         else:
-            advisory_warns.append(desc)
+            advisory_findings.append(finding)
 
     # Log scope review result
     try:
@@ -456,32 +484,47 @@ def run_scope_review(
             "ts": utc_now_iso(), "type": "scope_review_complete",
             "task_id": getattr(ctx, "task_id", "") or "",
             "model": scope_model,
-            "critical_count": len(critical_fails),
-            "advisory_count": len(advisory_warns),
+            "critical_count": len(critical_findings),
+            "advisory_count": len(advisory_findings),
         })
     except Exception:
         pass
 
-    if critical_fails:
+    if critical_findings:
         from ouroboros import config as _cfg
         review_enforcement = _cfg.get_review_enforcement()
         if review_enforcement == "blocking":
-            return (
-                f"⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer found critical completeness issues.\n"
-                "Commit has NOT been created. Fix the issues and try again.\n\n"
-                + "\n".join(f"  CRITICAL: {f}" for f in critical_fails)
-                + ("\n\nAdvisory warnings:\n"
-                   + "\n".join(f"  WARN: {w}" for w in advisory_warns)
-                   if advisory_warns else "")
+            crit_lines = "\n".join(
+                f"  CRITICAL: [scope:{f['item']}] {f['reason']}" for f in critical_findings
             )
-        # Advisory mode: log but don't block
-        for f in critical_fails:
-            ctx._review_advisory.append(f"SCOPE CRITICAL (advisory mode): {f}")
-        for w in advisory_warns:
-            ctx._review_advisory.append(f"SCOPE WARN: {w}")
+            adv_section = ""
+            if advisory_findings:
+                adv_lines = "\n".join(
+                    f"  WARN: [scope:{f['item']}] {f['reason']}" for f in advisory_findings
+                )
+                adv_section = f"\n\nAdvisory warnings:\n{adv_lines}"
+            block_msg = (
+                "⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer found critical completeness issues.\n"
+                "Commit has NOT been created. Fix the issues and try again.\n\n"
+                + crit_lines + adv_section
+            )
+            return ScopeReviewResult(
+                blocked=True,
+                block_message=block_msg,
+                critical_findings=critical_findings,
+                advisory_findings=advisory_findings,
+            )
+        # Advisory mode: surface but don't block
+        for f in critical_findings:
+            ctx._review_advisory.append(f"SCOPE CRITICAL (advisory mode): [scope:{f['item']}] {f['reason']}")
+        for f in advisory_findings:
+            ctx._review_advisory.append(f"SCOPE WARN: [scope:{f['item']}] {f['reason']}")
+    else:
+        for f in advisory_findings:
+            ctx._review_advisory.append(f"SCOPE WARN: [scope:{f['item']}] {f['reason']}")
 
-    elif advisory_warns:
-        for w in advisory_warns:
-            ctx._review_advisory.append(f"SCOPE WARN: {w}")
-
-    return None  # commit may proceed
+    return ScopeReviewResult(
+        blocked=False,
+        critical_findings=critical_findings,
+        advisory_findings=advisory_findings,
+    )

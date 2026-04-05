@@ -6,6 +6,47 @@ multi-model review prompt.
 
 When a new reviewable concern appears, add it here — not in prompts or docs.
 
+---
+
+## Advisory Pre-Review Workflow
+
+**Correct sequence (mandatory):**
+
+```
+1. Finish ALL edits first (repo_write / str_replace_editor)
+2. advisory_pre_review(commit_message="...")   ← run AFTER all edits, ONCE
+3. repo_commit(commit_message="...")           ← run IMMEDIATELY after advisory
+```
+
+**Rules:**
+- `repo_write` and `str_replace_editor` automatically mark advisory as **stale** after any
+  successful write. Other edit paths (e.g. claude_code_edit) do not currently auto-stale —
+  run advisory_pre_review explicitly after using them.
+- Any stale advisory → must re-run advisory before repo_commit.
+- Do NOT interleave edits and advisory calls: `edit → advisory → edit → advisory` wastes two
+  expensive advisory cycles. Finish all edits first.
+- If advisory finds critical issues: **strongly recommended** to fix them and re-run advisory
+  before calling repo_commit.
+  Note: repo_commit's gate checks snapshot freshness and open obligations only — it does not
+  enforce zero advisory FAIL items as a hard gate. Fixing critical findings and re-running
+  advisory is best practice, but `repo_commit` can proceed on a fresh advisory even if the
+  advisory reported FAIL items. The multi-model blocking review will still catch those issues.
+- Once advisory is fresh → call repo_commit immediately without further edits.
+- Bypass (`skip_advisory_pre_review=True`) is always durably audited in events.jsonl.
+
+**Obligation tracking:**
+- Every blocking `repo_commit` result creates "open obligations" — a structured checklist of
+  unresolved issues that advisory must explicitly address on the next run.
+- Advisory will receive the full list of open obligations and should respond to each one by name.
+- A generic PASS without addressing open obligations is a weak signal — advisory is expected
+  to confirm each obligation is resolved, though the gate does not enforce this at the code level.
+- Open obligations are cleared automatically on a successful commit.
+- Both triad-review blocks and scope-review blocks produce structured obligations.
+- **Note:** `claude_code_edit` does not currently auto-stale advisory — run
+  `advisory_pre_review` explicitly after using it.
+
+---
+
 ### Review-exempt operations
 
 The following tools create commits but are **exempt** from multi-model review

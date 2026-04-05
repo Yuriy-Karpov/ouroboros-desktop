@@ -266,8 +266,9 @@ class TestRunScopeReviewFailClosed:
             ctx, "test commit",
             goal="test goal", scope="test scope",
         )
-        assert "SCOPE_REVIEW_BLOCKED" in result
-        assert "bin.png" in result
+        assert result.blocked
+        assert "SCOPE_REVIEW_BLOCKED" in result.block_message
+        assert "bin.png" in result.block_message
 
     def test_build_scope_prompt_deletion_not_blocked_e2e(self, tmp_path):
         """_build_scope_prompt must NOT signal empty for deletion-only diffs.

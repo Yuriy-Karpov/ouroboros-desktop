@@ -1,4 +1,4 @@
-# Ouroboros v4.11.14 — Architecture & Reference
+# Ouroboros v4.12.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -69,6 +69,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── gateways/            ← External API adapters (thin transport, no business logic)
       │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths)
       ├── tools/               ← Auto-discovered tool plugins
+      │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
       └── compat.py            ← Cross-platform process/path/locking helpers
@@ -655,24 +656,43 @@ errors surface via the same observability path.
   Model pinned to `opus`. Prompt includes only the "Repo Commit Checklist" section from
   CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, ARCHITECTURE.md,
   touched-file pack, goal/scope sections, git status, and worktree diff.
-- **Blocking history injection** (v4.10.6): when the last `repo_commit` was blocked with
-  `critical_findings`, `scope_blocked`, or `parse_failure`, the advisory prompt includes a
-  "Previous blocking review findings" section extracted from `CommitAttemptRecord.block_details`.
-  This ensures advisory catches the same issues that blocking reviewers found, eliminating
-  the loop where advisory says PASS but blocking says FAIL.
-- **Prompt strictness alignment** (v4.10.6): advisory prompt uses the same severity language
-  as the blocking triad review — explicit instructions to read all changed files in full,
-  check every checklist item, report all issues found, and treat bible_compliance/security at
-  the same threshold as blocking reviewers.
-- **`review_status`** tool: read-only diagnostic showing the last 5 advisory runs AND the
-  last commit attempt state (status, block reason, actionable guidance).
+- **Obligation-based blocking history injection** (v4.12.0): when previous `repo_commit`
+  calls were blocked, their `critical_findings` are accumulated as structured `ObligationItem`
+  entries in durable state. When open obligations exist, the advisory prompt includes an
+  "Unresolved obligations from previous blocking rounds" section listing each obligation by id,
+  item, severity, and reason. Advisory MUST explicitly address each obligation by checklist item
+  name — a generic PASS without addressing obligations is a weak signal (expected but not
+  enforced at code level). The prompt section is omitted entirely when no obligations are open.
+- **Obligation resolution**: `_resolve_matching_obligations()` runs on every parseable advisory
+  result (regardless of whether other items fail). An obligation is marked resolved only when the
+  advisory emits an unambiguous PASS for its checklist item (PASS present AND no FAIL for the same
+  item in the same run). `on_successful_commit()` clears all obligations on a successful commit.
+- **Auto-stale on edit** (v4.12.0): `_repo_write` and `_str_replace_editor` automatically call
+  `mark_advisory_stale_after_edit()` after any successful worktree write, setting
+  `last_stale_from_edit_ts` and marking all fresh/bypassed runs as stale. `add_run()` clears
+  this flag when any advisory runs for the current snapshot (including `parse_failure`).
+- **`review_status`** tool: read-only diagnostic showing advisory freshness, open obligations,
+  staleness-from-edit, last commit attempt state, and a concrete next-step recommendation.
+  Returns structured JSON with: `latest_advisory_status`, `latest_advisory_hash`, `stale_from_edit`,
+  `open_obligations_count`, `next_step`, plus `last_commit_attempt` details when blocked/failed.
 - **`review_state.py`**: durable state. State file: `data/state/advisory_review.json`.
-  Stores last 10 advisory runs plus the last `CommitAttemptRecord`.
+  Stores last 10 advisory runs plus bounded blocking-attempt history and open obligations.
   Advisory runs have: `snapshot_hash`, `commit_message`, `status`
-  (fresh/stale/bypassed), `items`, `raw_result` (full, no truncation), audit fields.
+  (fresh/stale/bypassed/parse_failure), `items`, `raw_result` (full, no truncation), audit fields,
+  `snapshot_paths` (optional list of paths used to compute the scoped hash — `None` = whole repo).
+  `parse_failure` means the SDK ran but returned unparseable output — repo_commit treats it as
+  no fresh advisory (equivalent to stale) and requires a re-run or explicit bypass.
+  `snapshot_paths` is persisted so `review_status` can recompute the live hash with the same
+  path scope after a reload, preventing false staleness for path-scoped advisory runs.
   Commit attempts have: `status` (reviewing/blocked/succeeded/failed), `block_reason`
   (no_advisory/critical_findings/review_quorum/parse_failure/infra_failure/scope_blocked/preflight),
-  `block_details`, `duration_sec`.
+  `block_details`, `duration_sec`, `critical_findings` (structured list of `{verdict, severity, item, reason, model}`).
+  New fields: `blocking_history` (last 10 blocked attempts), `open_obligations` (list of
+  `ObligationItem` with `obligation_id`, `item`, `severity`, `reason`, `source_attempt_ts`, `source_attempt_msg`, `status`, `resolved_by`),
+  `last_stale_from_edit_ts` (timestamp when a write-tool last invalidated the advisory).
+  `add_blocking_attempt()` populates open obligations from `critical_findings`; `on_successful_commit()`
+  clears all obligations. `mark_advisory_stale_after_edit()` sets `last_stale_from_edit_ts` and
+  marks all fresh and bypassed runs as stale — called automatically by `_repo_write` and `_str_replace_editor`.
 - **Snapshot hash**: deterministic SHA-256 of changed file content digests only.
   Commit message is NOT part of the hash (decoupled for less brittle freshness).
   Path-aware: `paths` parameter scopes the hash to specific files.

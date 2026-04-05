@@ -18,6 +18,9 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry, SAFETY_CRITICAL_PATHS
+from ouroboros.tools.commit_gate import (
+    _record_commit_attempt, _invalidate_advisory, _check_advisory_freshness,
+)
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
 _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
@@ -26,23 +29,6 @@ log = logging.getLogger(__name__)
 def _sanitize_git_error(msg: str) -> str:
     return re.sub(r"(https?://)([^@\s]+@)", r"\1<redacted>@", msg)
 
-
-def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
-                           block_reason: str = "", block_details: str = "",
-                           duration_sec: float = 0.0, snapshot_hash: str = "") -> None:
-    """Record a commit attempt in the durable review state."""
-    try:
-        from ouroboros.review_state import CommitAttemptRecord, load_state, save_state, _utc_now
-        state = load_state(pathlib.Path(ctx.drive_root))
-        state.last_commit_attempt = CommitAttemptRecord(
-            ts=_utc_now(), commit_message=commit_message[:200], status=status,
-            snapshot_hash=snapshot_hash, block_reason=block_reason,
-            block_details=block_details[:2000], duration_sec=duration_sec,
-            task_id=str(getattr(ctx, "task_id", "") or ""),
-        )
-        save_state(pathlib.Path(ctx.drive_root), state)
-    except Exception as e:
-        log.warning("Failed to record commit attempt: %s", e)
 
 def _auto_tag_on_version_bump(repo_dir: pathlib.Path, commit_message: str) -> str:
     try:
@@ -90,7 +76,6 @@ def _ensure_gitignore(repo_dir) -> None:
     if not gi.exists():
         gi.write_text("__pycache__/\n*.pyc\n*.pyo\n*.so\n*.dylib\n*.dll\n"
                        "*.dist-info/\nbase_library.zip\n.DS_Store\n", encoding="utf-8")
-
 def _unstage_binaries(repo_dir) -> List[str]:
     try:
         staged = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=repo_dir)
@@ -107,8 +92,6 @@ def _unstage_binaries(repo_dir) -> List[str]:
                 pass
     return removed
 
-
-# --- Git lock ---
 
 def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
     lock_dir = ctx.drive_path("locks")
@@ -211,8 +194,6 @@ from ouroboros.tools.review import (  # noqa: F401
 )
 
 
-# --- Post-commit helpers ---
-
 def _post_commit_result(ctx, commit_message, skip_tests, tw_ref):
     global _consecutive_test_failures
     if skip_tests:
@@ -235,8 +216,6 @@ def _format_commit_result(ctx, commit_message, push_status, test_warning):
         result += "\n\n⚠️ Advisory warnings:\n" + "\n".join(f"  - {w}" for w in ctx._review_advisory)
     return result
 
-
-# --- Tool implementations ---
 
 def _check_shrink_guard(ctx: ToolContext, file_path: str, new_content: str, force: bool = False) -> Optional[str]:
     """Return a warning string if writing new_content would shrink a tracked file by >30%. None if OK."""
@@ -271,10 +250,7 @@ def _check_shrink_guard(ctx: ToolContext, file_path: str, new_content: str, forc
 def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 files: Optional[List[Dict[str, str]]] = None,
                 force: bool = False) -> str:
-    """Write file(s) to the repo working directory without committing.
-
-    Use repo_commit afterwards to stage, review, and commit all changes together.
-    """
+    """Write file(s) to the repo working directory without committing."""
     write_list: List[Dict[str, str]] = []
     if files:
         for entry in files:
@@ -310,6 +286,8 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
     for e in write_list:
         shrink_warning = _check_shrink_guard(ctx, e["path"], e["content"], force=force)
         if shrink_warning:
+            if written:
+                _invalidate_advisory(ctx)  # worktree already changed
             return shrink_warning
         try:
             target = ctx.repo_path(e["path"])
@@ -317,25 +295,25 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
             write_text(target, e["content"])
             written.append(f"{e['path']} ({len(e['content'])} chars)")
         except Exception as exc:
+            if written:
+                _invalidate_advisory(ctx)  # worktree partially changed
             already = ", ".join(written) if written else "(none)"
             return (
                 f"⚠️ FILE_WRITE_ERROR on '{e['path']}': {exc}\n"
                 f"Successfully written before error: {already}"
             )
 
+    _invalidate_advisory(ctx)
     summary = ", ".join(written)
     return (
         f"✅ Written {len(written)} file(s): {summary}\n"
-        "Files are on disk but NOT committed. Run repo_commit when ready."
+        "Files are on disk but NOT committed. Run repo_commit when ready.\n"
+        "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
     )
 
 
 def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str) -> str:
-    """Replace exactly one occurrence of old_str with new_str in a file.
-
-    Safer than repo_write for existing files: reads the file, verifies old_str
-    appears exactly once, performs the replacement, and writes back.
-    """
+    """Replace exactly one occurrence of old_str with new_str in a file."""
     if not path or not path.strip():
         return "⚠️ STR_REPLACE_ERROR: path is required."
     if not old_str:
@@ -395,86 +373,12 @@ def _str_replace_editor(ctx: ToolContext, path: str, old_str: str, new_str: str)
         f"{context_start + i + 1:>4}| {line}" for i, line in enumerate(context_lines)
     )
 
+    _invalidate_advisory(ctx)
     return (
         f"✅ Replaced in {path} (line {replacement_line}).\n"
         f"Context:\n{context_preview}\n\n"
-        "File is on disk but NOT committed. Run repo_commit when ready."
-    )
-
-
-def _check_advisory_freshness(
-    ctx: ToolContext,
-    commit_message: str,
-    skip_advisory_pre_review: bool = False,
-    paths: Optional[List[str]] = None,
-) -> Optional[str]:
-    """Return a blocking error string if no fresh advisory run matches the current snapshot.
-
-    Returns None if the gate passes (fresh run exists, or advisory is skipped).
-    """
-    import pathlib as _pl
-    from ouroboros.review_state import compute_snapshot_hash, load_state, save_state, _utc_now, AdvisoryRunRecord
-    from ouroboros.utils import append_jsonl
-
-    drive_root = _pl.Path(ctx.drive_root)
-    repo_dir = _pl.Path(ctx.repo_dir)
-
-    snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
-    state = load_state(drive_root)
-
-    if state.is_fresh(snapshot_hash):
-        return None  # gate passes
-
-    if skip_advisory_pre_review:
-        # Explicit bypass: audit it and pass
-        task_id = str(getattr(ctx, "task_id", "") or "")
-        reason = "skip_advisory_pre_review=True passed to repo_commit"
-        try:
-            append_jsonl(ctx.drive_logs() / "events.jsonl", {
-                "ts": _utc_now(),
-                "type": "advisory_pre_review_bypassed",
-                "snapshot_hash": snapshot_hash,
-                "commit_message": commit_message[:200],
-                "bypass_reason": reason,
-                "task_id": task_id,
-            })
-        except Exception:
-            pass
-        bypass_run = AdvisoryRunRecord(
-            snapshot_hash=snapshot_hash,
-            commit_message=commit_message,
-            status="bypassed",
-            ts=_utc_now(),
-            bypass_reason=reason,
-            bypassed_by_task=task_id,
-        )
-        state.add_run(bypass_run)
-        save_state(drive_root, state)
-        return None  # gate passes (audited bypass)
-
-    # Gate blocks: no fresh advisory run for this snapshot
-    latest = state.latest()
-    if latest:
-        latest_info = (
-            f"Latest advisory run: status={latest.status}, "
-            f"hash={latest.snapshot_hash[:12]}, ts={latest.ts[:16]}. "
-            "The snapshot has changed since then (files or commit message differ)."
-        )
-    else:
-        latest_info = "No advisory runs have been recorded yet."
-
-    return (
-        f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: No fresh advisory run found for this snapshot "
-        f"(hash={snapshot_hash[:12]}).\n"
-        f"{latest_info}\n\n"
-        "Required workflow:\n"
-        "  1. advisory_pre_review(commit_message='your message')\n"
-        "  2. Fix any critical findings\n"
-        "  3. repo_commit(commit_message='your message')\n\n"
-        "To bypass (will be durably audited):\n"
-        "  advisory_pre_review(commit_message='...', skip_advisory_pre_review=True)\n"
-        "  repo_commit(commit_message='...')\n\n"
-        "Or pass skip_advisory_pre_review=True directly to repo_commit (also audited)."
+        "File is on disk but NOT committed. Run repo_commit when ready.\n"
+        "⚠️ Advisory pre-review is now stale — run advisory_pre_review before repo_commit."
     )
 
 
@@ -550,7 +454,8 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
             block_reason = getattr(ctx, "_last_review_block_reason", "critical_findings")
             _record_commit_attempt(ctx, commit_message, "blocked",
                                    block_reason=block_reason, block_details=review_err,
-                                   duration_sec=time.time() - _commit_start)
+                                   duration_sec=time.time() - _commit_start,
+                                   critical_findings=getattr(ctx, "_last_review_critical_findings", []))
             return review_err
 
         try:
@@ -644,23 +549,27 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             block_reason = getattr(ctx, "_last_review_block_reason", "critical_findings")
             _record_commit_attempt(ctx, commit_message, "blocked",
                                    block_reason=block_reason, block_details=review_err,
-                                   duration_sec=time.time() - _commit_start)
+                                   duration_sec=time.time() - _commit_start,
+                                   critical_findings=getattr(ctx, "_last_review_critical_findings", []))
             return review_err
 
         # Scope review (blocking, fail-closed) — runs AFTER triad review
         try:
             from ouroboros.tools.scope_review import run_scope_review
-            scope_err = run_scope_review(
+            scope_result = run_scope_review(
                 ctx, commit_message, goal=goal, scope=scope,
                 review_rebuttal=review_rebuttal,
                 review_history=getattr(ctx, '_review_history', []),
             )
-            if scope_err:
+            if scope_result.blocked:
                 run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+                # Use structured findings directly — no string parsing needed.
                 _record_commit_attempt(ctx, commit_message, "blocked",
-                                       block_reason="scope_blocked", block_details=scope_err,
-                                       duration_sec=time.time() - _commit_start)
-                return scope_err
+                                       block_reason="scope_blocked",
+                                       block_details=scope_result.block_message,
+                                       duration_sec=time.time() - _commit_start,
+                                       critical_findings=scope_result.critical_findings)
+                return scope_result.block_message
         except ImportError:
             log.debug("scope_review module not available — skipping scope gate")
         except Exception as e:
@@ -721,10 +630,6 @@ def _git_diff(ctx: ToolContext, staged: bool = False) -> str:
         return f"⚠️ GIT_ERROR: {_sanitize_git_error(str(e))}"
 
 
-# ---------------------------------------------------------------------------
-# pull_from_remote — FF-only pull (fetch + merge)
-# ---------------------------------------------------------------------------
-
 def _ff_pull(repo_dir: pathlib.Path) -> str:
     try:
         branch = run_cmd(
@@ -780,10 +685,6 @@ def _ff_pull(repo_dir: pathlib.Path) -> str:
 def _pull_from_remote(ctx: ToolContext) -> str:
     return _ff_pull(pathlib.Path(ctx.repo_dir))
 
-
-# ---------------------------------------------------------------------------
-# restore_to_head — discard uncommitted changes (safe: returns to HEAD)
-# ---------------------------------------------------------------------------
 
 def _restore_to_head(ctx: ToolContext, confirm: bool = False,
                      paths: Optional[List[str]] = None) -> str:
@@ -858,10 +759,6 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
             pass
         return "All uncommitted changes discarded. Working directory matches HEAD."
 
-
-# ---------------------------------------------------------------------------
-# revert_commit — create a new commit undoing a previous one (no history rewrite)
-# ---------------------------------------------------------------------------
 
 def _revert_commit(ctx: ToolContext, sha: str, confirm: bool = False) -> str:
     repo_dir = pathlib.Path(ctx.repo_dir)
