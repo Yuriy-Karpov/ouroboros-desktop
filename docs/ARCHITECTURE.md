@@ -1,4 +1,4 @@
-# Ouroboros v4.11.13 — Architecture & Reference
+# Ouroboros v4.11.14 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -36,7 +36,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
       ├── loop_tool_execution.py ← Tool dispatch and tool-result handling
       ├── pricing.py           ← Model pricing, cost estimation, usage events
-      ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru)
+      ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru/Anthropic)
       ├── model_catalog_api.py ← Optional provider model catalog endpoint
       ├── safety.py            ← Dual-layer LLM security supervisor
       ├── consciousness.py     ← Background thinking loop (with progress emission)
@@ -52,9 +52,16 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── review_state.py      ← Durable advisory pre-review state (advisory_review.json)
       ├── onboarding_wizard.py ← Shared desktop/web onboarding bootstrap + validation
       ├── owner_inject.py      ← Per-task user message mailbox (compat module name)
+      ├── launcher_bootstrap.py ← Bundle-to-repo bootstrap and managed sync helpers (used by launcher.py)
+      ├── provider_models.py   ← Provider-specific model ID helpers, direct-provider defaults (OpenAI, Anthropic)
       ├── reflection.py        ← Execution reflection and pattern capture
+      ├── server_auth.py       ← Non-localhost auth gate (OUROBOROS_NETWORK_PASSWORD)
+      ├── server_control.py    ← Process-control helpers: restart, panic stop
+      ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
       ├── server_history_api.py ← Chat history + cost breakdown endpoints
       ├── server_runtime.py    ← Server startup/onboarding and WebSocket liveness helpers
+      ├── server_web.py        ← Static web file helpers (NoCacheStaticFiles, web dir resolver)
+      ├── task_results.py      ← Durable task result/status files (task_results/<id>.json)
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
       ├── utils.py             ← Shared utilities
@@ -155,7 +162,7 @@ launcher.py main()
 Shown when `settings.json` does not contain any supported remote provider key and has no
 `LOCAL_MODEL_SOURCE`.
 
-- Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, or local-model-source settings skip the wizard automatically.
+- Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, or local-model-source settings skip the wizard automatically.
 - The wizard is shared between desktop and web: one HTML/CSS/JS onboarding flow is rendered directly in pywebview for desktop and injected into a blocking web overlay for Docker/browser runs.
 - The wizard is multi-step and provider-aware: it starts with a single access step that accepts multiple remote keys plus optional local-model setup, then shows visible model defaults, a dedicated review-mode step, a dedicated budget step, and the final summary before save.
 - When an Anthropic key is present, onboarding shows an optional `Install Claude Agent SDK` CTA plus `Skip for now`.
@@ -261,6 +268,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
   - OpenAI model values use `openai::...`.
   - OpenAI-compatible model values use `openai-compatible::...`.
   - Cloud.ru model values use `cloudru::...`.
+  - Anthropic model values use `anthropic::...` (e.g. `anthropic::claude-opus-4.6`).
 - **Reasoning Effort**: Five segmented controls for task/chat, evolution, review, scope review, and consciousness.
   Backed by `OUROBOROS_EFFORT_TASK`, `OUROBOROS_EFFORT_EVOLUTION`, `OUROBOROS_EFFORT_REVIEW`,
   `OUROBOROS_EFFORT_SCOPE_REVIEW`, `OUROBOROS_EFFORT_CONSCIOUSNESS`. Loading falls back to legacy
@@ -746,7 +754,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OPENAI_COMPATIBLE_BASE_URL | "" | Optional. Dedicated OpenAI-compatible provider base URL |
 | CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Optional. Cloud.ru Foundation Models provider key |
 | CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru provider base URL |
-| ANTHROPIC_API_KEY | "" | Optional. Required for Claude Agent SDK (`claude_code_edit`, `advisory_pre_review`) |
+| ANTHROPIC_API_KEY | "" | Optional. Enables direct Anthropic runtime routing (`anthropic::...` model values) and Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`) |
 | TELEGRAM_BOT_TOKEN | "" | Optional. Enables Telegram bridge polling/sending |
 | TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
@@ -754,7 +762,7 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |
 | OUROBOROS_MODEL_LIGHT | anthropic/claude-sonnet-4.6 | Fast/cheap model (safety, consciousness) |
 | OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
-| CLAUDE_CODE_MODEL | opus | Anthropic model for Claude Agent SDK (sonnet, opus, or full name) |
+| CLAUDE_CODE_MODEL | opus | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`; values: sonnet, opus, or full model name) |
 | OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |

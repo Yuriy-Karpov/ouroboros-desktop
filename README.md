@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.11.13](https://img.shields.io/badge/version-4.11.13-green.svg)](VERSION)
+[![Version 4.11.14](https://img.shields.io/badge/version-4.11.14-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -114,7 +114,7 @@ Settings now exposes tabbed provider cards for:
 - **OpenAI** — official OpenAI API (use model values like `openai::gpt-5.4`)
 - **OpenAI Compatible** — any custom OpenAI-style endpoint (use `openai-compatible::...`)
 - **Cloud.ru Foundation Models** — Cloud.ru OpenAI-compatible runtime (use `cloudru::...`)
-- **Anthropic** — kept for the existing Claude CLI flow, not a separate remote runtime
+- **Anthropic** — direct runtime routing (`anthropic::claude-opus-4.6`, etc.) plus Claude Agent SDK tools
 
 If OpenRouter is not configured and only official OpenAI is present, untouched default model values are auto-remapped to `openai::gpt-5.4` / `openai::gpt-5.4-mini` so the first-run path does not strand the app on OpenRouter-only defaults.
 
@@ -287,7 +287,7 @@ Created on first launch:
 | OpenAI API Key | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — official OpenAI runtime and web search |
 | OpenAI Compatible API Key / Base URL | No | Any OpenAI-style endpoint (proxy, self-hosted gateway, third-party compatible API) |
 | Cloud.ru Foundation Models API Key | No | Cloud.ru Foundation Models provider |
-| Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — enables Claude Code CLI |
+| Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — direct Anthropic runtime + Claude Agent SDK |
 | Telegram Bot Token | No | [@BotFather](https://t.me/BotFather) — enables the Telegram bridge |
 | GitHub Token | No | [github.com/settings/tokens](https://github.com/settings/tokens) — enables remote sync |
 
@@ -301,13 +301,13 @@ All keys are configured through the **Settings** page in the UI or during the fi
 | Code | `anthropic/claude-opus-4.6` | Code editing |
 | Light | `anthropic/claude-sonnet-4.6` | Safety checks, consciousness, fast tasks |
 | Fallback | `anthropic/claude-sonnet-4.6` | When primary model fails |
-| Claude Code CLI | `opus` | Anthropic model for Claude Code CLI tools |
+| Claude Agent SDK | `opus` | Anthropic model for Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`) |
 | Scope Review | `anthropic/claude-opus-4.6` | Blocking scope reviewer (single-model, after triad review) |
 | Web Search | `gpt-5.2` | OpenAI Responses API for web search |
 
 Task/chat reasoning defaults to `medium`. Scope review reasoning defaults to `high`.
 
-Models are configurable in the Settings page. Runtime model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, or Cloud.ru. Anthropic remains scoped to the existing Claude Code CLI flow. When only official OpenAI is configured and the shipped default model values are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In that same OpenAI-only mode, review-model lists are normalized automatically and fall back to running the main model three times if no valid multi-model remote quorum is configured.
+Models are configurable in the Settings page. Runtime model slots can target OpenRouter, official OpenAI, OpenAI-compatible endpoints, Cloud.ru, or direct Anthropic. When only official OpenAI is configured and the shipped default model values are still untouched, Ouroboros auto-remaps them to official OpenAI defaults. In that same OpenAI-only mode, review-model lists are normalized automatically and fall back to running the main model three times if no valid multi-model remote quorum is configured.
 
 ### File Browser Start Directory
 
@@ -374,6 +374,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.11.14 | 2026-04-05 | Docs & packaging: I5 Anthropic documented as direct runtime provider (not CLI-only) with `anthropic::` prefix; A3 add `providers/*.png` and `providers/*.ico` to pyproject.toml package-data; A4 add missing modules (`provider_models`, `server_auth`, `server_control`, `server_entrypoint`, `server_web`, `task_results`, `launcher_bootstrap`) to ARCHITECTURE.md module tree. |
 | 4.11.13 | 2026-04-05 | deep_self_review: fix SIGSEGV crash (macOS fork-safety, confirmed via crashlog). Root cause: first httpx HTTP request in a forked child process calls `SCDynamicStoreCopyProxiesWithOptions()` / `CFPreferences` which is not fork-safe — confirmed by `"crashed on child side of fork pre-exec"` in `asi` field of macOS crash report. Fix: `run_deep_self_review` passes `no_proxy=True` to `llm.chat()`; `LLMClient._chat_remote()` builds a one-shot `httpx.Client(trust_env=False, mounts={})` closed in `finally`; `_normalize_remote_response` called with `skip_cost_fetch=True` to also suppress the `requests.get()` generation-cost call (same proxy path). All proxy/OS-lookup code skipped; cost estimated from token counts. Localised to deep_self_review only; regular LLM calls unaffected. v4.11.12 dulwich fix remains. 6 new regression tests. |
 | 4.11.12 | 2026-04-04 | deep_self_review: replace `subprocess.run(["git", "ls-files"])` with `dulwich.repo.Repo(path).open_index()` — pure Python git index reader, no subprocess. Tests updated: all 30 `test_deep_self_review.py` tests now mock dulwich instead of subprocess. |
 | 4.11.11 | 2026-04-04 | deep_self_review: fix review pack too large (1.54M tokens → ~580K). Root cause: PNG/JPG/ICO/SVG and other binary files read via `errors=replace` produced hundreds of thousands of garbage chars. Fix: add `_BINARY_EXTENSIONS` suffix filter + `_is_probably_binary()` content sniffer (NUL-byte detection or >30% non-text bytes, where non-text = bytes ≥127 and ASCII control chars; reads only first 8KB via `open().read()` — no full-file buffer); size guard moved before sniffer; add `_SKIP_DIR_PREFIXES` (`assets/` — README screenshots; `webview/` — legacy PyWebView JS helpers). OMITTED FILES legend updated. 16 new tests. |
