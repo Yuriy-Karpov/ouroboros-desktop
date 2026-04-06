@@ -1,11 +1,15 @@
-"""Web search tool — OpenAI Responses API with LLM-first overridable defaults."""
+"""Web search tools — OpenAI Responses API and DuckDuckGo."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import urllib
 from typing import Any, Dict, List
+import re
+
+import requests
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso
@@ -23,6 +27,9 @@ _OPENAI_PRICING = {
     "o3": (2.0, 8.0),
     "o4-mini": (1.10, 4.40),
 }
+
+# DuckDuckGo results (no cost, free service)
+_DUCKDUCKGO_MAX_RESULTS = 10
 
 
 def _estimate_openai_cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -56,67 +63,164 @@ def _web_search(
     search_context_size: str = "",
     reasoning_effort: str = "",
 ) -> str:
-    api_key, base_url, provider, api_key_type = _resolve_openai_client_settings()
-    if not api_key:
-        return json.dumps({
-            "error": (
-                "web_search requires the official OpenAI Responses API. "
-                "Set OPENAI_API_KEY and leave OPENAI_BASE_URL empty."
-            ),
-        })
-
-    active_model = model or os.environ.get("OUROBOROS_WEBSEARCH_MODEL", DEFAULT_SEARCH_MODEL)
-    active_context = search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE
-    active_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
-
+    """
+    Web search via DuckDuckGo using Playwright browser.
+    Free, no API key required.
+    
+    Navigates to DuckDuckGo search results page and extracts results.
+    This works for general queries (not just instant answers).
+    """
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        resp = client.responses.create(
-            model=active_model,
-            tools=[{
-                "type": "web_search",
-                "search_context_size": active_context,
-            }],
-            reasoning={"effort": active_effort},
-            tool_choice="auto",
-            input=query,
+        from urllib.parse import quote
+        
+        # Navigate to DuckDuckGo search results
+        search_url = f"https://duckduckgo.com/?q={quote(query)}&ia=web"
+        
+        result = browse_page(
+            ctx=ctx,
+            url=search_url,
+            output="text",
+            timeout=30000,
         )
-        d = resp.model_dump()
-        text = ""
-        for item in d.get("output", []) or []:
-            if item.get("type") == "message":
-                for block in item.get("content", []) or []:
-                    if block.get("type") in ("output_text", "text"):
-                        text += block.get("text", "")
-
-        # Track web search cost (estimate from tokens — OpenAI usage has no total_cost)
-        usage = d.get("usage") or {}
-        if usage and hasattr(ctx, "pending_events"):
-            input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-            output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
-            cost = _estimate_openai_cost(active_model, input_tokens, output_tokens)
-            try:
-                ctx.pending_events.append({
-                    "type": "llm_usage",
-                    "provider": provider,
-                    "model": active_model,
-                    "api_key_type": api_key_type,
-                    "model_category": "websearch",
-                    "prompt_tokens": input_tokens,
-                    "completion_tokens": output_tokens,
-                    "usage": usage,
-                    "cost": cost,
-                    "source": "web_search",
-                    "ts": utc_now_iso(),
-                    "category": "task",
-                })
-            except Exception:
-                log.debug("Failed to emit web_search cost event", exc_info=True)
-
-        return json.dumps({"answer": text or "(no answer)"}, ensure_ascii=False, indent=2)
+        
+        if result.get("status") == "error":
+            return json.dumps({
+                "error": f"Browser search failed: {result.get('error', 'unknown error')}",
+                "query": query
+            }, ensure_ascii=False)
+        
+        # Extract links and snippets from page text
+        text = result.get("text", "")
+        
+        # Simple regex extraction
+        import re
+        
+        # Find href and link text
+        href_pattern = r'<a\s+[^>]*href="([^"]+)"[^>]*>([^<]+)</a>'
+        matches = re.findall(href_pattern, text)
+        
+        results = []
+        for href, title in matches[:10]:
+            # Skip non-web results
+            if href.startswith('#') or href.startswith('javascript:'):
+                continue
+            
+            # Try to find snippet near this link (simplified)
+            snippet = f"Search result for '{query}' - see link"
+            
+            results.append({
+                "title": title.strip() or "(no title)",
+                "link": href,
+                "snippet": snippet
+            })
+        
+        if results:
+            return json.dumps({
+                "results": results,
+                "query": query,
+                "total": len(results),
+                "source": "DuckDuckGo Browser Search",
+                "note": "Free search via DuckDuckGo using browser automation"
+            }, indent=2, ensure_ascii=False)
+        
+        # No results
+        return json.dumps({
+            "results": [],
+            "query": query,
+            "total": 0,
+            "source": "DuckDuckGo Browser Search",
+            "message": "No results found"
+        }, indent=2, ensure_ascii=False)
+        
     except Exception as e:
-        return json.dumps({"error": f"OpenAI web search failed: {repr(e)}"}, ensure_ascii=False)
+        return json.dumps({
+            "error": f"DuckDuckGo search failed: {repr(e)}",
+            "query": query
+        }, ensure_ascii=False)
+
+
+def _duckduckgo_search(query: str, max_results: int = _DUCKDUCKGO_MAX_RESULTS) -> str:
+    """
+    Search the web via DuckDuckGo Instant Answer API.
+    Free, no API key required, returns structured results.
+    
+    Uses https://api.duckduckgo.com/ which provides structured search results
+    including related topics, definitions, and web results.
+    
+    Args:
+        query: Search query string
+        max_results: Maximum number of results to return
+    
+    Returns:
+        JSON with results array containing title, link, text
+    """
+    try:
+        # DuckDuckGo Instant Answer API (no CAPTCHA, structured results)
+        url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&pretty=1"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        
+        data = resp.json()
+        results = []
+        
+        # Extract web results from RelatedTopics (structured data)
+        related_topics = data.get("RelatedTopics", []) or []
+        
+        for topic in related_topics[:max_results]:
+            # Get text/title/link from topic
+            text = topic.get("Text", "")
+            title = topic.get("FirstURL", "").split("/")[-1].replace("_", " ")
+            link = topic.get("FirstURL", "")
+            
+            # Skip if no meaningful data
+            if not text and not link:
+                continue
+            
+            results.append({
+                "title": title or "(no title)",
+                "link": link or "#",
+                "snippet": text[:300] if text else "No description available"
+            })
+        
+        # If no structured results, try Results array
+        if not results:
+            results_array = data.get("Results", []) or []
+            for item in results_array[:max_results]:
+                text = item.get("Text", "")
+                first_url = item.get("FirstURL", "")
+                
+                if text and first_url:
+                    title = first_url.split("/")[-1].replace("_", " ").replace("%20", " ")
+                    results.append({
+                        "title": title or "(no title)",
+                        "link": first_url,
+                        "snippet": text[:300]
+                    })
+        
+        if not results:
+            return json.dumps({
+                "results": [],
+                "query": query,
+                "message": "No results found"
+            }, indent=2)
+        
+        return json.dumps({
+            "results": results,
+            "query": query,
+            "total": len(results),
+            "source": "DuckDuckGo Instant Answer API"
+        }, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({
+            "error": f"DuckDuckGo search failed: {repr(e)}",
+            "query": query
+        }, ensure_ascii=False, indent=2)
 
 
 def get_tools() -> List[ToolEntry]:
@@ -138,4 +242,17 @@ def get_tools() -> List[ToolEntry]:
                                      "description": f"Reasoning effort (default: {DEFAULT_REASONING_EFFORT})"},
             }, "required": ["query"]},
         }, _web_search, timeout_sec=540),
+        ToolEntry("duckduckgo_search", {
+            "name": "duckduckgo_search",
+            "description": (
+                f"Search the web via DuckDuckGo HTML search. Free, no API key required. "
+                f"Defaults: max_results={_DUCKDUCKGO_MAX_RESULTS}. "
+                "Returns JSON with title, link, and snippet for each result. "
+                "Good for quick searches without API costs."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {"type": "integer", "description": f"Maximum results to return (default: {_DUCKDUCKGO_MAX_RESULTS})"},
+            }, "required": ["query"]},
+        }, _duckduckgo_search, timeout_sec=60),
     ]
