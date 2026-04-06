@@ -97,9 +97,10 @@ Ouroboros repository.
 
 ## Intent / Scope Review Checklist
 
-Used by the supplemental blocking scope reviewer.
-This reviewer checks completeness and forgotten touchpoints using richer context
-than the diff-only triad.
+Used by the full-codebase scope reviewer, which runs IN PARALLEL with the triad diff review.
+Unlike triad reviewers who see only the diff, the scope reviewer sees the ENTIRE repository.
+Its unique advantage is finding cross-module bugs, broken implicit contracts, and hidden
+regressions that diff-only reviewers cannot see.
 
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|
@@ -109,6 +110,8 @@ than the diff-only triad.
 | 4 | regression_surface | Does wider repository context show a concrete sibling path, migration edge, or parallel flow that remains broken or incomplete after this change? | critical if it leaves a concrete broken/incomplete path; otherwise advisory |
 | 5 | prompt_doc_sync | If prompts or docs are relevant to the changed behavior, are they still accurate and mutually consistent? | critical if a concrete prompt/doc artifact becomes false or stale; otherwise advisory |
 | 6 | architecture_fit | Does the change solve the class of problem, or is it a narrow patch that leaves the underlying pattern unresolved? | advisory |
+| 7 | cross_module_bugs | Does this change break something in a different module through implicit coupling, shared state, or assumed call/return patterns? Name the exact module, symbol, or call site. | critical if a concrete cross-module breakage can be cited; otherwise advisory |
+| 8 | implicit_contracts | Are there constants, data format assumptions, expected function signatures, or protocol invariants relied upon by OTHER modules that this change violates without updating those callers? Name the exact symbol or file. | critical if a concrete violated contract can be cited; otherwise advisory |
 
 ### Severity rules
 

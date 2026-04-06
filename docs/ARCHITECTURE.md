@@ -1,4 +1,4 @@
-# Ouroboros v4.14.0 — Architecture & Reference
+# Ouroboros v4.14.1 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -720,8 +720,9 @@ errors surface via the same observability path.
 
 - Triad review and scope review now run **concurrently** inside a `ThreadPoolExecutor(max_workers=2)`.
   Both launch on the same staged snapshot (git lock held). Wall-clock time is `max(triad_time, scope_time)`.
-- Scope review now always runs — even when triad finds critical issues. The agent receives ALL findings
+- Scope review now runs even when triad finds critical issues, so the agent still receives ALL findings
   (triad + scope) in a single blocking round instead of only seeing triad findings on first block.
+  Exception: oversized full prompts trigger the budget gate, which skips scope review with a non-blocking warning.
 - Results are aggregated: if both block, the combined message shows all findings with a note that both
   reviewers blocked. `block_reason` tracks the primary blocker (triad takes precedence if both block).
 - `_scope_review_history` carries scope findings across retry rounds. Stored as `{snapshot_key: [entries]}` where `snapshot_key` is a SHA-256 prefix of the staged diff — findings from a prior blocked attempt on a different diff are not shown to the reviewer. Cleared to `{}` on a successful commit. Not in safety-critical registry.py (accessed via `getattr`).
@@ -743,9 +744,10 @@ errors surface via the same observability path.
 #### Blocking scope review
 
 - **Module**: `tools/scope_review.py`. Single-model (configurable via `OUROBOROS_SCOPE_REVIEW_MODEL`, default `anthropic/claude-opus-4.6`). Reasoning effort via `OUROBOROS_EFFORT_SCOPE_REVIEW` (default `high`).
-- **Fail-closed**: timeout, parse error, API failure, or incomplete context all block.
-- **Role**: completeness, forgotten touchpoints, cross-surface consistency, incomplete
-  migrations, intent mismatch. NOT a duplicate of line-by-line diff review.
+- **Fail-closed**: timeout, parse error, API failure, or unreadable touched files all block. Exception: when the fully assembled scope-review prompt exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (800K tokens), scope review is **skipped with a non-blocking advisory warning** rather than blocking the commit. Touched-file omission always takes precedence over the budget gate.
+- **Role**: full-codebase reviewer with unique advantage — sees the ENTIRE repository,
+  not just the diff. Finds cross-module bugs, broken implicit contracts, hidden
+  regressions, and forgotten touchpoints that diff-only triad reviewers miss.
 - **Prompt includes**: "Intent / Scope Review Checklist" from CHECKLISTS.md, touched-file
   pack, full repo pack (all tracked files minus touched — no char cap, binary/vendored/sensitive
   filtered via `build_full_repo_pack`), goal/scope sections, DEVELOPMENT.md, staged diff, review history.
@@ -763,7 +765,11 @@ errors surface via the same observability path.
   (`.min.js`, `.min.css`, named vendored assets), sensitive files (`.env`, `.pem`, `.key`, etc.),
   oversized (>1MB), and directory prefixes `.cursor/`, `.github/`, `.vscode/`, `.idea/`, `assets/`,
   `webview/`. Explicit omission count appended when files are skipped.
-- Runs **in parallel with** triad review (v4.14.0), BEFORE `git commit`. Also runs in `_repo_write_commit` (legacy path). Always runs — even when triad blocks.
+- Checklist items (v4.14.1): 8 items including `cross_module_bugs` (does the change break something in a different module through implicit coupling?) and `implicit_contracts` (are there constants, data format assumptions, or expected signatures relied upon by other modules that this change violates?).
+- **Budget gate**: after assembling the full scope-review prompt, token count is estimated. If the prompt exceeds `_SCOPE_BUDGET_TOKEN_LIMIT` (800K tokens), scope review is **skipped with a non-blocking warning** rather than crashing or sending an oversized request. The commit is not blocked in this case.
+- **`_TouchedContextStatus` dataclass** (v4.14.1): structured signal object used by `_build_scope_prompt()` to replace the old magic-string channel. `_compute_touched_status()` produces the touched-file statuses; `_build_scope_prompt()` creates `budget_exceeded` after estimating the assembled prompt. Fields: `status` ("empty"|"omitted"|"budget_exceeded"), `omitted_paths`, `token_count`. Success is represented by `context_status is None`, not a separate `"ok"` status. This prevents filename–sentinel collision (a real file named `__empty__` cannot be misclassified as a control sentinel).
+- **Repo-pack gathering helper**: `_gather_scope_packs()` now only returns the wider repo-pack text (or raises on git failure). It no longer returns status sentinels.
+- Runs **in parallel with** triad review (v4.14.0), BEFORE `git commit`. Also runs in `_repo_write_commit` (legacy path). Runs even when triad blocks — **except** when the budget gate skips it for an oversized assembled prompt.
 - Respects review enforcement setting (blocking/advisory).
 
 ### Deep self-review (deep_self_review.py)

@@ -440,12 +440,11 @@ class TestFullRepoPackFailClosed:
             with pytest.raises(RuntimeError, match="git ls-files failed"):
                 rh.build_full_repo_pack(tmp_path)
 
-    def test_scope_review_propagates_git_failure(self, tmp_path):
-        """scope_review._build_scope_prompt propagates RuntimeError from build_full_repo_pack."""
+    def test_scope_gather_packs_propagates_git_failure(self, tmp_path):
+        """scope_review._gather_scope_packs propagates RuntimeError from build_full_repo_pack."""
         import subprocess
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         sr = _get_module("ouroboros.tools.scope_review")
-        # Set up a minimal git repo so git status/diff succeed
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         subprocess.run(["git", "config", "user.email", "t@t.com"],
                        cwd=str(tmp_path), capture_output=True)
@@ -454,21 +453,47 @@ class TestFullRepoPackFailClosed:
         (tmp_path / "a.py").write_text("x = 1\n")
         subprocess.run(["git", "add", "a.py"], cwd=str(tmp_path), capture_output=True)
         subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
-        # Simulate git ls-files failure only inside build_full_repo_pack.
-        # Must patch where the name is looked up (scope_review's local binding),
-        # not where it is defined (review_helpers), because scope_review uses
-        # `from ouroboros.tools.review_helpers import build_full_repo_pack`.
         def fake_full_pack(repo_dir, **kwargs):
             raise RuntimeError("build_full_repo_pack: git ls-files failed (exit 128): fatal")
         with patch.object(sr, "build_full_repo_pack", side_effect=fake_full_pack):
             with pytest.raises(RuntimeError, match="git ls-files failed"):
-                sr._build_scope_prompt(
-                    repo_dir=tmp_path,
-                    commit_message="test commit",
-                    goal="",
-                    scope="",
-                    review_history=[],
-                )
+                sr._gather_scope_packs(tmp_path, ["a.py"])
+
+    def test_run_scope_review_blocks_on_repo_pack_git_failure(self, tmp_path):
+        """run_scope_review must fail closed when build_full_repo_pack raises RuntimeError."""
+        import subprocess
+        from unittest.mock import patch
+
+        sr = _get_module("ouroboros.tools.scope_review")
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t.com"],
+                       cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "a.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "a.py"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "a.py").write_text("x = 2\n")
+        subprocess.run(["git", "add", "a.py"], cwd=str(tmp_path), capture_output=True)
+
+        class FakeCtx:
+            repo_dir = str(tmp_path)
+            task_id = "test"
+            event_queue = None
+
+            def drive_logs(self):
+                return tmp_path
+
+        def fake_full_pack(repo_dir, **kwargs):
+            raise RuntimeError("build_full_repo_pack: git ls-files failed (exit 128): fatal")
+
+        with patch.object(sr, "build_full_repo_pack", side_effect=fake_full_pack):
+            result = sr.run_scope_review(FakeCtx(), "test commit")
+
+        assert result.blocked
+        assert "SCOPE_REVIEW_BLOCKED" in result.block_message
+        assert "Failed to build review context" in result.block_message
+        assert "git ls-files failed" in result.block_message
 
 
 class TestPathTraversalGuard:

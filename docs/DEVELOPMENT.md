@@ -111,9 +111,12 @@ parallel reviewers:
 
 Both reviewers always run concurrently via `concurrent.futures.ThreadPoolExecutor`
 (orchestrated in `ouroboros/tools/parallel_review.py`). The agent receives a
-combined verdict with all findings in one round — scope review is never skipped
-even when triad blocks. Review enforcement is configurable: `Blocking` preserves
-the hard gate; `Advisory` surfaces findings as warnings without blocking.
+combined verdict with all findings in one round — scope review always runs in
+parallel with triad review (even when triad blocks), **except** when the fully
+assembled scope-review prompt exceeds the model's context budget (`_SCOPE_BUDGET_TOKEN_LIMIT`),
+in which case scope review is skipped with a non-blocking advisory warning.
+Review enforcement is configurable: `Blocking` preserves the hard gate; `Advisory`
+surfaces findings as warnings without blocking.
 
 Preferred workflow for multi-file changes: `repo_write` all files first, then
 `repo_commit` to stage, review, and commit everything in one diff.

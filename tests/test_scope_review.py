@@ -191,7 +191,7 @@ class TestScopeFailClosed:
         assert "DELETED" in prompt
 
     def test_build_scope_prompt_blocks_on_partial_omission(self, tmp_path):
-        """_build_scope_prompt returns omitted filenames when some files are binary."""
+        """_build_scope_prompt returns _TouchedContextStatus(status='omitted') when some files are binary."""
         import subprocess
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         (tmp_path / "docs").mkdir(exist_ok=True)
@@ -210,9 +210,12 @@ class TestScopeFailClosed:
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
 
         mod = _get_module("ouroboros.tools.scope_review")
-        prompt, omitted = mod._build_scope_prompt(tmp_path, "test msg")
-        assert omitted is not None
-        assert "image.png" in omitted
+        prompt, context_status = mod._build_scope_prompt(tmp_path, "test msg")
+        # Returns (None, _TouchedContextStatus) on fail-closed
+        assert prompt is None
+        assert context_status is not None
+        assert context_status.status == "omitted"
+        assert "image.png" in context_status.omitted_paths
 
     def test_build_scope_prompt_clean_when_all_readable(self, tmp_path):
         """_build_scope_prompt returns None omitted when all files are readable."""
@@ -359,8 +362,9 @@ class TestScopeReviewModule:
 
     def test_scope_prompt_includes_full_repo_pack(self):
         # scope_review now uses build_full_repo_pack (DRY, no char cap)
+        # The call is in _gather_scope_packs which _build_scope_prompt delegates to
         mod = _get_module("ouroboros.tools.scope_review")
-        source = inspect.getsource(mod._build_scope_prompt)
+        source = inspect.getsource(mod._gather_scope_packs)
         assert "build_full_repo_pack" in source
 
 
@@ -609,6 +613,40 @@ class TestGitWiring:
         # But scope advisory items must be returned for caller to surface
         assert len(scope_adv) > 0
         assert any("architecture_fit" in item for item in scope_adv)
+
+    def test_scope_review_skipped_surfaces_through_aggregation_path(self):
+        """Budget-skip advisories must survive aggregation and caller-side surfacing."""
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        scope_advisory = scope_mod.ScopeReviewResult(
+            blocked=False,
+            block_message="",
+            critical_findings=[],
+            advisory_findings=[{
+                "verdict": "FAIL",
+                "item": "scope_review_skipped",
+                "severity": "advisory",
+                "reason": "⚠️ SCOPE_REVIEW_SKIPPED: Full scope-review prompt exceeds budget.",
+                "model": "scope_reviewer",
+            }],
+        )
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                None, scope_advisory, "", [], ctx, "test commit", 0.0, ctx.repo_dir)
+
+        if scope_adv:
+            ctx._review_advisory.extend(scope_adv)
+
+        assert not blocked
+        assert combined_msg is None
+        assert findings == []
+        assert any("scope_review_skipped" in item for item in scope_adv)
+        assert any("scope_review_skipped" in item for item in ctx._review_advisory)
 
     def test_triad_crash_resets_stale_findings(self):
         """If triad crashes, stale ctx findings from prior attempt must not bleed into current run."""
@@ -881,9 +919,15 @@ class TestSharedLLMRouting:
         assert "llm_usage" in source
 
     def test_scope_review_uses_llm_client(self):
-        """Scope review must use LLMClient for its model call."""
+        """Scope review must use LLMClient for its model call.
+
+        LLMClient is used in _call_scope_llm (called by run_scope_review),
+        so we check the whole module for its presence rather than just
+        the top-level run_scope_review function.
+        """
         mod = _get_module("ouroboros.tools.scope_review")
-        source = inspect.getsource(mod.run_scope_review)
+        # LLMClient is instantiated in _call_scope_llm which run_scope_review delegates to
+        source = inspect.getsource(mod._call_scope_llm)
         assert "LLMClient" in source
 
     def test_scope_review_emits_usage(self):
