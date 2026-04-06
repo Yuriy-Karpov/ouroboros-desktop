@@ -64,71 +64,70 @@ def _web_search(
     reasoning_effort: str = "",
 ) -> str:
     """
-    Web search via DuckDuckGo using Playwright browser.
-    Free, no API key required.
+    Web search via DuckDuckGo Instant Answer API.
+    Free, no API key required, returns structured results.
     
-    Navigates to DuckDuckGo search results page and extracts results.
-    This works for general queries (not just instant answers).
+    Uses https://api.duckduckgo.com/ which provides instant answers,
+    related topics, definitions, and web results for general queries.
     """
     try:
-        from urllib.parse import quote
+        url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&pretty=1"
         
-        # Navigate to DuckDuckGo search results
-        search_url = f"https://duckduckgo.com/?q={quote(query)}&ia=web"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
         
-        result = browse_page(
-            ctx=ctx,
-            url=search_url,
-            output="text",
-            timeout=30000,
-        )
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
         
-        if result.get("status") == "error":
-            return json.dumps({
-                "error": f"Browser search failed: {result.get('error', 'unknown error')}",
-                "query": query
-            }, ensure_ascii=False)
-        
-        # Extract links and snippets from page text
-        text = result.get("text", "")
-        
-        # Simple regex extraction
-        import re
-        
-        # Find href and link text
-        href_pattern = r'<a\s+[^>]*href="([^"]+)"[^>]*>([^<]+)</a>'
-        matches = re.findall(href_pattern, text)
-        
+        data = resp.json()
         results = []
-        for href, title in matches[:10]:
-            # Skip non-web results
-            if href.startswith('#') or href.startswith('javascript:'):
-                continue
+        
+        # Extract web results from RelatedTopics
+        related_topics = data.get("RelatedTopics", []) or []
+        
+        for topic in related_topics[:10]:
+            text = topic.get("Text", "")
+            first_url = topic.get("FirstURL", "")
             
-            # Try to find snippet near this link (simplified)
-            snippet = f"Search result for '{query}' - see link"
-            
-            results.append({
-                "title": title.strip() or "(no title)",
-                "link": href,
-                "snippet": snippet
-            })
+            if text and first_url:
+                title = first_url.split("/")[-1].replace("_", " ").replace("%20", " ")
+                results.append({
+                    "title": title or "(no title)",
+                    "link": first_url,
+                    "snippet": text[:300]
+                })
+        
+        # Also try Results array for general web search
+        if not results:
+            results_array = data.get("Results", []) or []
+            for item in results_array[:10]:
+                text = item.get("Text", "")
+                first_url = item.get("FirstURL", "")
+                
+                if text and first_url:
+                    title = first_url.split("/")[-1].replace("_", " ").replace("%20", " ")
+                    results.append({
+                        "title": title or "(no title)",
+                        "link": first_url,
+                        "snippet": text[:300]
+                    })
         
         if results:
             return json.dumps({
                 "results": results,
                 "query": query,
                 "total": len(results),
-                "source": "DuckDuckGo Browser Search",
-                "note": "Free search via DuckDuckGo using browser automation"
+                "source": "DuckDuckGo Instant Answer API",
+                "note": "Free search via DuckDuckGo"
             }, indent=2, ensure_ascii=False)
         
-        # No results
+        # No results from DuckDuckGo
         return json.dumps({
             "results": [],
             "query": query,
             "total": 0,
-            "source": "DuckDuckGo Browser Search",
+            "source": "DuckDuckGo Instant Answer API",
             "message": "No results found"
         }, indent=2, ensure_ascii=False)
         
