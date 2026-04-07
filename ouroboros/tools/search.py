@@ -140,66 +140,30 @@ def _web_search(
 
 def _duckduckgo_search(query: str, max_results: int = _DUCKDUCKGO_MAX_RESULTS) -> str:
     """
-    Search the web via DuckDuckGo Instant Answer API.
+    Search the web via DuckDuckGo using ddgs library.
     Free, no API key required, returns structured results.
     
-    Uses https://api.duckduckgo.com/ which provides structured search results
-    including related topics, definitions, and web results.
+    Uses the ddgs (duckduckgo-search) library which properly handles
+    HTTP requests and avoids CAPTCHA by emulating a real browser.
+    
+    This is non-exact match search - queries are NOT wrapped in quotes,
+    so DuckDuckGo returns results with any word order, better for
+    local/regional queries.
     
     Args:
-        query: Search query string
+        query: Search query string (searches without exact match quotes)
         max_results: Maximum number of results to return
     
     Returns:
         JSON with results array containing title, link, text
     """
     try:
-        # DuckDuckGo Instant Answer API (no CAPTCHA, structured results)
-        url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&pretty=1"
+        # Use ddgs library (renamed from duckduckgo_search)
+        # It properly handles requests and avoids CAPTCHA
+        from ddgs import DDGS
         
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        
-        data = resp.json()
-        results = []
-        
-        # Extract web results from RelatedTopics (structured data)
-        related_topics = data.get("RelatedTopics", []) or []
-        
-        for topic in related_topics[:max_results]:
-            # Get text/title/link from topic
-            text = topic.get("Text", "")
-            title = topic.get("FirstURL", "").split("/")[-1].replace("_", " ")
-            link = topic.get("FirstURL", "")
-            
-            # Skip if no meaningful data
-            if not text and not link:
-                continue
-            
-            results.append({
-                "title": title or "(no title)",
-                "link": link or "#",
-                "snippet": text[:300] if text else "No description available"
-            })
-        
-        # If no structured results, try Results array
-        if not results:
-            results_array = data.get("Results", []) or []
-            for item in results_array[:max_results]:
-                text = item.get("Text", "")
-                first_url = item.get("FirstURL", "")
-                
-                if text and first_url:
-                    title = first_url.split("/")[-1].replace("_", " ").replace("%20", " ")
-                    results.append({
-                        "title": title or "(no title)",
-                        "link": first_url,
-                        "snippet": text[:300]
-                    })
+        ddgs = DDGS()
+        results = ddgs.text(query, max_results=max_results)
         
         if not results:
             return json.dumps({
@@ -208,13 +172,27 @@ def _duckduckgo_search(query: str, max_results: int = _DUCKDUCKGO_MAX_RESULTS) -
                 "message": "No results found"
             }, indent=2)
         
+        # Format results to match tool schema
+        formatted_results = []
+        for item in results:
+            formatted_results.append({
+                "title": item.get('title', '(no title)'),
+                "link": item.get('href', '#'),
+                "snippet": item.get('body', 'No description available')[:300]
+            })
+        
         return json.dumps({
-            "results": results,
+            "results": formatted_results,
             "query": query,
-            "total": len(results),
-            "source": "DuckDuckGo Instant Answer API"
+            "total": len(formatted_results),
+            "source": "DuckDuckGo via ddgs library (non-exact match)"
         }, indent=2, ensure_ascii=False)
         
+    except ImportError:
+        return json.dumps({
+            "error": "DuckDuckGo library not installed. Please run: pip install ddgs",
+            "query": query
+        }, ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({
             "error": f"DuckDuckGo search failed: {repr(e)}",
