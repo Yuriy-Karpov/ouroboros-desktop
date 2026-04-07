@@ -33,7 +33,7 @@ def test_prepare_onboarding_settings_requires_runnable_config():
     prepared, error = prepare_onboarding_settings(_base_payload(), {})
 
     assert prepared == {}
-    assert "Configure OpenRouter, OpenAI, Anthropic, or a local model" in error
+    assert "Configure OpenRouter, OpenAI, Cloud.ru, Anthropic, or a local model" in error
 
 
 def test_prepare_onboarding_settings_accepts_openai_only_setup():
@@ -48,6 +48,21 @@ def test_prepare_onboarding_settings_accepts_openai_only_setup():
     assert prepared["TOTAL_BUDGET"] == 10.0
     assert prepared["OUROBOROS_PER_TASK_COST_USD"] == 20.0
     assert prepared["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
+
+
+def test_prepare_onboarding_settings_accepts_cloudru_only_setup():
+    payload = _base_payload()
+    payload["CLOUDRU_FOUNDATION_MODELS_API_KEY"] = "cloudru-key-1234567890"
+    payload["OUROBOROS_MODEL"] = "cloudru::GigaChat/GigaChat-2-Max"
+    payload["OUROBOROS_MODEL_CODE"] = "cloudru::GigaChat/GigaChat-2-Max"
+    payload["OUROBOROS_MODEL_LIGHT"] = "cloudru::GigaChat/GigaChat-2-Max"
+    payload["OUROBOROS_MODEL_FALLBACK"] = "cloudru::GigaChat/GigaChat-2-Max"
+
+    prepared, error = prepare_onboarding_settings(payload, {})
+
+    assert error is None
+    assert prepared["CLOUDRU_FOUNDATION_MODELS_API_KEY"] == "cloudru-key-1234567890"
+    assert prepared["OUROBOROS_MODEL"] == "cloudru::GigaChat/GigaChat-2-Max"
 
 
 def test_prepare_onboarding_settings_accepts_anthropic_only_setup():
