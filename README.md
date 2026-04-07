@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.15.5](https://img.shields.io/badge/version-4.15.5-green.svg)](VERSION)
+[![Version 4.16.0](https://img.shields.io/badge/version-4.16.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -250,6 +250,7 @@ Ouroboros
 │   ├── review.py           — Code review pipeline and repo inspection
 │   ├── reflection.py       — Execution reflection and pattern capture
 │   ├── tool_capabilities.py — SSOT for tool sets (core, parallel, truncation)
+│   ├── chat_upload_api.py  — Chat file attachment upload/delete endpoints
 │   ├── gateways/           — External API adapters
 │   │   └── claude_code.py  — Claude Agent SDK gateway (edit + read-only)
 │   ├── consciousness.py    — Background thinking loop
@@ -274,6 +275,7 @@ Created on first launch:
 | `data/state/` | Runtime state, budget tracking |
 | `data/memory/` | Identity, working memory, system profile, knowledge base, memory registry |
 | `data/logs/` | Chat history, events, tool calls |
+| `data/uploads/` | Chat file attachments (uploaded via paperclip button) |
 
 ---
 
@@ -374,6 +376,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.16.0 | 2026-04-07 | Chat attachment: paperclip button selects a file (staged locally, no server upload until Send/Enter), shows removable preview badge, uploads to `data/uploads/` with UUID-unique name. Upload is blocked when WebSocket is offline — no upload happens when disconnected, preventing orphan files. If the WebSocket drops after upload completes but before message delivery, the queued message references a durable server-side file that persists until explicitly deleted. |
 | 4.15.5 | 2026-04-07 | Chat layout fix: `#chat-messages` `padding-bottom` set to `150px` to ensure the last bubble stays reachable above the floating input overlay at maximum textarea height (~144px). Syncs `docs/ARCHITECTURE.md` description. |
 | 4.15.4 | 2026-04-07 | Review-loop repair: blocked `repo_commit` / `repo_write_commit` paths now preserve real triad and scope findings instead of self-triggering `REVIEW_REVALIDATION_FAILED`; Claude Code advisory/edit paths now share one 30-turn default; advisory diagnostics, obligations, review continuity, and review evidence now stay repo-scoped and honest; changed-path parsing now uses one structured git-status helper that handles renames and literal ` -> ` filenames. Focused regression coverage added across commit, advisory, scope, context, continuation, and observability tests. |
 | 4.15.3 | 2026-04-07 | Review flow repair: fix ghost `reviewing` attempts caused by the ledger allocating a new attempt number on every `status="reviewing"` write instead of reusing the current logical attempt. TTL boundary now expires at the exact threshold instead of lingering one tick past it. Regression tests assert against the full `attempts[]` ledger. |

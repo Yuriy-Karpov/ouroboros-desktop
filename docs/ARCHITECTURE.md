@@ -1,4 +1,4 @@
-# Ouroboros v4.15.5 — Architecture & Reference
+# Ouroboros v4.16.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -30,6 +30,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
   └── ouroboros/               ← Agent core (runs inside worker processes)
       ├── config.py            ← SSOT: paths, settings defaults, load/save, PID lock
       ├── agent.py             ← Task orchestrator
+      ├── chat_upload_api.py   ← Chat file attachment upload/delete endpoints
       ├── agent_startup_checks.py ← Startup verification and health checks
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration
       ├── loop.py              ← High-level LLM tool loop
@@ -143,7 +144,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
 │   │   ├── tools.jsonl     ← Tool call log with args/results
 │   │   ├── supervisor.jsonl ← Supervisor-level events
 │   │   └── task_reflections.jsonl ← Execution reflections (process memory)
-│   └── archive/            ← Rotated logs, rescue snapshots
+│   ├── archive/            ← Rotated logs, rescue snapshots
+│   └── uploads/            ← Chat file attachments (uploaded via paperclip button)
 └── ouroboros.pid           ← PID lock file (platform lock — auto-released on crash)
 ```
 
@@ -218,7 +220,7 @@ Navigation is a left sidebar with 7 pages (Chat, Files, Logs, Costs, Evolution, 
   Driven by WebSocket connection state, typing events, and live task state.
 - **Header controls**: compact buttons for `/evolve`, `/bg`, `/review`, `/restart`, `/panic` — the canonical location for runtime controls. The chat header is a floating transparent overlay (`position: absolute`, gradient fade) so messages scroll beneath it.
 - **Budget pill**: compact amber pill in the header showing `$spent / $limit` with a mini progress bar, updated from `/api/state` polling every 3 seconds.
-- **Message input**: absolute-positioned frosted-glass overlay anchored to the bottom of the chat page (`position: absolute; bottom: 0`). Contains a textarea (grows up to 120px) with an inline "Send" text button. `backdrop-filter: blur(12px)` + gradient background so message bubbles scroll underneath the overlay. `#chat-messages` reserves `padding-bottom: 150px` so the last bubble is always fully reachable even when the textarea is at maximum height. Shift+Enter for newline, Enter to send.
+- **Message input**: absolute-positioned frosted-glass overlay anchored to the bottom of the chat page (`position: absolute; bottom: 0`). Contains a paperclip attachment button (opens a file picker; selected file is staged locally in JS memory and shown as a removable filename preview badge — the file is uploaded to `data/uploads/` only when Send/Enter is triggered; if the WebSocket is offline at send time, upload is blocked with an error (no upload happens when disconnected, preventing orphan files). If the WebSocket drops after upload completes but before message delivery, the queued message references a durable server-side file that persists until explicitly deleted), a textarea (grows up to 120px), and an inline "Send" text button. `backdrop-filter: blur(12px)` + gradient background so message bubbles scroll underneath the overlay. `#chat-messages` reserves `padding-bottom: 150px` so the last bubble is always fully reachable even when the textarea is at maximum height. Shift+Enter for newline, Enter to send.
 - **Input recall**: ArrowUp / ArrowDown cycles through recent submitted messages without leaving the textarea.
 - **Messages**: user bubbles (right, steel-blue-tinted), assistant bubbles (left, crimson), and system-summary bubbles (left, amber). Non-user bubbles render markdown. Live task card uses crimson accent glass matching the assistant palette.
 - **Multi-user visibility**: user messages are now session-aware. The current browser session stays labeled as `You`; other Web UI sessions render as `WebUI (<session>)`; Telegram-origin messages render with their Telegram sender label.
@@ -295,7 +297,7 @@ The Dashboard tab has been removed. Its functionality is now distributed:
 - **Save Settings** button → POST `/api/settings`. Applies to env immediately.
   Budget and tool-timeout changes take effect immediately; provider/runtime changes may still require restart.
 - **Reset All Data** button (Danger Zone) → POST `/api/reset`.
-  Deletes: state/, memory/, logs/, archive/, settings.json.
+  Deletes: state/, memory/, logs/, archive/, uploads/, settings.json.
   Keeps: repo/ (agent code).
   Triggers server restart. On next launch, onboarding wizard appears.
 
@@ -396,6 +398,8 @@ authentication. If the password is blank, non-loopback access stays open by desi
 | GET | `/api/local-model/status` | Local model status and readiness |
 | GET | `/api/evolution-data` | Evolution metrics per git tag (LOC, prompt sizes, memory) |
 | GET | `/api/chat/history` | Merged chat + system summaries + progress messages (chronological, limit param) |
+| POST | `/api/chat/upload` | Upload a file attachment; saved to `data/uploads/` with UUID-prefixed unique name; returns `{ok, filename, display_name, path, size, mime}` |
+| DELETE | `/api/chat/upload` | Delete a previously uploaded chat attachment by filename |
 | POST | `/api/local-model/test` | Local model sanity test (chat + tool calling) |
 | GET/POST | `/auth/login` | Password gate entrypoint for non-localhost browser/API access |
 | GET/POST | `/auth/logout` | Clear auth cookie/session |

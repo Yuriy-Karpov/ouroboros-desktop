@@ -1252,9 +1252,10 @@ body {
 
 #chat-input-area {
     display: flex;
-    gap: 8px;
+    flex-direction: column;
+    gap: 4px;
     padding: 8px 16px 16px;
-    align-items: center;
+    align-items: stretch;
     position: absolute;
     bottom: 0;
     left: 0;
@@ -1270,6 +1271,89 @@ body {
     position: relative;
     display: flex;
     align-items: center;
+    gap: 6px;
+}
+
+.chat-attach-btn {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(226, 232, 240, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.chat-attach-btn:hover {
+    color: rgba(226, 232, 240, 0.9);
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.15);
+}
+
+.chat-file-input-hidden {
+    display: none !important;
+}
+
+.chat-attach-btn.uploading {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.chat-attachment-preview {
+    display: none;
+    padding: 4px 8px 2px;
+}
+
+.chat-attachment-preview.visible {
+    display: flex;
+    align-items: center;
+}
+
+.attach-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px 4px 6px;
+    background: rgba(201, 53, 69, 0.12);
+    border: 1px solid rgba(201, 53, 69, 0.25);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: rgba(226, 232, 240, 0.85);
+    max-width: 100%;
+}
+
+.attach-thumb {
+    width: 24px;
+    height: 24px;
+    object-fit: cover;
+    border-radius: var(--radius-xs);
+}
+
+.attach-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 200px;
+}
+
+.attach-remove {
+    flex-shrink: 0;
+    border: none;
+    background: none;
+    color: rgba(226, 232, 240, 0.5);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0 2px;
+}
+
+.attach-remove:hover {
+    color: rgba(226, 232, 240, 0.9);
 }
 
 #chat-input {

@@ -12,6 +12,7 @@ import asyncio
 import collections
 import json
 import logging
+
 import os
 import pathlib
 import sys
@@ -882,7 +883,7 @@ async def api_reset(request: Request) -> JSONResponse:
     import shutil
     try:
         deleted = []
-        for subdir in ("state", "memory", "logs", "archive", "locks", "task_results"):
+        for subdir in ("state", "memory", "logs", "archive", "locks", "task_results", "uploads"):
             p = DATA_DIR / subdir
             if p.exists():
                 shutil.rmtree(p, ignore_errors=True)
@@ -989,6 +990,8 @@ from ouroboros.local_model_api import (
     api_local_model_start, api_local_model_stop,
     api_local_model_status, api_local_model_test,
 )
+from ouroboros.chat_upload_api import api_chat_upload, api_chat_upload_delete
+
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -1016,6 +1019,8 @@ routes = [
     Route("/api/cost-breakdown", endpoint=api_cost_breakdown),
     Route("/api/evolution-data", endpoint=api_evolution_data),
     Route("/api/chat/history", endpoint=api_chat_history),
+    Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),
+    Route("/api/chat/upload", endpoint=api_chat_upload_delete, methods=["DELETE"]),
     Route("/api/local-model/start", endpoint=api_local_model_start, methods=["POST"]),
     Route("/api/local-model/stop", endpoint=api_local_model_stop, methods=["POST"]),
     Route("/api/local-model/status", endpoint=api_local_model_status),
