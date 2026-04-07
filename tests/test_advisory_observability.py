@@ -134,6 +134,24 @@ def test_get_runtime_diagnostics_never_raises():
     assert "sdk_version" in diag
 
 
+def test_get_runtime_diagnostics_reads_runtime_state_attributes(monkeypatch):
+    """Runtime diagnostics must read cli_path/cli_version from ClaudeRuntimeState attributes."""
+    adv_mod = _get_advisory_module()
+    from ouroboros.compat import ClaudeRuntimeState
+
+    monkeypatch.setattr(
+        "ouroboros.compat.resolve_claude_runtime",
+        lambda: ClaudeRuntimeState(
+            cli_path="/app/claude",
+            cli_version="2.1.92",
+        ),
+    )
+    diag = adv_mod._get_runtime_diagnostics("opus", 1234, ["file.py"])
+
+    assert diag["cli_path"] == "/app/claude"
+    assert diag["cli_version"] == "2.1.92"
+
+
 # ---------------------------------------------------------------------------
 # Budget gate: skip path and durable state
 # ---------------------------------------------------------------------------

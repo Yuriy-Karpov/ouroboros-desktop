@@ -372,6 +372,7 @@ class OuroborosAgent:
                             task,
                             source="task_exception",
                             warning=f"{type(e).__name__}: {e}",
+                            repo_dir=self.env.repo_dir,
                         )
                     except Exception:
                         log.debug("Failed to persist review continuation after task exception", exc_info=True)

@@ -457,6 +457,103 @@ def test_advisory_freshness_passes_with_fresh_run(tmp_path):
     assert result is None, f"Expected gate to pass but got: {result}"
 
 
+def test_advisory_freshness_is_repo_scoped(tmp_path):
+    """A fresh run for repo A must not satisfy repo B when hashes coincide."""
+    import subprocess
+    git_mod = _get_git_module()
+    rs_mod = _get_review_state_module()
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    (drive_root / "logs").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_a), capture_output=True)
+    subprocess.run(["git", "init"], cwd=str(repo_b), capture_output=True)
+
+    commit_message = "same commit message"
+    snapshot_hash = rs_mod.compute_snapshot_hash(repo_a, commit_message)
+    state = rs_mod.AdvisoryReviewState()
+    state.add_run(rs_mod.AdvisoryRunRecord(
+        snapshot_hash=snapshot_hash,
+        commit_message=commit_message,
+        status="fresh",
+        ts="2026-01-01T00:00:00",
+        repo_key=rs_mod.make_repo_key(repo_a),
+    ))
+    rs_mod.save_state(drive_root, state)
+
+    class FakeCtx:
+        pass
+
+    ctx = FakeCtx()
+    ctx.repo_dir = repo_b
+    ctx.drive_root = drive_root
+    ctx.task_id = "repo-b-task"
+    ctx.drive_logs = lambda: drive_root / "logs"
+
+    result = git_mod._check_advisory_freshness(ctx, commit_message)
+    assert result is not None
+    assert "ADVISORY_PRE_REVIEW_REQUIRED" in result
+
+
+def test_open_obligations_are_repo_scoped(tmp_path):
+    """Open obligations in repo A must not block a fresh advisory in repo B."""
+    import subprocess
+    git_mod = _get_git_module()
+    rs_mod = _get_review_state_module()
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    (drive_root / "logs").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_a), capture_output=True)
+    subprocess.run(["git", "init"], cwd=str(repo_b), capture_output=True)
+
+    commit_message = "shared message"
+    state = rs_mod.AdvisoryReviewState()
+    state.add_run(rs_mod.AdvisoryRunRecord(
+        snapshot_hash=rs_mod.compute_snapshot_hash(repo_b, commit_message),
+        commit_message=commit_message,
+        status="fresh",
+        ts="2026-01-01T00:00:00",
+        repo_key=rs_mod.make_repo_key(repo_b),
+    ))
+    state.add_blocking_attempt(rs_mod.CommitAttemptRecord(
+        ts="2026-01-01T00:05:00",
+        commit_message="repo a blocked",
+        status="blocked",
+        repo_key=rs_mod.make_repo_key(repo_a),
+        block_reason="critical_findings",
+        critical_findings=[{
+            "item": "tests_affected",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "missing tests in repo a",
+        }],
+    ))
+    rs_mod.save_state(drive_root, state)
+
+    class FakeCtx:
+        pass
+
+    ctx = FakeCtx()
+    ctx.repo_dir = repo_b
+    ctx.drive_root = drive_root
+    ctx.task_id = "repo-b-task"
+    ctx.drive_logs = lambda: drive_root / "logs"
+
+    result = git_mod._check_advisory_freshness(ctx, commit_message)
+    assert result is None, f"Repo-scoped obligations should not block repo B: {result}"
+
+
 def test_snapshot_hash_stable_on_message_change(tmp_path):
     """Snapshot hash must NOT differ when only commit_message changes.
 

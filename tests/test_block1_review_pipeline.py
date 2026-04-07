@@ -209,6 +209,24 @@ class TestAdvisoryDiffSizeGate:
         assert "target.py" in scoped
         assert "unrelated.py" not in scoped
 
+    def test_parse_changed_paths_preserves_literal_arrow_filename(self):
+        """A normal filename containing ` -> ` must not be treated as a rename."""
+        helpers = _get_module("ouroboros.tools.review_helpers")
+        changed = " M docs/ARCH -> ITECTURE.md"
+        assert helpers.parse_changed_paths_from_porcelain(changed) == ["docs/ARCH -> ITECTURE.md"]
+
+    def test_parse_changed_paths_handles_text_rename_status(self):
+        """Text porcelain rename entries must resolve to the destination path."""
+        helpers = _get_module("ouroboros.tools.review_helpers")
+        changed = "R  docs/OLD.md -> docs/NEW.md"
+        assert helpers.parse_changed_paths_from_porcelain(changed) == ["docs/NEW.md"]
+
+    def test_parse_changed_paths_handles_structured_rename_status(self):
+        """NUL-delimited porcelain entries must resolve renames without string splitting hacks."""
+        helpers = _get_module("ouroboros.tools.review_helpers")
+        changed = b"R  docs/NEW.md\0docs/OLD.md\0"
+        assert helpers.parse_changed_paths_from_porcelain_z(changed) == ["docs/NEW.md"]
+
     def test_path_scoped_diff_ignores_large_unrelated_file(self, tmp_path):
         """When paths= is given, _get_staged_diff must scope to those paths only.
 

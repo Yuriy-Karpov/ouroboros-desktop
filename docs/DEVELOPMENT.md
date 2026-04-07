@@ -102,27 +102,30 @@ Derived from P5 (Minimalism): entire codebase fits in one context window.
 
 ## Review & Commit Protocol
 
-Every commit through `repo_commit` or `repo_write_commit` passes a **unified
-pre-commit review** before the git commit is created. The pipeline has two
-parallel reviewers:
+Reviewed commits now have an explicit **two-step gate**:
 
-1. **Triad review** (`ouroboros/tools/review.py`): three models review the staged
-   diff against `docs/CHECKLISTS.md` in parallel.
-2. **Scope review** (`ouroboros/tools/scope_review.py`): a single model reviews
-   completeness and cross-module consistency with access to the full repository
-   context (`build_full_repo_pack`).
+1. **Advisory freshness gate**: finish all edits, then run `advisory_pre_review`.
+   `repo_commit` / `repo_write_commit` require a fresh matching advisory run (or an
+   explicit audited bypass) and no open obligations from earlier blocked rounds.
+   Any edit after advisory makes it stale and requires a re-run.
+2. **Unified pre-commit review**: once advisory is fresh, the reviewed commit path
+   runs two reviewers in parallel on the exact staged snapshot:
+   - **Triad review** (`ouroboros/tools/review.py`): three models review the staged
+     diff against `docs/CHECKLISTS.md`.
+   - **Scope review** (`ouroboros/tools/scope_review.py`): one model reviews
+     completeness and cross-module consistency with full-repo context
+     (`build_full_repo_pack`).
 
-Both reviewers always run concurrently via `concurrent.futures.ThreadPoolExecutor`
-(orchestrated in `ouroboros/tools/parallel_review.py`). The agent receives a
-combined verdict with all findings in one round — scope review always runs in
-parallel with triad review (even when triad blocks), **except** when the fully
-assembled scope-review prompt exceeds the model's context budget (`_SCOPE_BUDGET_TOKEN_LIMIT`),
-in which case scope review is skipped with a non-blocking advisory warning.
-Review enforcement is configurable: `Blocking` preserves the hard gate; `Advisory`
-surfaces findings as warnings without blocking.
+Both blocking reviewers always run concurrently via `concurrent.futures.ThreadPoolExecutor`
+(orchestrated in `ouroboros/tools/parallel_review.py`). The caller receives one
+combined verdict with all findings in a single round. Scope review still runs even
+when triad blocks, **except** when the fully assembled scope-review prompt exceeds
+the model context budget (`_SCOPE_BUDGET_TOKEN_LIMIT`), in which case scope review
+is skipped with a non-blocking advisory warning. `docs/CHECKLISTS.md` remains the
+single source of truth for review items; do not duplicate or fork checklist policy here.
 
 Preferred workflow for multi-file changes: `repo_write` all files first, then
-`repo_commit` to stage, review, and commit everything in one diff.
+`advisory_pre_review`, then `repo_commit` immediately on the final diff.
 
 The full pre-commit review checklists live in **`docs/CHECKLISTS.md`** —
 the single source of truth (Bible P5: DRY).

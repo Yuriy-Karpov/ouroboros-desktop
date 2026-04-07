@@ -95,17 +95,68 @@ def format_prompt_code_block(content: str, language: str = "") -> str:
     return f"{fence}{lang}\n{content}\n{fence}"
 
 
+def parse_changed_paths_from_porcelain_z(changed_files_raw: bytes | str) -> list[str]:
+    """Extract current paths from `git status --porcelain=v1 -z` output."""
+    if not changed_files_raw:
+        return []
+
+    raw = (
+        changed_files_raw.encode("utf-8", errors="surrogateescape")
+        if isinstance(changed_files_raw, str)
+        else changed_files_raw
+    )
+    resolved_paths: list[str] = []
+    entries = raw.split(b"\0")
+    idx = 0
+    while idx < len(entries):
+        entry = entries[idx]
+        idx += 1
+        if not entry or len(entry) < 4:
+            continue
+        status = entry[:2].decode("utf-8", errors="replace")
+        relpath = entry[3:].decode("utf-8", errors="surrogateescape")
+        if relpath:
+            resolved_paths.append(relpath)
+        if "R" in status or "C" in status:
+            idx += 1
+    return resolved_paths
+
+
+def list_changed_paths_from_git_status(
+    repo_dir: Path,
+    paths: list[str] | None = None,
+) -> list[str]:
+    """Return changed paths using NUL-delimited porcelain output."""
+    path_args = (["--"] + list(paths)) if paths else []
+    result = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"] + path_args,
+        cwd=repo_dir,
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or b"").decode("utf-8", errors="replace").strip()[:200]
+        raise RuntimeError(
+            f"git status --porcelain=v1 -z failed (exit {result.returncode}): {err}"
+        )
+    return parse_changed_paths_from_porcelain_z(result.stdout)
+
+
 def parse_changed_paths_from_porcelain(changed_files_text: str) -> list[str]:
     """Extract path list from `git status --porcelain` text."""
     resolved_paths: list[str] = []
     if not changed_files_text or changed_files_text.startswith("(clean"):
         return resolved_paths
     for line in changed_files_text.splitlines():
-        if len(line) >= 4:
-            entry = line[3:]
-            if " -> " in entry:
-                entry = entry.split(" -> ", 1)[1]
-            resolved_paths.append(entry.strip())
+        if len(line) < 4:
+            continue
+        status = line[:2]
+        entry = line[3:]
+        if ("R" in status or "C" in status) and " -> " in entry:
+            entry = entry.rsplit(" -> ", 1)[1]
+        entry = entry.strip()
+        if entry:
+            resolved_paths.append(entry)
     return resolved_paths
 
 
@@ -148,25 +199,7 @@ def build_touched_file_pack(
     Returns (formatted_text, omitted_file_paths).
     """
     if paths is None:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            err = (result.stderr or "").strip()[:200]
-            raise RuntimeError(
-                f"build_touched_file_pack: git status failed (exit {result.returncode}): {err}"
-            )
-        paths = []
-        for line in result.stdout.splitlines():
-            # porcelain format: XY filename  (or XY old -> new for renames)
-            entry = line[3:]
-            if " -> " in entry:
-                entry = entry.split(" -> ", 1)[1]
-            paths.append(entry)
+        paths = list_changed_paths_from_git_status(repo_dir)
 
     parts: list[str] = []
     omitted: list[str] = []
@@ -234,7 +267,11 @@ def build_advisory_changed_context(
     exclude_paths: set[str] | None = None,
 ) -> tuple[list[str], str, list[str]]:
     """Resolve changed paths and build the touched-file section for advisory prompts."""
-    resolved_paths = list(paths) if paths is not None else parse_changed_paths_from_porcelain(changed_files_text)
+    resolved_paths = (
+        list(paths)
+        if paths is not None
+        else list_changed_paths_from_git_status(repo_dir)
+    )
     filtered_paths = [
         p for p in resolved_paths
         if p not in (exclude_paths or set())
@@ -731,8 +768,8 @@ def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
     try:
         from ouroboros.compat import resolve_claude_runtime
         rt = resolve_claude_runtime()
-        diag["cli_version"] = rt.get("cli_version", "(unavailable)")
-        diag["cli_path"] = rt.get("cli_path", "(unavailable)")
+        diag["cli_version"] = getattr(rt, "cli_version", "") or "(unavailable)"
+        diag["cli_path"] = getattr(rt, "cli_path", "") or "(unavailable)"
     except Exception:
         diag["cli_version"] = "(unavailable)"
         diag["cli_path"] = "(unavailable)"

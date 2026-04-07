@@ -396,7 +396,10 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         ctx.emit_progress_fn("Delegating to Claude Agent SDK...")
 
         try:
-            from ouroboros.gateways.claude_code import run_edit
+            from ouroboros.gateways.claude_code import (
+                DEFAULT_CLAUDE_CODE_MAX_TURNS,
+                run_edit,
+            )
 
             system_prompt = (
                 f"STRICT: Only modify files inside {work_dir}. "
@@ -408,7 +411,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
                 prompt=prompt,
                 cwd=work_dir,
                 model=model,
-                max_turns=25,
+                max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
                 budget=budget,
                 system_prompt=system_prompt,
             )

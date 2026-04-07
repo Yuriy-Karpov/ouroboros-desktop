@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import subprocess
 from typing import List, Optional
 
@@ -60,6 +61,7 @@ _MAX_DIFF_CHARS_ERROR = 500_000  # Fail loudly above this — split the commit
 # Advisory prompt budget gate — non-blocking skip when prompt too large (mirrors scope review)
 # Claude Code has a 1M token context; 1.6M chars ≈ 400K tokens leaves healthy headroom.
 _ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens
+_OBLIGATION_SUFFIX_RE = re.compile(r"\s*\(obligation\s+([a-f0-9]+)\)\s*$", re.IGNORECASE)
 
 
 def _load_doc(repo_dir: pathlib.Path, relpath: str, fallback: str = "") -> str:
@@ -134,16 +136,16 @@ def _get_changed_file_list(
         if result.returncode != 0:
             err = (result.stderr or "").strip()[:200]
             return f"⚠️ ADVISORY_ERROR: git status exited {result.returncode}: {err}"
-        lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+        lines = [line.rstrip() for line in result.stdout.splitlines() if line.strip()]
         return "\n".join(lines) if lines else "(clean — no changed files)"
     except Exception as exc:
         return f"⚠️ ADVISORY_ERROR: git status error: {exc}"
 
 
-def _build_blocking_history_section(drive_root: pathlib.Path) -> str:
+def _build_blocking_history_section(drive_root: pathlib.Path, repo_key: str = "") -> str:
     """Build a section summarizing unresolved obligations from all blocking rounds.
 
-    Reads the full blocking_history and open_obligations from durable state.
+    Reads repo-scoped blocking_history and open_obligations from durable state.
     The advisory reviewer must explicitly address every open obligation.
     Returns an empty string when there are no blocking obligations.
     """
@@ -153,8 +155,8 @@ def _build_blocking_history_section(drive_root: pathlib.Path) -> str:
         return ""
 
     return build_blocking_findings_json_section(
-        state.get_open_obligations(),
-        state.blocking_history,
+        state.get_open_obligations(repo_key=repo_key),
+        state.get_blocking_history(repo_key=repo_key),
     )
 
 
@@ -198,7 +200,10 @@ def _build_advisory_prompt(
     # Build blocking history section if drive_root is available
     blocking_history = ""
     if drive_root:
-        blocking_history = _build_blocking_history_section(drive_root)
+        blocking_history = _build_blocking_history_section(
+            drive_root,
+            make_repo_key(repo_dir),
+        )
 
     omitted_note = ""
     if omitted_paths:
@@ -381,13 +386,16 @@ def _run_claude_advisory(
     )
 
     try:
-        from ouroboros.gateways.claude_code import run_readonly
+        from ouroboros.gateways.claude_code import (
+            DEFAULT_CLAUDE_CODE_MAX_TURNS,
+            run_readonly,
+        )
 
         result = run_readonly(
             prompt=prompt,
             cwd=str(repo_dir),
             model=model,
-            max_turns=8,
+            max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
         )
 
         if not result.success:
@@ -524,8 +532,13 @@ def _record_bypass(ctx: ToolContext, state: "AdvisoryReviewState", snapshot_hash
                       ensure_ascii=False, indent=2)
 
 
-def _resolve_matching_obligations(state: "AdvisoryReviewState", items: list,
-                                   snapshot_hash: str) -> None:
+def _resolve_matching_obligations(
+    state: "AdvisoryReviewState",
+    items: list,
+    snapshot_hash: str,
+    *,
+    repo_key: str | None = None,
+) -> None:
     """Resolve open obligations whose checklist item appears in PASS but NOT in FAIL.
 
     An obligation is only resolved when the advisory emits PASS for that item
@@ -537,14 +550,23 @@ def _resolve_matching_obligations(state: "AdvisoryReviewState", items: list,
         return
     # Build per-item verdict sets to detect contradictions
     item_verdicts: dict[str, set[str]] = {}
+    obligation_verdicts: dict[str, set[str]] = {}
     for i in items:
         if not isinstance(i, dict):
             continue
-        item_name = str(i.get("item", "")).lower().strip()
         verdict = str(i.get("verdict", "")).upper().strip()
+        item_name = str(i.get("item", "")).strip()
         if not item_name or not verdict:
             continue
-        item_verdicts.setdefault(item_name, set()).add(verdict)
+        explicit_obligation_id = str(i.get("obligation_id", "")).strip().lower()
+        match = _OBLIGATION_SUFFIX_RE.search(item_name)
+        normalized_item_name = _OBLIGATION_SUFFIX_RE.sub("", item_name).strip().lower()
+        if normalized_item_name:
+            item_verdicts.setdefault(normalized_item_name, set()).add(verdict)
+        if explicit_obligation_id:
+            obligation_verdicts.setdefault(explicit_obligation_id, set()).add(verdict)
+        if match:
+            obligation_verdicts.setdefault(match.group(1).lower(), set()).add(verdict)
 
     # Only PASS items that have no FAIL entry for the same item
     unambiguous_pass = {
@@ -552,11 +574,24 @@ def _resolve_matching_obligations(state: "AdvisoryReviewState", items: list,
         for item_name, verdicts in item_verdicts.items()
         if "PASS" in verdicts and "FAIL" not in verdicts
     }
+    unambiguous_pass_ids = {
+        obligation_id
+        for obligation_id, verdicts in obligation_verdicts.items()
+        if "PASS" in verdicts and "FAIL" not in verdicts
+    }
 
-    open_obs = state.get_open_obligations()
-    resolved = [o.obligation_id for o in open_obs if o.item.lower() in unambiguous_pass]
+    open_obs = state.get_open_obligations(repo_key=repo_key)
+    resolved = [
+        o.obligation_id for o in open_obs
+        if o.obligation_id.lower() in unambiguous_pass_ids
+        or o.item.lower() in unambiguous_pass
+    ]
     if resolved:
-        state.resolve_obligations(resolved, resolved_by=f"advisory run {snapshot_hash[:12]}")
+        state.resolve_obligations(
+            resolved,
+            resolved_by=f"advisory run {snapshot_hash[:12]}",
+            repo_key=repo_key,
+        )
 
 
 def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryReviewState",
@@ -660,9 +695,9 @@ def _handle_advisory_pre_review(
     # Check if we already have a fresh run for this snapshot.
     # BUT: if there are open obligations from a blocked commit, force a re-run
     # even on the same snapshot hash so obligations are explicitly verified.
-    existing = state.find_by_hash(snapshot_hash)
-    open_obligations = state.get_open_obligations()
-    if existing and existing.status in ("fresh", "bypassed") and not open_obligations:
+    existing = state.find_by_hash(snapshot_hash, repo_key=repo_key)
+    open_obligations = state.get_open_obligations(repo_key=repo_key)
+    if existing and existing.status in ("fresh", "bypassed", "skipped") and not open_obligations:
         return json.dumps({
             "status": "already_fresh",
             "snapshot_hash": snapshot_hash,
@@ -793,7 +828,7 @@ def _handle_advisory_pre_review(
     # *other* unrelated items still fail — leaving it open would turn unrelated criticals into
     # a perpetual hard gate on closed obligations.
     if items:
-        _resolve_matching_obligations(state, items, snapshot_hash)
+        _resolve_matching_obligations(state, items, snapshot_hash, repo_key=repo_key)
 
     save_state(drive_root, state)
 
@@ -838,7 +873,13 @@ def _handle_review_status(
     """
     drive_root = pathlib.Path(ctx.drive_root)
     state = load_state(drive_root)
-    repo_filter = repo_key or None
+    repo_dir_value = getattr(ctx, "repo_dir", "")
+    repo_dir = (
+        pathlib.Path(repo_dir_value)
+        if isinstance(repo_dir_value, (str, pathlib.Path)) and str(repo_dir_value)
+        else None
+    )
+    repo_filter = repo_key or (make_repo_key(repo_dir) if repo_dir is not None else None)
     tool_filter = tool_name or None
     task_filter = task_id or None
     filtered_runs = state.filter_advisory_runs(
@@ -874,12 +915,13 @@ def _handle_review_status(
             "attempt": int(run.attempt or 0) or None,
         })
 
-    latest = filtered_runs[-1] if filtered_runs else state.latest()
+    latest = filtered_runs[-1] if filtered_runs else None
 
     # Compute current snapshot hash using the same paths scope as the latest run
     # so path-scoped advisories don't appear falsely stale.
-    repo_dir = pathlib.Path(ctx.repo_dir)
     try:
+        if repo_dir is None:
+            raise ValueError("repo_dir unavailable")
         latest_paths = latest.snapshot_paths if latest else None
         current_hash = compute_snapshot_hash(repo_dir, "", paths=latest_paths)
         hash_mismatch = bool(
@@ -892,21 +934,31 @@ def _handle_review_status(
 
     # Gate-accurate freshness: look up the run matching the CURRENT hash,
     # not just `latest` — handles restored snapshots where an older fresh run exists.
-    open_obs = state.get_open_obligations()
-    matching_run = state.find_by_hash(current_hash) if current_hash else None
+    open_obs = state.get_open_obligations(repo_key=repo_filter)
+    matching_run = state.find_by_hash(current_hash, repo_key=repo_filter) if current_hash else None
     effective_is_fresh = bool(
-        state.is_fresh(current_hash) if current_hash else False
+        state.is_fresh(current_hash, repo_key=repo_filter) if current_hash else False
     )
     # Use matching_run for guidance; fall back to latest for history display
     guidance_run = matching_run or latest
 
     # Staleness: either explicit edit-invalidation OR live hash mismatch
-    stale_from_edit = bool(state.last_stale_from_edit_ts) or hash_mismatch
+    stale_from_edit = bool(
+        hash_mismatch or (
+            state.last_stale_from_edit_ts
+            and state.last_stale_repo_key in ("", repo_filter)
+        )
+    )
     stale_from_edit_ts = (
-        state.last_stale_from_edit_ts[:16] if state.last_stale_from_edit_ts
+        state.last_stale_from_edit_ts[:16]
+        if state.last_stale_from_edit_ts and state.last_stale_repo_key in ("", repo_filter)
         else ("now (hash mismatch)" if hash_mismatch else None)
     )
-    stale_reason = state.last_stale_reason or (
+    stale_reason = (
+        state.last_stale_reason
+        if state.last_stale_repo_key in ("", repo_filter)
+        else ""
+    ) or (
         "Current snapshot hash no longer matches the latest advisory run."
         if hash_mismatch else None
     )

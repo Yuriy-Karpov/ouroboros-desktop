@@ -217,7 +217,6 @@ def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad
     if not _combined_blocked:
         return False, None, '', _combined_findings, _scope_advisory_items
 
-    run_cmd(["git", "reset", "HEAD"], cwd=repo_dir)
     if review_err and (scope_result is None or not scope_result.blocked):
         block_reason = triad_block_reason
     elif scope_result is not None and scope_result.blocked and not review_err:

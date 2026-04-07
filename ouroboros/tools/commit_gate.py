@@ -209,7 +209,7 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
                                 "parent_task_id": str(getattr(ctx, "parent_task_id", "") or ""),
                             },
                             latest_attempt,
-                            latest_state.get_open_obligations(),
+                            latest_state.get_open_obligations(repo_key=repo_key),
                             source=source,
                         )
                         if continuation is not None:
@@ -318,17 +318,17 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
     from ouroboros.utils import append_jsonl
     drive_root = pathlib.Path(ctx.drive_root)
     repo_dir = pathlib.Path(ctx.repo_dir)
+    repo_key = make_repo_key(repo_dir)
 
     snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
     state = load_state(drive_root)
     # Pass only when snapshot is fresh AND no open obligations remain.
-    if state.is_fresh(snapshot_hash) and not state.get_open_obligations():
+    if state.is_fresh(snapshot_hash, repo_key=repo_key) and not state.get_open_obligations(repo_key=repo_key):
         return None
 
     if skip_advisory_pre_review:
         task_id = str(getattr(ctx, "task_id", "") or "")
         reason = "skip_advisory_pre_review=True passed to repo_commit"
-        repo_key = make_repo_key(repo_dir)
         try:
             append_jsonl(ctx.drive_logs() / "events.jsonl", {
                 "ts": _utc_now(), "type": "advisory_pre_review_bypassed",
@@ -364,8 +364,8 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
         return None  # audited bypass
 
     # Advisory is fresh for this snapshot — check if obligations remain
-    open_obs = state.get_open_obligations()
-    if state.is_fresh(snapshot_hash) and open_obs:
+    open_obs = state.get_open_obligations(repo_key=repo_key)
+    if state.is_fresh(snapshot_hash, repo_key=repo_key) and open_obs:
         lines = [f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Advisory is current (hash={snapshot_hash[:12]}) "
                  f"but {len(open_obs)} open obligation(s) from previous blocking rounds must be resolved.\n",
                  "Unresolved obligations:"]
@@ -377,15 +377,16 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
         lines.append("Or bypass: repo_commit(commit_message='...', skip_advisory_pre_review=True) (audited).")
         return "\n".join(lines)
 
-    latest = state.latest()
-    matching_run = state.find_by_hash(snapshot_hash)
+    matching_run = state.find_by_hash(snapshot_hash, repo_key=repo_key)
+    scoped_runs = state.filter_advisory_runs(repo_key=repo_key)
+    latest = scoped_runs[-1] if scoped_runs else None
 
     # Explicit parse_failure branch: advisory ran for this snapshot but was unparseable.
     # Must come before the generic stale branch to avoid misleading "snapshot changed" message.
     if matching_run and matching_run.status == "parse_failure":
         obs_section = ""
-        if state.get_open_obligations():
-            open_obs = state.get_open_obligations()
+        if state.get_open_obligations(repo_key=repo_key):
+            open_obs = state.get_open_obligations(repo_key=repo_key)
             obs_lines = [f"\nOpen obligations ({len(open_obs)}):"]
             obs_lines += [f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
                           for o in open_obs[:5]]

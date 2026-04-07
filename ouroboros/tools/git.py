@@ -140,6 +140,39 @@ def _handle_revalidation_failure(
     return msg
 
 
+def _finalize_blocked_review(
+    ctx: ToolContext,
+    commit_message: str,
+    commit_start: float,
+    *,
+    combined_msg: str,
+    block_reason: str,
+    combined_findings: List[Dict[str, Any]],
+    pre_fingerprint: Dict[str, Any],
+    post_fingerprint: Dict[str, Any],
+) -> str:
+    """Persist a genuine blocked review result, then unstage the reviewed diff."""
+    _record_commit_attempt(
+        ctx,
+        commit_message,
+        "blocked",
+        block_reason=block_reason,
+        block_details=combined_msg,
+        duration_sec=time.time() - commit_start,
+        critical_findings=combined_findings,
+        phase="blocking_review",
+        pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+        post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
+        fingerprint_status="matched",
+    )
+    try:
+        run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+    except Exception as e:
+        warning = f"⚠️ GIT_WARNING (reset): {_sanitize_git_error(str(e))}"
+        return f"{combined_msg}\n\n---\n{warning}"
+    return combined_msg
+
+
 def _auto_tag_on_version_bump(repo_dir: pathlib.Path, commit_message: str) -> str:
     try:
         changed = run_cmd(
@@ -668,15 +701,16 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str,
                 kind="revalidation_failed",
             )
         if blocked:
-            _record_commit_attempt(ctx, commit_message, "blocked",
-                                   block_reason=block_reason, block_details=combined_msg,
-                                   duration_sec=time.time() - _commit_start,
-                                   critical_findings=_combined_findings,
-                                   phase="blocking_review",
-                                   pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
-                                   post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
-                                   fingerprint_status="matched")
-            return combined_msg
+            return _finalize_blocked_review(
+                ctx,
+                commit_message,
+                _commit_start,
+                combined_msg=combined_msg,
+                block_reason=block_reason,
+                combined_findings=_combined_findings,
+                pre_fingerprint=pre_fingerprint,
+                post_fingerprint=post_fingerprint,
+            )
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
@@ -831,15 +865,16 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                 kind="revalidation_failed",
             )
         if blocked:
-            _record_commit_attempt(ctx, commit_message, "blocked",
-                                   block_reason=block_reason, block_details=combined_msg,
-                                   duration_sec=time.time() - _commit_start,
-                                   critical_findings=_combined_findings,
-                                   phase="blocking_review",
-                                   pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
-                                   post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
-                                   fingerprint_status="matched")
-            return combined_msg
+            return _finalize_blocked_review(
+                ctx,
+                commit_message,
+                _commit_start,
+                combined_msg=combined_msg,
+                block_reason=block_reason,
+                combined_findings=_combined_findings,
+                pre_fingerprint=pre_fingerprint,
+                post_fingerprint=post_fingerprint,
+            )
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)

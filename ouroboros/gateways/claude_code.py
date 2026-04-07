@@ -52,6 +52,7 @@ from claude_agent_sdk import (  # noqa: E402
 _STDERR_MAX_LINES = 200
 _stderr_lock = threading.Lock()
 _stderr_buffer: collections.deque[str] = collections.deque(maxlen=_STDERR_MAX_LINES)
+DEFAULT_CLAUDE_CODE_MAX_TURNS = 30
 
 
 def _stderr_callback(line: str) -> None:
@@ -222,7 +223,7 @@ async def _run_edit_async(
     prompt: str,
     cwd: str,
     model: str = "opus",
-    max_turns: int = 12,
+    max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
 ) -> ClaudeCodeResult:
@@ -287,7 +288,7 @@ async def _run_readonly_async(
     prompt: str,
     cwd: str,
     model: str = "opus",
-    max_turns: int = 8,
+    max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     effort: Optional[str] = "high",
 ) -> ClaudeCodeResult:
     """Run a read-only SDK query for advisory review.
@@ -394,7 +395,7 @@ def run_edit(
     prompt: str,
     cwd: str,
     model: str = "opus",
-    max_turns: int = 12,
+    max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     budget: Optional[float] = None,
     system_prompt: Optional[str] = None,
 ) -> ClaudeCodeResult:
@@ -431,7 +432,7 @@ def run_readonly(
     prompt: str,
     cwd: str,
     model: str = "opus",
-    max_turns: int = 8,
+    max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     effort: Optional[str] = "high",
 ) -> ClaudeCodeResult:
     """Synchronous entry point for read-only advisory review.

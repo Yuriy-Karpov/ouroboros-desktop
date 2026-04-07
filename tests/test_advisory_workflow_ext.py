@@ -32,6 +32,7 @@ def _make_blocking_attempt(
     commit_message: str = "test commit",
     block_reason: str = "critical_findings",
     critical_findings: list | None = None,
+    repo_key: str = "",
 ):
     from ouroboros.review_state import CommitAttemptRecord, _utc_now
     return CommitAttemptRecord(
@@ -41,6 +42,7 @@ def _make_blocking_attempt(
         block_reason=block_reason,
         block_details="CRITICAL: something",
         duration_sec=5.0,
+        repo_key=repo_key,
         critical_findings=critical_findings or [
             {"verdict": "FAIL", "severity": "critical", "item": "tests_affected",
              "reason": "No test changes found", "model": "test-model"},
@@ -129,6 +131,41 @@ def test_review_status_parse_failure_reflected_in_effective_status(tmp_path):
     )
     # And the message should not say "stale"
     assert "stale" not in result.get("message", "").lower() or "parse_failure" in result.get("message", "").lower()
+
+
+def test_review_status_defaults_to_current_repo_scope(tmp_path):
+    """review_status without explicit repo_key must report only the current repo's obligations."""
+    drive_root = _make_drive_root(tmp_path / "drive")
+    from ouroboros.review_state import AdvisoryReviewState, save_state
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(repo_key=str(repo_a)))
+    state.add_blocking_attempt(_make_blocking_attempt(
+        repo_key=str(repo_b),
+        critical_findings=[{
+            "verdict": "FAIL",
+            "severity": "critical",
+            "item": "self_consistency",
+            "reason": "repo b issue",
+        }],
+    ))
+    save_state(drive_root, state)
+
+    ctx = MagicMock()
+    ctx.drive_root = str(drive_root)
+    ctx.repo_dir = str(repo_b)
+
+    from ouroboros.tools.claude_advisory_review import _handle_review_status
+    result = json.loads(_handle_review_status(ctx))
+
+    assert result["filters"]["repo_key"] == str(repo_b)
+    open_items = [entry["item"] for entry in result["open_obligations"]]
+    assert open_items == ["self_consistency"]
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +426,65 @@ def test_resolve_matching_obligations_unambiguous_pass_resolves(tmp_path):
     assert len(open_obs) == 0, f"Obligation should be resolved by unambiguous PASS, got: {open_obs}"
 
 
+def test_resolve_matching_obligations_suffix_id_resolves_same_repo(tmp_path):
+    """PASS items suffixed with `(obligation <id>)` must resolve the matching obligation."""
+    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(
+        repo_key="repo-a",
+        critical_findings=[{
+            "verdict": "FAIL",
+            "severity": "critical",
+            "item": "self_consistency",
+            "reason": "README and docs drift",
+        }],
+    ))
+    open_obs = state.get_open_obligations(repo_key="repo-a")
+    assert len(open_obs) == 1
+    obligation = open_obs[0]
+
+    _resolve_matching_obligations(
+        state,
+        [{
+            "verdict": "PASS",
+            "severity": "critical",
+            "item": f"self_consistency (obligation {obligation.obligation_id})",
+            "reason": "README and docs are now aligned",
+        }],
+        snapshot_hash="feedbeef",
+        repo_key="repo-a",
+    )
+
+    assert state.get_open_obligations(repo_key="repo-a") == []
+
+
+def test_resolve_matching_obligations_does_not_cross_repo_boundaries(tmp_path):
+    """Resolving repo B must not close an obligation in repo A with the same item name."""
+    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(repo_key="repo-a"))
+    state.add_blocking_attempt(_make_blocking_attempt(repo_key="repo-b"))
+
+    _resolve_matching_obligations(
+        state,
+        [{
+            "verdict": "PASS",
+            "severity": "critical",
+            "item": "tests_affected",
+            "reason": "Repo B now has tests",
+        }],
+        snapshot_hash="cafefeed",
+        repo_key="repo-b",
+    )
+
+    assert len(state.get_open_obligations(repo_key="repo-a")) == 1
+    assert len(state.get_open_obligations(repo_key="repo-b")) == 0
+
+
 # ---------------------------------------------------------------------------
 # 17. compute_snapshot_hash: empty paths normalized to None (whole-repo scope)
 # ---------------------------------------------------------------------------
@@ -452,3 +548,53 @@ def test_format_status_section_null_reason_does_not_crash(tmp_path):
     # Must not raise TypeError
     section = format_status_section(state)
     assert "tests_affected" in section
+
+
+def test_format_status_section_repo_scopes_history_and_obligations(tmp_path):
+    from ouroboros.review_state import (
+        AdvisoryReviewState,
+        AdvisoryRunRecord,
+        CommitAttemptRecord,
+        compute_snapshot_hash,
+        format_status_section,
+        make_repo_key,
+    )
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    (repo_a / ".git").mkdir(parents=True)
+    (repo_b / ".git").mkdir(parents=True)
+    (repo_a / "tracked.py").write_text("print('repo a')\n", encoding="utf-8")
+    (repo_b / "tracked.py").write_text("print('repo b')\n", encoding="utf-8")
+
+    repo_a_key = make_repo_key(repo_a)
+    repo_b_key = make_repo_key(repo_b)
+    state = AdvisoryReviewState()
+    state.add_run(AdvisoryRunRecord(
+        snapshot_hash=compute_snapshot_hash(repo_a),
+        commit_message="repo-a fresh",
+        status="fresh",
+        ts="2026-04-07T10:00:00+00:00",
+        repo_key=repo_a_key,
+    ))
+    state.record_attempt(CommitAttemptRecord(
+        ts="2026-04-07T10:01:00+00:00",
+        commit_message="repo-b blocked",
+        status="blocked",
+        repo_key=repo_b_key,
+        tool_name="repo_commit",
+        task_id="task-b",
+        attempt=1,
+        block_reason="critical_findings",
+        critical_findings=[{
+            "item": "foreign_issue",
+            "reason": "other repo only",
+            "severity": "critical",
+            "verdict": "FAIL",
+        }],
+    ))
+
+    section = format_status_section(state, repo_dir=repo_a)
+    assert "repo-a fresh" in section
+    assert "repo-b blocked" not in section
+    assert "foreign_issue" not in section

@@ -486,7 +486,7 @@ def build_review_context(env: Any) -> str:
         repo_dir = pathlib.Path(env.repo_dir)
         repo_key = make_repo_key(repo_dir)
         snapshot_hash = compute_snapshot_hash(repo_dir)
-        open_obs = state.get_open_obligations()
+        open_obs = state.get_open_obligations(repo_key=repo_key)
 
         current_run = None
         for run in reversed(state.advisory_runs):
@@ -571,7 +571,7 @@ def build_review_context(env: Any) -> str:
             for item in corrupt[:3]:
                 lines.append(f"- {_truncate_with_notice(item, 220)}")
 
-        history = format_status_section(state)
+        history = format_status_section(state, repo_dir=repo_dir)
         if history:
             history = history.replace("## Advisory Pre-Review Status", "### Historical review ledger")
             lines.append("\n" + history)

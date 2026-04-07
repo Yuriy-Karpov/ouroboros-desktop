@@ -186,19 +186,26 @@ def capture_review_continuation_from_state(
     *,
     source: str,
     warning: str = "",
+    repo_dir: Any = None,
 ) -> Optional[ReviewContinuation]:
-    from ouroboros.review_state import load_state
+    from ouroboros.review_state import load_state, make_repo_key
 
     task_id = str(task.get("id") or "").strip()
     if not task_id:
         return None
 
     state = load_state(pathlib.Path(drive_root))
-    attempt = state.latest_attempt_for(task_id=task_id)
+    repo_key = make_repo_key(pathlib.Path(repo_dir)) if repo_dir else ""
+    attempt = (
+        state.latest_attempt_for(task_id=task_id, repo_key=repo_key or None)
+        if repo_key
+        else state.latest_attempt_for(task_id=task_id)
+    )
+    obligation_repo_key = str(getattr(attempt, "repo_key", "") or repo_key or "")
     continuation = build_review_continuation(
         task,
         attempt,
-        state.get_open_obligations(),
+        state.get_open_obligations(repo_key=obligation_repo_key or None),
         source=source,
         warning=warning,
     )

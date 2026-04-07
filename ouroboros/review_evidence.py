@@ -35,10 +35,7 @@ def collect_review_evidence(
     all_attempts = list(state.attempts or [])
 
     if repo_key:
-        repo_runs = [
-            run for run in all_runs
-            if run.repo_key in ("", repo_key, _LEGACY_CURRENT_REPO_KEY)
-        ]
+        repo_runs = state.filter_advisory_runs(repo_key=repo_key)
     else:
         repo_runs = all_runs
 
@@ -51,12 +48,9 @@ def collect_review_evidence(
 
     current_run = None
     if snapshot_hash:
-        for run in reversed(repo_runs):
-            if run.snapshot_hash == snapshot_hash:
-                current_run = run
-                break
+        current_run = state.find_by_hash(snapshot_hash, repo_key=repo_key or None)
 
-    open_obligations = state.get_open_obligations()
+    open_obligations = state.get_open_obligations(repo_key=repo_key or None)
     continuations, corrupt = list_review_continuations(drive_root_path)
     if task_id:
         scoped_continuations = [item for item in continuations if item.task_id == task_id]
@@ -68,6 +62,7 @@ def collect_review_evidence(
     else:
         scoped_continuations = continuations
     scoped_continuations.sort(key=lambda item: str(item.updated_ts or item.created_ts or ""), reverse=True)
+    stale_matches_repo = not repo_key or state.last_stale_repo_key in ("", repo_key)
 
     evidence = {
         "task_id": task_id,
@@ -81,8 +76,8 @@ def collect_review_evidence(
                 and not open_obligations
             ),
             "bypass_reason": str(getattr(current_run, "bypass_reason", "") or ""),
-            "stale_reason": str(getattr(state, "last_stale_reason", "") or ""),
-            "stale_ts": str(getattr(state, "last_stale_from_edit_ts", "") or ""),
+            "stale_reason": str(getattr(state, "last_stale_reason", "") or "") if stale_matches_repo else "",
+            "stale_ts": str(getattr(state, "last_stale_from_edit_ts", "") or "") if stale_matches_repo else "",
         },
         "recent_attempts": [_attempt_to_dict(item) for item in scoped_attempts[-max_attempts:]],
         "recent_advisory_runs": [_run_to_dict(item) for item in repo_runs[-max_runs:]],

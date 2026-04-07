@@ -1,4 +1,4 @@
-# Ouroboros v4.15.1 — Architecture & Reference
+# Ouroboros v4.15.4 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -538,11 +538,11 @@ backward compatibility but is not the runtime authority.
 
 - **`repo_write`** (v3.24.0): write file(s) to disk WITHOUT committing. Supports single-file
   (`path` + `content`) and multi-file (`files` array) modes. Preferred workflow:
-  `repo_write` all files → `repo_commit` once with the full diff.
-- **`repo_commit`**: stage + unified pre-commit review + commit + tests + auto-tag + auto-push.
+  `repo_write` all files → `advisory_pre_review` on the final diff → `repo_commit`.
+- **`repo_commit`**: stage + advisory freshness gate + unified pre-commit review + commit + tests + auto-tag + auto-push.
   Includes `review_rebuttal` parameter for disputing reviewer feedback.
 - **`repo_write_commit`**: legacy single-file write+commit (kept for compatibility).
-  Also runs unified review before commit.
+  Also checks advisory freshness, then runs unified review before commit.
 - **Unified pre-commit review** (v3.24.0): triad diff review (3 models against
   `docs/CHECKLISTS.md`) plus a blocking scope review that runs in parallel on the
   same staged snapshot. `Blocking` mode keeps critical findings as hard gates;
@@ -681,7 +681,8 @@ errors surface via the same observability path.
 - **`advisory_pre_review`** tool: runs a read-only Claude Agent SDK review of the current
   worktree BEFORE `repo_commit`. Permitted tools: `Read`, `Grep`, `Glob` only (no Edit/Bash).
   Model resolved via `resolve_claude_code_model()` — respects `CLAUDE_CODE_MODEL` setting,
-  defaults to `opus` (same helper used by `claude_code_edit`). Prompt includes the "Repo Commit Checklist" section from
+  defaults to `opus` (same helper used by `claude_code_edit`). Shared Claude Code turn budget:
+  30 turns for both advisory and edit paths. Prompt includes the "Repo Commit Checklist" section from
   CHECKLISTS.md (precise section loader), plus BIBLE.md, DEVELOPMENT.md, ARCHITECTURE.md,
   touched-file pack, goal/scope sections, git status, and worktree diff.
 - **Advisory budget gate** (v4.15.0): if the assembled advisory prompt exceeds
@@ -694,7 +695,8 @@ errors surface via the same observability path.
   "Unresolved obligations from previous blocking rounds" section listing each obligation by id,
   item, severity, and reason. Advisory MUST explicitly address each obligation by checklist item
   name — a generic PASS without addressing obligations is a weak signal (expected but not
-  enforced at code level). The prompt section is omitted entirely when no obligations are open.
+  enforced at code level). Blocking history and open obligations are repo-scoped. The prompt
+  section is omitted entirely when no obligations are open.
 - **Obligation resolution**: `_resolve_matching_obligations()` runs on every parseable advisory
   result (regardless of whether other items fail). An obligation is marked resolved only when the
   advisory emits an unambiguous PASS for its checklist item (PASS present AND no FAIL for the same
@@ -727,7 +729,7 @@ errors surface via the same observability path.
   `late_result_pending`, `pre_review_fingerprint`, `post_review_fingerprint`, `fingerprint_status`,
   `degraded_reasons`, and `(repo_key, tool_name, task_id, attempt)` identity.
   New fields: `blocking_history` (last 10 blocked attempts), `open_obligations` (list of
-  `ObligationItem` with `obligation_id`, `item`, `severity`, `reason`, `source_attempt_ts`, `source_attempt_msg`, `status`, `resolved_by`),
+  `ObligationItem` with `obligation_id`, `item`, `severity`, `reason`, `source_attempt_ts`, `source_attempt_msg`, `status`, `resolved_by`, `repo_key`),
   `last_stale_from_edit_ts` / `last_stale_reason` / `last_stale_repo_key`, plus explicit lock-backed state updates.
   `add_blocking_attempt()` populates open obligations from `critical_findings`; `on_successful_commit()`
   clears all obligations. Advisory invalidation is repo-scoped and triggered automatically by successful
@@ -741,8 +743,9 @@ errors surface via the same observability path.
   the corruption signal.
 - **`review_evidence.py`**: structured collector that snapshots review ledger state, live advisory freshness,
   open obligations, and continuations into `task_results`, task summaries, and
-  execution reflections. When `task_id` is present, `recent_attempts` stays
-  task-scoped rather than silently falling back to another task's repo history.
+  execution reflections. When `repo_dir` / `repo_key` is known, open obligations and stale markers stay
+  repo-scoped; when `task_id` is present, `recent_attempts` stays task-scoped rather than silently
+  falling back to another task's repo history.
 - **Snapshot hash**: deterministic SHA-256 of changed file content digests only.
   Commit message is NOT part of the hash (decoupled for less brittle freshness).
   Path-aware: `paths` parameter scopes the hash to specific files.

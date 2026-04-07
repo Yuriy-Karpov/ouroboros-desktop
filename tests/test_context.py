@@ -268,6 +268,58 @@ class TestAdvisoryReviewStatusInContext:
         assert "### Historical review ledger" in dynamic_text
         assert dynamic_text.index("## Runtime context") < dynamic_text.index("## Review Continuity")
 
+    def test_review_continuity_context_ignores_foreign_repo_obligations(self, tmp_path):
+        from ouroboros.agent_task_pipeline import build_review_context
+        from ouroboros.review_state import (
+            AdvisoryReviewState,
+            AdvisoryRunRecord,
+            CommitAttemptRecord,
+            compute_snapshot_hash,
+            make_repo_key,
+            save_state,
+        )
+
+        env = self._make_env(tmp_path)
+        repo_a = tmp_path / "repo"
+        repo_b = tmp_path / "repo-other"
+        (repo_a / ".git").mkdir(parents=True, exist_ok=True)
+        (repo_b / ".git").mkdir(parents=True, exist_ok=True)
+        (repo_a / "tracked.py").write_text("print('repo a')\n", encoding="utf-8")
+        (repo_b / "tracked.py").write_text("print('repo b')\n", encoding="utf-8")
+
+        repo_a_key = make_repo_key(repo_a)
+        repo_b_key = make_repo_key(repo_b)
+        state = AdvisoryReviewState()
+        state.add_run(AdvisoryRunRecord(
+            snapshot_hash=compute_snapshot_hash(repo_a),
+            commit_message="repo a ready",
+            status="fresh",
+            ts="2026-04-07T10:00:00+00:00",
+            repo_key=repo_a_key,
+        ))
+        state.record_attempt(CommitAttemptRecord(
+            ts="2026-04-07T10:01:00+00:00",
+            commit_message="repo b blocked",
+            status="blocked",
+            repo_key=repo_b_key,
+            tool_name="repo_commit",
+            task_id="task-b",
+            attempt=1,
+            block_reason="critical_findings",
+            critical_findings=[{
+                "item": "foreign_issue",
+                "reason": "other repo only",
+                "severity": "critical",
+                "verdict": "FAIL",
+            }],
+        ))
+        save_state(tmp_path, state)
+
+        dynamic_text = build_review_context(env)
+        assert "repo_commit_ready=yes" in dynamic_text
+        assert "foreign_issue" not in dynamic_text
+        assert "repo b blocked" not in dynamic_text
+
 
 class TestRuntimeEnvSection:
     """build_runtime_section includes runtime_env with platform and is_desktop."""

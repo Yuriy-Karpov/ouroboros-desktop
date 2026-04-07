@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import pathlib
-import subprocess
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -47,6 +46,21 @@ _REVIEW_ATTEMPT_TTL_SEC = 1800
 _REVIEW_ATTEMPT_GRACE_SEC = 120
 
 
+def _repo_scope_exact_match_exists(records: List[Any], repo_key: str | None) -> bool:
+    return repo_key is not None and any(str(getattr(record, "repo_key", "") or "") == repo_key for record in records)
+def _repo_scope_matches(
+    record_repo_key: str,
+    repo_key: str | None,
+    *,
+    exact_match_exists: bool,
+) -> bool:
+    if repo_key is None:
+        return True
+    if record_repo_key == repo_key:
+        return True
+    return (not exact_match_exists) and record_repo_key in ("", _LEGACY_CURRENT_REPO_KEY)
+
+
 @dataclass
 class ObligationItem:
     """A single unresolved obligation extracted from a blocking commit attempt."""
@@ -59,6 +73,7 @@ class ObligationItem:
     source_attempt_msg: str
     status: str = "still_open"
     resolved_by: str = ""
+    repo_key: str = _LEGACY_CURRENT_REPO_KEY
 
 
 @dataclass
@@ -166,7 +181,15 @@ class AdvisoryReviewState:
             if item.status == "reviewing" or item.late_result_pending
         ]
         if repo_key is not None:
-            active = [item for item in active if item.repo_key == repo_key]
+            exact_match_exists = _repo_scope_exact_match_exists(active, repo_key)
+            active = [
+                item for item in active
+                if _repo_scope_matches(
+                    item.repo_key,
+                    repo_key,
+                    exact_match_exists=exact_match_exists,
+                )
+            ]
         return active
 
     def filter_advisory_runs(
@@ -179,7 +202,15 @@ class AdvisoryReviewState:
     ) -> List[AdvisoryRunRecord]:
         results = list(self.advisory_runs)
         if repo_key is not None:
-            results = [run for run in results if run.repo_key == repo_key]
+            exact_match_exists = _repo_scope_exact_match_exists(results, repo_key)
+            results = [
+                run for run in results
+                if _repo_scope_matches(
+                    run.repo_key,
+                    repo_key,
+                    exact_match_exists=exact_match_exists,
+                )
+            ]
         if tool_name is not None:
             results = [run for run in results if run.tool_name == tool_name]
         if task_id is not None:
@@ -198,7 +229,15 @@ class AdvisoryReviewState:
     ) -> List[CommitAttemptRecord]:
         results = list(self.attempts)
         if repo_key is not None:
-            results = [item for item in results if item.repo_key == repo_key]
+            exact_match_exists = _repo_scope_exact_match_exists(results, repo_key)
+            results = [
+                item for item in results
+                if _repo_scope_matches(
+                    item.repo_key,
+                    repo_key,
+                    exact_match_exists=exact_match_exists,
+                )
+            ]
         if tool_name is not None:
             results = [item for item in results if item.tool_name == tool_name]
         if task_id is not None:
@@ -212,14 +251,25 @@ class AdvisoryReviewState:
         latest = max((int(item.attempt or 0) for item in candidates), default=0)
         return latest + 1
 
-    def find_by_hash(self, snapshot_hash: str) -> Optional[AdvisoryRunRecord]:
+    def find_by_hash(
+        self,
+        snapshot_hash: str,
+        repo_key: str | None = None,
+    ) -> Optional[AdvisoryRunRecord]:
+        exact_match_exists = _repo_scope_exact_match_exists(self.advisory_runs, repo_key)
         for run in reversed(self.advisory_runs):
-            if run.snapshot_hash == snapshot_hash:
+            if run.snapshot_hash != snapshot_hash:
+                continue
+            if _repo_scope_matches(
+                run.repo_key,
+                repo_key,
+                exact_match_exists=exact_match_exists,
+            ):
                 return run
         return None
 
-    def is_fresh(self, snapshot_hash: str) -> bool:
-        run = self.find_by_hash(snapshot_hash)
+    def is_fresh(self, snapshot_hash: str, repo_key: str | None = None) -> bool:
+        run = self.find_by_hash(snapshot_hash, repo_key=repo_key)
         return run is not None and run.status in ("fresh", "bypassed", "skipped")
 
     def add_run(self, run: AdvisoryRunRecord) -> None:
@@ -314,7 +364,7 @@ class AdvisoryReviewState:
             self._upsert_attempt(merged)
             self._upsert_blocking_history(merged)
         elif merged.status == "succeeded":
-            self.on_successful_commit()
+            self.on_successful_commit(repo_key=merged.repo_key)
 
         return merged
 
@@ -352,8 +402,7 @@ class AdvisoryReviewState:
 
         existing_by_item = {
             ob.item.lower(): ob
-            for ob in self.open_obligations
-            if ob.status == "still_open"
+            for ob in self.get_open_obligations(repo_key=attempt.repo_key)
         }
         touched_ids: List[str] = []
         for finding in attempt.critical_findings:
@@ -382,15 +431,30 @@ class AdvisoryReviewState:
                     source_attempt_ts=attempt.ts,
                     source_attempt_msg=attempt.commit_message[:200],
                     status="still_open",
+                    repo_key=attempt.repo_key,
                 )
                 self.open_obligations.append(new_ob)
                 existing_by_item[item_key] = new_ob
                 touched_ids.append(ob_id)
         return touched_ids
 
-    def resolve_obligations(self, resolved_ids: List[str], resolved_by: str = "") -> int:
+    def resolve_obligations(
+        self,
+        resolved_ids: List[str],
+        resolved_by: str = "",
+        repo_key: str | None = None,
+    ) -> int:
+        exact_match_exists = _repo_scope_exact_match_exists(self.open_obligations, repo_key)
         count = 0
         for ob in self.open_obligations:
+            if ob.obligation_id not in resolved_ids or ob.status != "still_open":
+                continue
+            if not _repo_scope_matches(
+                ob.repo_key,
+                repo_key,
+                exact_match_exists=exact_match_exists,
+            ):
+                continue
             if ob.obligation_id in resolved_ids and ob.status == "still_open":
                 ob.status = "resolved"
                 ob.resolved_by = resolved_by
@@ -400,13 +464,60 @@ class AdvisoryReviewState:
     def clear_resolved_obligations(self) -> None:
         self.open_obligations = [ob for ob in self.open_obligations if ob.status == "still_open"]
 
-    def get_open_obligations(self) -> List[ObligationItem]:
-        return [ob for ob in self.open_obligations if ob.status == "still_open"]
+    def get_open_obligations(self, repo_key: str | None = None) -> List[ObligationItem]:
+        exact_match_exists = _repo_scope_exact_match_exists(self.open_obligations, repo_key)
+        return [
+            ob for ob in self.open_obligations
+            if ob.status == "still_open"
+            and _repo_scope_matches(
+                ob.repo_key,
+                repo_key,
+                exact_match_exists=exact_match_exists,
+            )
+        ]
 
-    def on_successful_commit(self) -> None:
-        self.open_obligations = []
-        self.blocking_history = []
-        self.last_stale_from_edit_ts = ""
+    def get_blocking_history(self, repo_key: str | None = None) -> List[CommitAttemptRecord]:
+        exact_match_exists = _repo_scope_exact_match_exists(self.blocking_history, repo_key)
+        return [
+            attempt for attempt in self.blocking_history
+            if _repo_scope_matches(
+                attempt.repo_key,
+                repo_key,
+                exact_match_exists=exact_match_exists,
+            )
+        ]
+
+    def on_successful_commit(self, repo_key: str | None = None) -> None:
+        if repo_key is None:
+            self.open_obligations = []
+            self.blocking_history = []
+            self.last_stale_from_edit_ts = ""
+            self.last_stale_reason = ""
+            self.last_stale_repo_key = ""
+            return
+
+        exact_obligation_match = _repo_scope_exact_match_exists(self.open_obligations, repo_key)
+        self.open_obligations = [
+            ob for ob in self.open_obligations
+            if not _repo_scope_matches(
+                ob.repo_key,
+                repo_key,
+                exact_match_exists=exact_obligation_match,
+            )
+        ]
+        exact_history_match = _repo_scope_exact_match_exists(self.blocking_history, repo_key)
+        self.blocking_history = [
+            attempt for attempt in self.blocking_history
+            if not _repo_scope_matches(
+                attempt.repo_key,
+                repo_key,
+                exact_match_exists=exact_history_match,
+            )
+        ]
+        if self.last_stale_repo_key in ("", repo_key):
+            self.last_stale_from_edit_ts = ""
+            self.last_stale_reason = ""
+            self.last_stale_repo_key = ""
 
     def expire_stale_attempts(
         self,
@@ -478,6 +589,7 @@ def _obligation_from_dict(d: Dict[str, Any]) -> ObligationItem:
         source_attempt_msg=str(d.get("source_attempt_msg", "")),
         status=str(d.get("status", "still_open")),
         resolved_by=str(d.get("resolved_by", "")),
+        repo_key=str(d.get("repo_key", _LEGACY_CURRENT_REPO_KEY)),
     )
 
 
@@ -750,45 +862,29 @@ def compute_snapshot_hash(
 
     changed_digests: List[tuple[str, str]] = []
 
+    def _record_digest(relpath: str) -> None:
+        relpath = relpath.strip()
+        if not relpath or relpath in _SNAPSHOT_EXCLUDE_PATHS:
+            return
+        file_path = repo_dir / relpath
+        try:
+            if file_path.is_file():
+                digest = hashlib.sha256(file_path.read_bytes()).hexdigest()[:16]
+            else:
+                digest = "deleted"
+        except Exception:
+            digest = "unreadable"
+        changed_digests.append((relpath, digest))
+
     if paths is not None:
         for relpath in paths:
-            relpath = relpath.strip()
-            if not relpath or relpath in _SNAPSHOT_EXCLUDE_PATHS:
-                continue
-            file_path = repo_dir / relpath
-            try:
-                if file_path.is_file():
-                    digest = hashlib.sha256(file_path.read_bytes()).hexdigest()[:16]
-                else:
-                    digest = "deleted"
-            except Exception:
-                digest = "unreadable"
-            changed_digests.append((relpath, digest))
+            _record_digest(relpath)
     else:
         try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=str(repo_dir),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.splitlines():
-                    if not line.strip():
-                        continue
-                    relpath = line[3:].strip().split(" -> ")[-1].strip()
-                    if not relpath or relpath in _SNAPSHOT_EXCLUDE_PATHS:
-                        continue
-                    file_path = repo_dir / relpath
-                    try:
-                        if file_path.is_file():
-                            digest = hashlib.sha256(file_path.read_bytes()).hexdigest()[:16]
-                        else:
-                            digest = "deleted"
-                    except Exception:
-                        digest = "unreadable"
-                    changed_digests.append((relpath, digest))
+            from ouroboros.tools.review_helpers import list_changed_paths_from_git_status
+
+            for relpath in list_changed_paths_from_git_status(repo_dir):
+                _record_digest(relpath)
         except Exception as e:
             log.debug("compute_snapshot_hash: git status failed: %s", e)
 
@@ -860,7 +956,13 @@ def invalidate_advisory_after_mutation(
 def format_status_section(state: AdvisoryReviewState,
                           repo_dir: Optional[pathlib.Path] = None) -> str:
     """Render a compact historical section for LLM context injection."""
-    if not state.advisory_runs and not state.last_commit_attempt:
+    repo_key = make_repo_key(repo_dir) if repo_dir is not None else None
+    advisory_runs = state.filter_advisory_runs(repo_key=repo_key) if repo_key is not None else list(state.advisory_runs)
+    attempts = state.filter_attempts(repo_key=repo_key) if repo_key is not None else list(state.attempts)
+    last_attempt = state.latest_attempt_for(repo_key=repo_key) if repo_key is not None else state.last_commit_attempt
+    open_obs = state.get_open_obligations(repo_key=repo_key)
+
+    if not advisory_runs and last_attempt is None and not open_obs:
         return "## Advisory Pre-Review Status\n\nNo advisory runs recorded yet."
 
     lines = [
@@ -868,7 +970,7 @@ def format_status_section(state: AdvisoryReviewState,
         "(Historical — run `review_status` for gate-accurate live freshness)",
     ]
 
-    for run in state.advisory_runs[-3:]:
+    for run in advisory_runs[-3:]:
         status_icon = {
             "fresh": "✅",
             "stale": "⚠️",
@@ -903,13 +1005,14 @@ def format_status_section(state: AdvisoryReviewState,
         elif run.status in ("fresh", "bypassed", "skipped", "parse_failure"):
             lines.append("   No findings recorded.")
 
-    if state.last_stale_from_edit_ts:
+    stale_matches_repo = repo_key is None or state.last_stale_repo_key in ("", repo_key)
+    if state.last_stale_from_edit_ts and stale_matches_repo:
         lines.append(f"\n⚠️ Advisory marked stale after worktree edit at {state.last_stale_from_edit_ts[:16]}.")
         if state.last_stale_reason:
             lines.append(f"   Reason: {state.last_stale_reason}")
         lines.append("   Run advisory_pre_review again before repo_commit.")
 
-    recent_attempts = state.attempts[-3:]
+    recent_attempts = attempts[-3:]
     if recent_attempts:
         lines.append("\n### Recent reviewed attempts")
         for item in recent_attempts:
@@ -924,7 +1027,7 @@ def format_status_section(state: AdvisoryReviewState,
                 facts.append(f"warnings={len(item.readiness_warnings)}")
             lines.append(f"- {label}: {', '.join(facts)}")
 
-    ca = state.last_commit_attempt
+    ca = last_attempt
     if ca and ca.status in ("blocked", "failed"):
         icon = "🚫" if ca.status == "blocked" else "❌"
         ts_short = ca.ts[:16] if len(ca.ts) >= 16 else ca.ts
@@ -966,7 +1069,6 @@ def format_status_section(state: AdvisoryReviewState,
             if len(advisory_findings) > 3:
                 lines.append(f"     ... and {len(advisory_findings) - 3} more")
 
-    open_obs = state.get_open_obligations()
     if open_obs:
         lines.append(f"\n📋 **Open obligations from previous blocking rounds ({len(open_obs)}):**")
         for ob in open_obs[:6]:

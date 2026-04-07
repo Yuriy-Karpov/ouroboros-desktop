@@ -449,7 +449,7 @@ def test_review_status_filters_attempt_and_advisory_history(tmp_path):
 
 
 def test_repo_commit_blocks_when_staged_diff_changes_after_review(tmp_path):
-    """Phase 2: review findings must be invalidated if staged diff drifts after review."""
+    """Phase 2: genuine staged-diff drift must still trigger revalidation failure."""
     from ouroboros.tools.git import _repo_commit_push
 
     ctx = MagicMock()
@@ -468,10 +468,10 @@ def test_repo_commit_blocks_when_staged_diff_changes_after_review(tmp_path):
          patch("ouroboros.tools.git._check_advisory_freshness", return_value=None), \
          patch("ouroboros.tools.git._run_parallel_review", return_value=(None, None, "", [])), \
          patch("ouroboros.tools.git._aggregate_review_verdict", return_value=(
-             True,
-             "REVIEW_BLOCKED: critical finding",
-             "critical_findings",
-             [{"item": "tests_affected", "verdict": "FAIL", "severity": "critical", "reason": "missing tests"}],
+             False,
+             None,
+             "",
+             [],
              [],
          )), \
          patch("ouroboros.tools.git._fingerprint_staged_diff", side_effect=[
@@ -487,6 +487,147 @@ def test_repo_commit_blocks_when_staged_diff_changes_after_review(tmp_path):
     assert last_call.kwargs["block_reason"] == "revalidation_failed"
     assert last_call.kwargs["critical_findings"] == []
     assert last_call.kwargs["fingerprint_status"] == "mismatch"
+
+
+def test_repo_commit_preserves_blocked_review_findings(tmp_path):
+    """Blocked triad findings must be returned directly, not masked by self-unstaging."""
+    from ouroboros.tools.git import _repo_commit_push
+
+    ctx = MagicMock()
+    ctx.repo_dir = str(tmp_path)
+    ctx.drive_root = str(tmp_path)
+    ctx.branch_dev = "ouroboros"
+    ctx._scope_review_history = {}
+    ctx.drive_logs.return_value = tmp_path / "logs"
+    ctx._last_review_critical_findings = [{
+        "item": "tests_affected",
+        "verdict": "FAIL",
+        "severity": "critical",
+        "reason": "missing tests",
+    }]
+
+    with patch("ouroboros.tools.git._check_overlapping_review_attempt", return_value=None), \
+         patch("ouroboros.tools.git._record_commit_attempt") as mock_record, \
+         patch("ouroboros.tools.git._acquire_git_lock", return_value=object()), \
+         patch("ouroboros.tools.git._release_git_lock"), \
+         patch("ouroboros.tools.git._ensure_gitignore"), \
+         patch("ouroboros.tools.git._unstage_binaries", return_value=[]), \
+         patch("ouroboros.tools.git._check_advisory_freshness", return_value=None), \
+         patch(
+             "ouroboros.tools.git._run_parallel_review",
+             return_value=("REVIEW_BLOCKED: critical finding", None, "critical_findings", []),
+         ), \
+         patch("ouroboros.tools.git._fingerprint_staged_diff", side_effect=[
+             {"ok": True, "fingerprint": "same-fp", "status": "ok", "reason": ""},
+             {"ok": True, "fingerprint": "same-fp", "status": "ok", "reason": ""},
+         ]), \
+         patch("ouroboros.tools.git.run_cmd", side_effect=["", "", "M foo.py", ""]) as mock_run:
+        result = _repo_commit_push(ctx, "test commit")
+
+    assert "REVIEW_BLOCKED: critical finding" in result
+    assert "REVIEW_REVALIDATION_FAILED" not in result
+    assert mock_run.call_args_list[-1].args[0] == ["git", "reset", "HEAD"]
+    last_call = mock_record.call_args_list[-1]
+    assert last_call.args[2] == "blocked"
+    assert last_call.kwargs["block_reason"] == "critical_findings"
+    assert last_call.kwargs["critical_findings"] == ctx._last_review_critical_findings
+    assert last_call.kwargs["fingerprint_status"] == "matched"
+
+
+def test_repo_commit_scope_block_preserves_scope_findings(tmp_path):
+    """Scope-blocked commits must surface scope findings instead of revalidation noise."""
+    from types import SimpleNamespace
+    from ouroboros.tools.git import _repo_commit_push
+
+    ctx = MagicMock()
+    ctx.repo_dir = str(tmp_path)
+    ctx.drive_root = str(tmp_path)
+    ctx.branch_dev = "ouroboros"
+    ctx._scope_review_history = {}
+    ctx.drive_logs.return_value = tmp_path / "logs"
+    ctx._last_review_critical_findings = []
+
+    scope_result = SimpleNamespace(
+        blocked=True,
+        block_message="⚠️ SCOPE_REVIEW_BLOCKED: missing mirrored update",
+        critical_findings=[{
+            "item": "forgotten_touchpoints",
+            "verdict": "FAIL",
+            "severity": "critical",
+            "reason": "docs/ARCHITECTURE.md was not updated",
+        }],
+        advisory_findings=[],
+    )
+
+    with patch("ouroboros.tools.git._check_overlapping_review_attempt", return_value=None), \
+         patch("ouroboros.tools.git._record_commit_attempt") as mock_record, \
+         patch("ouroboros.tools.git._acquire_git_lock", return_value=object()), \
+         patch("ouroboros.tools.git._release_git_lock"), \
+         patch("ouroboros.tools.git._ensure_gitignore"), \
+         patch("ouroboros.tools.git._unstage_binaries", return_value=[]), \
+         patch("ouroboros.tools.git._check_advisory_freshness", return_value=None), \
+         patch(
+             "ouroboros.tools.git._run_parallel_review",
+             return_value=(None, scope_result, "", []),
+         ), \
+         patch("ouroboros.tools.git._fingerprint_staged_diff", side_effect=[
+             {"ok": True, "fingerprint": "same-fp", "status": "ok", "reason": ""},
+             {"ok": True, "fingerprint": "same-fp", "status": "ok", "reason": ""},
+         ]), \
+         patch("ouroboros.tools.git.run_cmd", side_effect=["", "", "M foo.py", ""]):
+        result = _repo_commit_push(ctx, "test commit")
+
+    assert "SCOPE_REVIEW_BLOCKED" in result
+    assert "REVIEW_REVALIDATION_FAILED" not in result
+    last_call = mock_record.call_args_list[-1]
+    assert last_call.kwargs["block_reason"] == "scope_blocked"
+    assert last_call.kwargs["critical_findings"] == scope_result.critical_findings
+    assert last_call.kwargs["fingerprint_status"] == "matched"
+
+
+def test_repo_write_commit_preserves_blocked_review_findings(tmp_path):
+    """repo_write_commit must return genuine blocked findings before unstaging."""
+    from ouroboros.tools.git import _repo_write_commit
+
+    ctx = MagicMock()
+    ctx.repo_dir = str(tmp_path)
+    ctx.drive_root = str(tmp_path)
+    ctx.branch_dev = "ouroboros"
+    ctx._scope_review_history = {}
+    ctx.drive_logs.return_value = tmp_path / "logs"
+    ctx.repo_path.side_effect = lambda rel: tmp_path / rel
+    ctx._last_review_critical_findings = [{
+        "item": "self_consistency",
+        "verdict": "FAIL",
+        "severity": "critical",
+        "reason": "workflow docs are stale",
+    }]
+
+    with patch("ouroboros.tools.git._check_overlapping_review_attempt", return_value=None), \
+         patch("ouroboros.tools.git._record_commit_attempt") as mock_record, \
+         patch("ouroboros.tools.git._acquire_git_lock", return_value=object()), \
+         patch("ouroboros.tools.git._release_git_lock"), \
+         patch("ouroboros.tools.git._invalidate_advisory"), \
+         patch("ouroboros.tools.git._check_advisory_freshness", return_value=None), \
+         patch(
+             "ouroboros.tools.git._run_parallel_review",
+             return_value=("REVIEW_BLOCKED: fix the docs first", None, "critical_findings", []),
+         ), \
+         patch("ouroboros.tools.git._fingerprint_staged_diff", side_effect=[
+             {"ok": True, "fingerprint": "same-fp", "status": "ok", "reason": ""},
+             {"ok": True, "fingerprint": "same-fp", "status": "ok", "reason": ""},
+         ]), \
+         patch("ouroboros.tools.git.write_text"), \
+         patch("ouroboros.tools.git.run_cmd", side_effect=["", "", ""]) as mock_run:
+        result = _repo_write_commit(ctx, "foo.py", "x = 1\n", "test commit")
+
+    assert "REVIEW_BLOCKED: fix the docs first" in result
+    assert "REVIEW_REVALIDATION_FAILED" not in result
+    assert mock_run.call_args_list[-1].args[0] == ["git", "reset", "HEAD"]
+    last_call = mock_record.call_args_list[-1]
+    assert last_call.kwargs["block_reason"] == "critical_findings"
+    assert last_call.kwargs["critical_findings"] == ctx._last_review_critical_findings
+    assert last_call.kwargs["fingerprint_status"] == "matched"
 
 
 def test_repo_commit_blocks_when_fingerprint_unavailable(tmp_path):
@@ -833,6 +974,69 @@ def test_capture_review_continuation_from_state_persists_warning_without_review_
     assert reloaded.attempt == 0
     assert reloaded.readiness_warnings == ["Provider outage"]
     assert reloaded.warnings == ["Provider outage"]
+
+
+def test_capture_review_continuation_from_state_scopes_open_obligations_to_repo(tmp_path):
+    from ouroboros.task_continuation import capture_review_continuation_from_state, load_review_continuation
+    from ouroboros.tools.commit_gate import _record_commit_attempt
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    (repo_a / ".git").mkdir(parents=True)
+    (repo_b / ".git").mkdir(parents=True)
+
+    own_ctx = MagicMock()
+    own_ctx.drive_root = str(tmp_path)
+    own_ctx.repo_dir = str(repo_a)
+    own_ctx.task_id = "task-outage"
+    own_ctx._current_review_tool_name = "repo_commit"
+    own_ctx.current_task_type = "task"
+    _record_commit_attempt(
+        own_ctx,
+        "repo-a blocked",
+        "blocked",
+        block_reason="critical_findings",
+        critical_findings=[{
+            "severity": "critical",
+            "verdict": "FAIL",
+            "item": "own_issue",
+            "reason": "keep me",
+        }],
+    )
+
+    foreign_ctx = MagicMock()
+    foreign_ctx.drive_root = str(tmp_path)
+    foreign_ctx.repo_dir = str(repo_b)
+    foreign_ctx.task_id = "task-foreign"
+    foreign_ctx._current_review_tool_name = "repo_commit"
+    foreign_ctx.current_task_type = "task"
+    _record_commit_attempt(
+        foreign_ctx,
+        "repo-b blocked",
+        "blocked",
+        block_reason="critical_findings",
+        critical_findings=[{
+            "severity": "critical",
+            "verdict": "FAIL",
+            "item": "foreign_issue",
+            "reason": "drop me",
+        }],
+    )
+
+    continuation = capture_review_continuation_from_state(
+        tmp_path,
+        {"id": "task-outage", "type": "task"},
+        source="task_exception",
+        warning="Provider outage",
+        repo_dir=repo_a,
+    )
+
+    assert continuation is not None
+    reloaded = load_review_continuation(tmp_path, "task-outage")
+    assert reloaded is not None
+    items = [entry["item"] for entry in reloaded.open_obligations]
+    assert "own_issue" in items
+    assert "foreign_issue" not in items
 
 
 def test_save_review_continuation_quarantines_corrupt_existing_file(tmp_path):

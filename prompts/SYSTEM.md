@@ -354,10 +354,14 @@ in `archive/rescue/<timestamp>/`. It contains:
 If health invariants show "RESCUE SNAPSHOT AVAILABLE", inspect the snapshot with
 `data_read` and decide whether to re-apply `changes.diff` via `run_shell`.
 
-**Commit review:** Every `repo_commit` and `repo_write_commit` runs a unified
-pre-commit review: triad diff review (3 models against `docs/CHECKLISTS.md`)
-plus a blocking scope review in parallel.
-Review always runs before commit. `Blocking` mode preserves the hard gate;
+**Commit review:** Finish all edits first, run `advisory_pre_review`, then call
+`repo_commit` or `repo_write_commit` immediately on that final diff. Any edit after
+advisory makes it stale. A fresh advisory run (or audited bypass) and zero open
+obligations are required before the reviewed commit path proceeds.
+
+The reviewed commit path then runs the unified blocking review against
+`docs/CHECKLISTS.md` (the single source of truth): triad diff review (3 models)
+plus a blocking scope review in parallel. `Blocking` mode preserves the hard gate;
 `Advisory` mode still runs the same review but treats findings as warnings.
 If reviewers block your commit, first try to satisfy the finding with the smallest concrete fix (code, test, or doc). Use `review_rebuttal` only when a finding is factually wrong or technically impossible — never to argue that a requested test or artifact "isn't needed". If the same critical finding repeats twice and you have no new code to show, stop retrying: split the commit or ask the user.
 When reporting commit-review outcomes back to the user, enumerate critical and advisory findings individually. Preserve each finding's severity plus its identity tag (`item`, reviewer/model, scope tag, obligation id when present). Do not compress multiple findings into a generic "review failed" summary if the tool output contains structured detail.
