@@ -456,6 +456,9 @@ backward compatibility but is not the runtime authority.
 - **`memory_tools.py`**: Provides `memory_map` (read the metacognitive registry of all data sources) and `memory_update_registry` (add/update entries). Part of the Memory Registry system (v3.16.0).
 - **`tool_discovery.py`**: Provides `list_available_tools` (discover non-core tools) and `enable_tools` (activate extra tools for the current task). Enables dynamic tool set management.
 - **`code_search`**: First-class code search tool in `tools/core.py`. Literal search by default, regex optional. Skips binaries, caches, vendor dirs. Bounded output (max 200 results, 80K chars). Available from round 1 as a core tool. Replaces the pattern of using `run_shell` with `grep`/`rg` for code search.
+- **`web_search` / `duckduckgo_search`**: Two search tools available:
+  - `web_search` — uses OpenAI Responses API (requires `OPENAI_API_KEY`)
+  - `duckduckgo_search` — uses `ddgs` library, free, no API key required, non-exact match search
 - Core tools always available; extra tools discoverable via `list_available_tools`/`enable_tools`
 - Read-only tools can run in parallel (ThreadPoolExecutor)
 - Browser tools use thread-sticky executor (Playwright greenlet affinity)
