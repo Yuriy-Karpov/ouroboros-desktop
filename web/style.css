@@ -1380,28 +1380,32 @@ body {
 
 .chat-send-inline {
     flex-shrink: 0;
-    border: none;
-    background: transparent;
-    color: var(--accent);
-    font-size: 13px;
-    font-weight: 700;
-    font-family: inherit;
-    letter-spacing: 0.04em;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(201, 53, 69, 0.25);
+    background: rgba(201, 53, 69, 0.12);
+    color: rgba(232, 93, 111, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
-    padding: 6px 10px;
-    border-radius: 12px;
-    transition: color 0.15s, background 0.15s;
-    opacity: 0.7;
+    transition: color 0.15s, background 0.15s, border-color 0.15s, box-shadow 0.15s;
     align-self: flex-end;
-    margin-bottom: 4px;
+    margin-bottom: 1px;
+    padding: 0;
+    font-size: 0;
 }
 .chat-send-inline:hover {
-    opacity: 1;
-    background: rgba(201, 53, 69, 0.10);
+    color: rgba(232, 93, 111, 1);
+    background: rgba(201, 53, 69, 0.22);
+    border-color: rgba(201, 53, 69, 0.5);
+    box-shadow: 0 0 8px rgba(201, 53, 69, 0.2);
 }
 .chat-send-inline:active {
-    background: rgba(201, 53, 69, 0.18);
-    opacity: 1;
+    background: rgba(201, 53, 69, 0.32);
+    border-color: rgba(201, 53, 69, 0.6);
+    box-shadow: 0 0 12px rgba(201, 53, 69, 0.3);
 }
 
 /* Shared UI components (stat cards used by Costs, section titles by Evolution) */
