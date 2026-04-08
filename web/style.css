@@ -773,7 +773,7 @@ body {
     overflow-y: auto;
     padding: 20px;
     padding-top: 56px;
-    padding-bottom: 150px;
+    padding-bottom: 84px; /* JS adjusts this dynamically via updateMessagesPadding() */
     display: flex;
     flex-direction: column;
     gap: 8px;

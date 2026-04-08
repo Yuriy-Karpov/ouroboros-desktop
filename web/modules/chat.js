@@ -108,10 +108,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 <button class="attach-remove" type="button" title="Remove">×</button>
             </span>
         `;
+        requestAnimationFrame(() => updateMessagesPadding());
         attachmentPreview.querySelector('.attach-remove').addEventListener('click', () => {
             pendingAttachment = null;
             attachmentPreview.classList.remove('visible');
             attachmentPreview.innerHTML = '';
+            requestAnimationFrame(() => updateMessagesPadding());
         });
     });
 
@@ -1088,6 +1090,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         }
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+        updateMessagesPadding();
         const cursor = input.value.length;
         input.setSelectionRange(cursor, cursor);
     }
@@ -1120,6 +1123,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 pendingAttachment = null;
                 attachmentPreview.classList.remove('visible');
                 attachmentPreview.innerHTML = '';
+                requestAnimationFrame(() => updateMessagesPadding());
                 text += (text ? '\n\n' : '') + `[Attached file: ${data.display_name || staged.display_name} saved to ${data.path}]`;
             } catch (e) {
                 alert('Upload error: ' + e.message);
@@ -1133,6 +1137,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         rememberInput(text);
         input.value = '';
         input.style.height = 'auto';
+        updateMessagesPadding();
         const result = ws.send({
             type: 'chat',
             content: text,
@@ -1159,10 +1164,20 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             restoreInputHistory(1);
         }
     });
+    // Dynamically adjust #chat-messages padding-bottom to match the real height of
+    // the absolute-positioned #chat-input-area overlay, so the last bubble is always
+    // fully visible with a small buffer — no more excessive gap or hidden content.
+    const inputArea = document.getElementById('chat-input-area');
+    function updateMessagesPadding() {
+        const h = inputArea ? inputArea.offsetHeight : 84;
+        messagesDiv.style.paddingBottom = (h + 16) + 'px';
+    }
+
     input.addEventListener('input', () => {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
         if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
+        updateMessagesPadding();
     });
 
     headerActions?.addEventListener('click', (event) => {
@@ -1325,6 +1340,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         const shouldClearReconnectParams = Boolean(pendingReconnectBannerText);
         pendingReconnectBannerText = '';
         wsHasConnectedOnce = true;
+        updateMessagesPadding();
         syncHistory({ includeUser: !historyLoaded })
             .then((hasMessages) => {
                 if (!hasMessages) ensureWelcomeMessage();
