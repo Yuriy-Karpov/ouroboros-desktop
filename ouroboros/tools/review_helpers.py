@@ -815,6 +815,43 @@ def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
     return diag
 
 
+def check_worktree_version_sync(repo_dir) -> str:
+    """Worktree version-sync preflight (non-fatal, non-blocking).
+
+    Reads VERSION, pyproject.toml, README badge, and ARCHITECTURE.md header from
+    the worktree (not staged — advisory runs before git add). Returns a warning
+    string when they disagree, empty string when in sync or VERSION is absent.
+
+    Shared between the advisory path and any other caller that needs a
+    worktree-level (pre-git-add) version consistency check.
+    """
+    import re
+    from pathlib import Path as _Path
+    repo_dir = _Path(repo_dir)
+    try:
+        version_path = repo_dir / "VERSION"
+        if not version_path.exists():
+            return ""
+        version_str = version_path.read_text(encoding="utf-8").strip()
+        if not version_str or not re.match(r"^\d+\.\d+\.\d+$", version_str):
+            return ""
+        desync = []
+        pyproject = repo_dir / "pyproject.toml"
+        if pyproject.exists() and f'version = "{version_str}"' not in pyproject.read_text(encoding="utf-8"):
+            desync.append("pyproject.toml")
+        readme = repo_dir / "README.md"
+        if readme.exists() and f"version-{version_str}-" not in readme.read_text(encoding="utf-8"):
+            desync.append("README.md badge")
+        arch = repo_dir / "docs" / "ARCHITECTURE.md"
+        if arch.exists() and f"# Ouroboros v{version_str}" not in arch.read_text(encoding="utf-8"):
+            desync.append("ARCHITECTURE.md header")
+        if desync:
+            return f"VERSION={version_str} but {', '.join(desync)} differ. Sync version carriers before committing."
+    except Exception:
+        pass
+    return ""
+
+
 def format_advisory_sdk_error(prefix: str, result_error: str, stderr_tail: str,
                                session_id: str, diag: dict) -> str:
     """Format a rich, debuggable advisory error message.

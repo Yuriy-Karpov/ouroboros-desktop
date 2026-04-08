@@ -598,3 +598,92 @@ def test_format_status_section_repo_scopes_history_and_obligations(tmp_path):
     assert "repo-a fresh" in section
     assert "repo-b blocked" not in section
     assert "foreign_issue" not in section
+
+
+# ---------------------------------------------------------------------------
+# 20. _resolve_matching_obligations: per-finding fingerprint keying
+# ---------------------------------------------------------------------------
+
+def test_resolve_item_pass_does_not_clear_other_same_item_obligation(tmp_path):
+    """With multiple open obligations for the same item, a generic item-name PASS
+    must NOT clear all of them — only an explicit obligation_id PASS may target
+    a specific one.  Item-name fallback applies only when exactly one obligation
+    exists for that item."""
+    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    # Two separate code_quality findings with different reasons → two obligations
+    state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
+        {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
+         "reason": "Bug in foo.py line 42"},
+        {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
+         "reason": "Race condition in bar.py"},
+    ]))
+    open_obs = state.get_open_obligations()
+    assert len(open_obs) == 2, f"Expected 2 obligations, got {len(open_obs)}"
+
+    # Generic item-name PASS for code_quality — must NOT clear both obligations
+    _resolve_matching_obligations(
+        state,
+        [{"verdict": "PASS", "severity": "critical", "item": "code_quality",
+          "reason": "Fixed foo.py"}],
+        snapshot_hash="aabbcc",
+    )
+    # Still 2 open — item-name fallback blocked because item_open_count > 1
+    still_open = state.get_open_obligations()
+    assert len(still_open) == 2, (
+        f"Generic item-name PASS must not clear multiple same-item obligations; "
+        f"got {len(still_open)} open: {[o.reason for o in still_open]}"
+    )
+
+
+def test_resolve_obligation_id_pass_clears_only_targeted_obligation(tmp_path):
+    """Explicit obligation_id in the advisory PASS clears only that specific obligation."""
+    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
+        {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
+         "reason": "Bug in foo.py line 42"},
+        {"verdict": "FAIL", "severity": "critical", "item": "code_quality",
+         "reason": "Race condition in bar.py"},
+    ]))
+    open_obs = state.get_open_obligations()
+    assert len(open_obs) == 2
+    target = open_obs[0]
+
+    # PASS with explicit obligation_id for just the first obligation
+    _resolve_matching_obligations(
+        state,
+        [{"verdict": "PASS", "severity": "critical",
+          "item": f"code_quality (obligation {target.obligation_id})",
+          "reason": "foo.py fixed"}],
+        snapshot_hash="deadf00d",
+    )
+    still_open = state.get_open_obligations()
+    assert len(still_open) == 1, f"Only the targeted obligation should be cleared"
+    assert still_open[0].obligation_id != target.obligation_id
+
+
+def test_resolve_item_pass_clears_single_obligation_legacy_fallback(tmp_path):
+    """When exactly one open obligation exists for an item, item-name PASS still
+    resolves it (legacy fallback for single-obligation cases)."""
+    from ouroboros.review_state import AdvisoryReviewState
+    from ouroboros.tools.claude_advisory_review import _resolve_matching_obligations
+
+    state = AdvisoryReviewState()
+    state.add_blocking_attempt(_make_blocking_attempt(critical_findings=[
+        {"verdict": "FAIL", "severity": "critical", "item": "tests_affected",
+         "reason": "No tests staged"},
+    ]))
+    assert len(state.get_open_obligations()) == 1
+
+    _resolve_matching_obligations(
+        state,
+        [{"verdict": "PASS", "severity": "critical", "item": "tests_affected",
+          "reason": "Tests present now"}],
+        snapshot_hash="c0ffeee0",
+    )
+    assert state.get_open_obligations() == []

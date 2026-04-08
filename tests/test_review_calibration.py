@@ -313,7 +313,8 @@ class TestObligationGrouping:
         from ouroboros.review_state import AdvisoryReviewState
         return AdvisoryReviewState()
 
-    def test_two_code_quality_findings_become_one_obligation(self):
+    def test_two_code_quality_findings_become_two_obligations(self):
+        """Different reasons → different fingerprints → separate obligations (no moving-target)."""
         state = self._make_state()
         attempt = _make_attempt("fix something", [
             {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
@@ -322,11 +323,12 @@ class TestObligationGrouping:
         state._update_obligations_from_attempt(attempt)
         open_obs = state.get_open_obligations()
         cq_obs = [o for o in open_obs if o.item.lower() == "code_quality"]
-        assert len(cq_obs) == 1, f"Expected 1 obligation, got {len(cq_obs)}: {cq_obs}"
-        assert "foo.py" in cq_obs[0].reason
-        assert "bar.py" in cq_obs[0].reason
+        assert len(cq_obs) == 2, f"Expected 2 obligations, got {len(cq_obs)}: {[o.reason for o in cq_obs]}"
+        reasons = {o.reason for o in cq_obs}
+        assert any("foo.py" in r for r in reasons)
+        assert any("bar.py" in r for r in reasons)
 
-    def test_different_items_still_produce_separate_obligations(self):
+    def test_different_items_produce_separate_obligations(self):
         state = self._make_state()
         attempt = _make_attempt("fix things", [
             {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
@@ -353,8 +355,28 @@ class TestObligationGrouping:
         assert "code_quality" in items
         assert "context_building" not in items
 
-    def test_subsequent_attempt_appends_reason_not_overwrites(self):
-        """Second blocked attempt with same item appends new reason."""
+    def test_same_finding_repeated_merges_into_one_obligation(self):
+        """Same item + same reason across two attempts → one obligation (deduped)."""
+        state = self._make_state()
+        attempt1 = _make_attempt("fix v1", [
+            {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
+        ])
+        state._update_obligations_from_attempt(attempt1)
+
+        attempt2 = _make_attempt("fix v2", [
+            {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
+        ])
+        state._update_obligations_from_attempt(attempt2)
+
+        open_obs = state.get_open_obligations()
+        cq_obs = [o for o in open_obs if o.item.lower() == "code_quality"]
+        assert len(cq_obs) == 1
+        assert "foo.py" in cq_obs[0].reason
+        # Must not duplicate: "Bug in foo.py | Bug in foo.py"
+        assert cq_obs[0].reason.count("Bug in foo.py") == 1
+
+    def test_different_reason_on_retry_creates_new_obligation(self):
+        """Different reason on retry → new fingerprint → separate obligation."""
         state = self._make_state()
         attempt1 = _make_attempt("fix v1", [
             {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
@@ -368,9 +390,10 @@ class TestObligationGrouping:
 
         open_obs = state.get_open_obligations()
         cq_obs = [o for o in open_obs if o.item.lower() == "code_quality"]
-        assert len(cq_obs) == 1
-        assert "foo.py" in cq_obs[0].reason
-        assert "missing test" in cq_obs[0].reason.lower()
+        assert len(cq_obs) == 2
+        reasons = {o.reason for o in cq_obs}
+        assert any("foo.py" in r for r in reasons)
+        assert any("missing test" in r.lower() for r in reasons)
 
     def test_pass_finding_not_included_as_obligation(self):
         state = self._make_state()
@@ -388,7 +411,7 @@ class TestObligationGrouping:
         assert state.get_open_obligations() == []
 
     def test_no_reason_duplication_on_identical_retry(self):
-        """Same reason on two retries should NOT produce duplicate text."""
+        """Same item+reason on two retries → same fingerprint → one obligation, reason not doubled."""
         state = self._make_state()
         reason = "Hardcoded truncation in foo.py"
         attempt1 = _make_attempt("fix v1", [
@@ -404,8 +427,9 @@ class TestObligationGrouping:
         # Reason should appear exactly once, not "reason | reason"
         assert cq_obs[0].reason.count(reason) == 1
 
-    def test_a_then_a_pipe_b_no_double_a(self):
-        """Regression: prev='A', new_combined='A | B' should produce 'A | B', not 'A | A | B'."""
+    def test_a_then_a_and_b_produces_two_obligations(self):
+        """Fingerprint keying: attempt1 has finding A, attempt2 has A (same) + B (new).
+        Result: one obligation for A (merged), one NEW obligation for B = 2 total."""
         state = self._make_state()
         attempt1 = _make_attempt("fix v1", [
             {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Bug in foo.py"},
@@ -419,15 +443,14 @@ class TestObligationGrouping:
         state._update_obligations_from_attempt(attempt2)
 
         cq_obs = [o for o in state.get_open_obligations() if o.item.lower() == "code_quality"]
-        assert len(cq_obs) == 1
-        reason = cq_obs[0].reason
-        # "Bug in foo.py" must appear exactly once despite being in both attempts
-        assert reason.count("Bug in foo.py") == 1
-        # "Missing bar.py" must also be present
-        assert "Missing bar.py" in reason
+        assert len(cq_obs) == 2
+        reasons = {o.reason for o in cq_obs}
+        # Each reason appears exactly once (no "A | A" or "A | B" in a single obligation)
+        assert any("Bug in foo.py" in r and "Missing bar.py" not in r for r in reasons)
+        assert any("Missing bar.py" in r for r in reasons)
 
     def test_identical_reasons_in_single_attempt_deduplicated(self):
-        """Two identical findings for same item in one attempt: result should not be 'A | A'."""
+        """Two identical findings for same item in one attempt: fingerprint dedup → one obligation."""
         state = self._make_state()
         attempt = _make_attempt("one-shot", [
             {"verdict": "FAIL", "severity": "critical", "item": "code_quality", "reason": "Same bug"},
@@ -435,8 +458,8 @@ class TestObligationGrouping:
         ])
         state._update_obligations_from_attempt(attempt)
         cq_obs = [o for o in state.get_open_obligations() if o.item.lower() == "code_quality"]
+        # Same fingerprint → same obligation_id → only one created
         assert len(cq_obs) == 1
-        # "Same bug" must appear exactly once
         assert cq_obs[0].reason.count("Same bug") == 1
 
 

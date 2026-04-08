@@ -1,4 +1,4 @@
-# Ouroboros v4.17.6 — Architecture & Reference
+# Ouroboros v4.17.7 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -597,12 +597,24 @@ obligation open by abstracting a fixed concrete issue.
 
 ### Obligation grouping (P3, `ouroboros/review_state.py::_update_obligations_from_attempt`)
 
-Multiple critical findings with the same `item` (e.g. two distinct `code_quality`
-issues in the same blocked attempt) are now **grouped into a single obligation** with
-their reasons joined by ` | `. This prevents the "moving-target" overwrite problem
-where repeated blocked commits rotated what was visible without resolving anything.
-Item-level keying is preserved so `_resolve_matching_obligations` continues to work
-via `item.lower()` matching.
+Each critical finding is identified by a stable fingerprint `sha256(f"{item}:{reason}")[:12]`.
+Two findings with the same `item` but **different reasons** produce **separate obligations**,
+so a reviewer cannot rotate or widen a finding while keeping it formally "open" as a
+moving-target obligation.  An identical finding (same item + same reason) repeated across
+attempts merges into the existing obligation (reason text deduped) instead of duplicating.
+
+`_resolve_matching_obligations` in `ouroboros/tools/claude_advisory_review.py` resolves
+by both `obligation_id` (primary) and `item.lower()` (fallback for legacy saved state),
+so the dual-path resolution handles obligations created under either scheme.
+
+### Shared worktree version-sync preflight (`ouroboros/tools/review_helpers.py::check_worktree_version_sync`)
+
+`check_worktree_version_sync(repo_dir)` reads VERSION, pyproject.toml, README badge, and
+ARCHITECTURE.md header from the **worktree** (before `git add`) and returns a warning string
+on mismatch. The advisory path (`claude_advisory_review.py`) delegates to this shared helper
+via a backward-compatible `_check_worktree_version_sync` alias. The staged-index equivalent
+in `_preflight_check` (review.py) remains separate — it reads from `git show :PATH` after
+staging and is the authoritative gate.
 
 ### Self-verification template (P2, `ouroboros/tools/review.py::_build_critical_block_message`)
 

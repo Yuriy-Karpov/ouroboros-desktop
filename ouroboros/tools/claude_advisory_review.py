@@ -45,6 +45,7 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section,
     build_goal_section,
     build_scope_section,
+    check_worktree_version_sync as _check_worktree_version_sync_shared,
     CRITICAL_FINDING_CALIBRATION,
     get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
     format_advisory_sdk_error as _format_advisory_error,
@@ -307,8 +308,14 @@ Return ONLY a JSON array. Each element:
    a. Include a separate JSON entry per obligation for the corresponding checklist item.
    b. If fixed: verdict=PASS, reason must state WHAT closes it (file, line, symbol, change).
    c. If not fixed: verdict=FAIL, severity=critical, reason must name the specific stale artifact.
-   d. A generic PASS that ignores listed obligations is a weak signal — addressing each
-      obligation individually is strongly expected but not enforced at the code level.
+   d. **TARGETING — multiple obligations with the same checklist item:**
+      When two or more open obligations share the same item (e.g. two distinct `code_quality`
+      findings), you MUST emit a separate JSON entry for EACH one and use the
+      `(obligation <id>)` suffix in the `"item"` field to target it precisely:
+        {{"item": "code_quality (obligation abc123def456)", "verdict": "PASS", ...}}
+      A generic `"item": "code_quality"` entry when multiple same-item obligations are
+      open will NOT resolve all of them — only the one matched by `obligation_id` will
+      be closed; the rest remain open until explicitly addressed.
 7. Output ONLY the JSON array — no markdown fences, no commentary outside the JSON.
 """
     return prompt
@@ -588,10 +595,21 @@ def _resolve_matching_obligations(
     }
 
     open_obs = state.get_open_obligations(repo_key=repo_key)
+
+    # Count open obligations per item so item-name fallback is safe only when
+    # unambiguous (exactly one open obligation for that item).  With per-finding
+    # fingerprint keying, a same-item PASS must not clear a different finding
+    # that was not addressed.
+    from collections import Counter as _Counter
+    item_open_count = _Counter(o.item.lower() for o in open_obs)
+
     resolved = [
         o.obligation_id for o in open_obs
         if o.obligation_id.lower() in unambiguous_pass_ids
-        or o.item.lower() in unambiguous_pass
+        or (
+            o.item.lower() in unambiguous_pass
+            and item_open_count[o.item.lower()] == 1
+        )
     ]
     if resolved:
         state.resolve_obligations(
@@ -667,32 +685,11 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
 def _check_worktree_version_sync(repo_dir: pathlib.Path) -> str:
     """Worktree version-sync preflight for advisory path (non-fatal, non-blocking).
 
-    Reads VERSION, pyproject.toml, README badge, and ARCHITECTURE.md header from
-    the worktree (not staged — advisory runs before git add). Returns a warning
-    string when they disagree, empty string when in sync or VERSION is absent.
+    Delegates to the shared helper in review_helpers.  The local name is kept as
+    a backward-compatible alias so existing tests importing from this module continue
+    to work without changes.
     """
-    try:
-        version_path = repo_dir / "VERSION"
-        if not version_path.exists():
-            return ""
-        version_str = version_path.read_text(encoding="utf-8").strip()
-        if not version_str or not re.match(r"^\d+\.\d+\.\d+$", version_str):
-            return ""
-        desync = []
-        pyproject = repo_dir / "pyproject.toml"
-        if pyproject.exists() and f'version = "{version_str}"' not in pyproject.read_text(encoding="utf-8"):
-            desync.append("pyproject.toml")
-        readme = repo_dir / "README.md"
-        if readme.exists() and f"version-{version_str}-" not in readme.read_text(encoding="utf-8"):
-            desync.append("README.md badge")
-        arch = repo_dir / "docs" / "ARCHITECTURE.md"
-        if arch.exists() and f"# Ouroboros v{version_str}" not in arch.read_text(encoding="utf-8"):
-            desync.append("ARCHITECTURE.md header")
-        if desync:
-            return f"VERSION={version_str} but {', '.join(desync)} differ. Sync version carriers before committing."
-    except Exception:
-        pass
-    return ""
+    return _check_worktree_version_sync_shared(repo_dir)
 
 
 # -- Tool handlers --

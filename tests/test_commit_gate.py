@@ -967,3 +967,33 @@ def test_triad_review_reasoning_effort_is_medium_not_low():
         "_query_model must use reasoning_effort='medium' or 'high'"
     )
 
+
+def test_advisory_prompt_contains_obligation_targeting_instructions(tmp_path):
+    """_build_advisory_prompt must instruct the reviewer how to target a specific
+    obligation when multiple open obligations share the same checklist item.
+    Without this, a generic item-name PASS cannot disambiguate which obligation
+    was resolved, and the resolution logic leaves all same-item obligations open.
+    """
+    import tempfile
+    import pathlib as _pl
+    import subprocess as _sp
+    adv_mod = _get_advisory_module()
+
+    with tempfile.TemporaryDirectory() as d:
+        repo_dir = _pl.Path(d)
+        _sp.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+        prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
+
+        # Must explain the (obligation <id>) suffix mechanism
+        assert "obligation" in prompt.lower(), (
+            "Prompt must mention 'obligation' targeting to allow per-finding resolution"
+        )
+        assert "(obligation" in prompt, (
+            "Prompt must show the '(obligation <id>)' suffix syntax for targeting specific obligations"
+        )
+        # Must warn that a generic PASS won't resolve all same-item obligations
+        assert "will NOT resolve" in prompt or "will not resolve" in prompt.lower(), (
+            "Prompt must warn that generic item-name PASS won't resolve all same-item obligations"
+        )
+
