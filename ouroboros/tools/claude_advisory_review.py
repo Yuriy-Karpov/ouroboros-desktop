@@ -480,7 +480,7 @@ def _audit_bypass(ctx: ToolContext, snapshot_hash: str, commit_message: str,
             "ts": utc_now_iso(),
             "type": "advisory_pre_review_bypassed",
             "snapshot_hash": snapshot_hash,
-            "commit_message": commit_message[:200],
+            "commit_message": commit_message,  # full — no [:200] truncation
             "bypass_reason": bypass_reason,
             "task_id": task_id,
         })
@@ -896,15 +896,15 @@ def _handle_review_status(
     )
 
     runs_data = []
-    for run in reversed(filtered_runs[-5:]):
+    for run in reversed(filtered_runs):  # full history — no [-5:] cap
         findings = [i for i in (run.items or []) if isinstance(i, dict)
                     and str(i.get("verdict", "")).upper() == "FAIL"]
         critical = [i for i in findings if str(i.get("severity", "")).lower() == "critical"]
         runs_data.append({
             "snapshot_hash": run.snapshot_hash[:12],
-            "commit_message": run.commit_message[:80],
+            "commit_message": run.commit_message,  # full — no [:80] truncation
             "status": run.status,
-            "ts": run.ts[:16],
+            "ts": run.ts,  # full ts — no [:16] truncation
             "critical_findings": len(critical),
             "total_findings": len(findings),
             "snapshot_summary": run.snapshot_summary,
@@ -950,7 +950,7 @@ def _handle_review_status(
         )
     )
     stale_from_edit_ts = (
-        state.last_stale_from_edit_ts[:16]
+        state.last_stale_from_edit_ts  # full ts — no [:16] truncation
         if state.last_stale_from_edit_ts and state.last_stale_repo_key in ("", repo_filter)
         else ("now (hash mismatch)" if hash_mismatch else None)
     )
@@ -972,8 +972,8 @@ def _handle_review_status(
         ca = selected_attempt
         commit_attempt_data = {
             "status": ca.status,
-            "commit_message": ca.commit_message[:80],
-            "ts": ca.ts[:16],
+            "commit_message": ca.commit_message,  # full — no [:80] truncation
+            "ts": ca.ts,  # full ts — no [:16] truncation
             "duration_sec": round(ca.duration_sec, 1),
             "block_reason": ca.block_reason or None,
             "block_details_preview": _truncate_review_artifact(ca.block_details, limit=300) if ca.block_details else None,
@@ -995,7 +995,7 @@ def _handle_review_status(
         }
 
     attempts_data = []
-    for entry in reversed(filtered_attempts[-8:]):
+    for entry in reversed(filtered_attempts):  # full history — no [-8:] cap
         attempts_data.append({
             "repo_key": entry.repo_key or None,
             "tool_name": entry.tool_name or None,
@@ -1013,7 +1013,7 @@ def _handle_review_status(
             "post_review_fingerprint": entry.post_review_fingerprint[:12] or None,
             "fingerprint_status": entry.fingerprint_status or None,
             "degraded_reasons": list(entry.degraded_reasons or []),
-            "ts": entry.ts[:16],
+            "ts": entry.ts,  # full ts — no [:16] truncation
         })
 
     # Open obligations (already computed above as open_obs for effective_is_fresh)
@@ -1025,8 +1025,8 @@ def _handle_review_status(
             "severity": ob.severity,
             "reason": _truncate_review_artifact(ob.reason, limit=200),
             "status": ob.status,
-            "source_ts": ob.source_attempt_ts[:16],
-            "source_commit": ob.source_attempt_msg if len(ob.source_attempt_msg) <= 60 else ob.source_attempt_msg[:60] + "...",
+            "source_ts": ob.source_attempt_ts,  # full ts — no [:16] truncation
+            "source_commit": ob.source_attempt_msg,  # full message — no [:60] truncation
         })
 
     # Determine readiness and actionable next step (via module-level helper)

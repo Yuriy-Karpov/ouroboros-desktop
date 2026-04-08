@@ -716,7 +716,7 @@ def _build_critical_block_message(
 ) -> str:
     ctx._review_history.append({
         "attempt": ctx._review_iteration_count,
-        "commit_message": commit_message[:200],
+        "commit_message": commit_message,  # full — no [:200] truncation
         "critical": list(critical_fails),
         "advisory": list(advisory_warns),
     })

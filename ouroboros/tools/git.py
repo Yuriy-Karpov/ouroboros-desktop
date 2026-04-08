@@ -278,7 +278,7 @@ def _log_test_failure(ctx: ToolContext, commit_message: str, test_output: str) -
     try:
         append_jsonl(ctx.drive_path("logs") / "events.jsonl", {
             "ts": utc_now_iso(), "type": "commit_test_failure",
-            "commit_message": commit_message[:200],
+            "commit_message": commit_message,  # full — no [:200] truncation
             "test_output": test_output[:2000],
             "consecutive_failures": _consecutive_test_failures,
         })

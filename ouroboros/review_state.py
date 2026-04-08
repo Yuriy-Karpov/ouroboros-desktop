@@ -419,7 +419,7 @@ class AdvisoryReviewState:
                 ob = existing_by_item[item_key]
                 ob.reason = reason
                 ob.source_attempt_ts = attempt.ts
-                ob.source_attempt_msg = attempt.commit_message[:200]
+                ob.source_attempt_msg = attempt.commit_message  # full message — no [:200] truncation
                 touched_ids.append(ob.obligation_id)
             else:
                 ob_id = self._make_obligation_id(item, reason)
@@ -429,7 +429,7 @@ class AdvisoryReviewState:
                     severity=str(finding.get("severity", "critical")),
                     reason=reason,
                     source_attempt_ts=attempt.ts,
-                    source_attempt_msg=attempt.commit_message[:200],
+                    source_attempt_msg=attempt.commit_message,  # full message — no [:200] truncation
                     status="still_open",
                     repo_key=attempt.repo_key,
                 )
@@ -970,7 +970,8 @@ def format_status_section(state: AdvisoryReviewState,
         "(Historical — run `review_status` for gate-accurate live freshness)",
     ]
 
-    for run in advisory_runs[-3:]:
+    # No [-3:] cap — include ALL advisory runs so history is preserved.
+    for run in advisory_runs:
         status_icon = {
             "fresh": "✅",
             "stale": "⚠️",
@@ -978,12 +979,12 @@ def format_status_section(state: AdvisoryReviewState,
             "skipped": "⏭️",
             "parse_failure": "🔴",
         }.get(run.status, "❓")
-        ts_short = run.ts[:16] if len(run.ts) >= 16 else run.ts
+        ts_display = run.ts  # full timestamp — no [:16] truncation
         hash_short = run.snapshot_hash[:12]
-        msg_short = run.commit_message[:60] + ("..." if len(run.commit_message) > 60 else "")
+        commit_display = run.commit_message  # full message — no [:60] truncation
 
-        lines.append(f"\n{status_icon} **{run.status.upper()}** | hash={hash_short} | {ts_short}")
-        lines.append(f"   Commit: {msg_short}")
+        lines.append(f"\n{status_icon} **{run.status.upper()}** | hash={hash_short} | {ts_display}")
+        lines.append(f"   Commit: {commit_display}")
         if run.bypass_reason:
             lines.append(f"   Bypassed: {run.bypass_reason}")
         if run.snapshot_summary:
@@ -995,24 +996,24 @@ def format_status_section(state: AdvisoryReviewState,
         ]
         if findings:
             lines.append(f"   Findings ({len(findings)}):")
-            for item in findings[:5]:
+            # No [:N] cap — include ALL findings so advisory receives complete history.
+            for item in findings:
                 sev = str(item.get("severity", "advisory")).upper()
                 name = item.get("item", "?")
                 reason = _truncate_review_reason(item.get("reason", ""))
                 lines.append(f"     [{sev}] {name}: {reason}")
-            if len(findings) > 5:
-                lines.append(f"     ... and {len(findings) - 5} more")
         elif run.status in ("fresh", "bypassed", "skipped", "parse_failure"):
             lines.append("   No findings recorded.")
 
     stale_matches_repo = repo_key is None or state.last_stale_repo_key in ("", repo_key)
     if state.last_stale_from_edit_ts and stale_matches_repo:
-        lines.append(f"\n⚠️ Advisory marked stale after worktree edit at {state.last_stale_from_edit_ts[:16]}.")
+        lines.append(f"\n⚠️ Advisory marked stale after worktree edit at {state.last_stale_from_edit_ts}.")  # full ts — no [:16]
         if state.last_stale_reason:
             lines.append(f"   Reason: {state.last_stale_reason}")
         lines.append("   Run advisory_pre_review again before repo_commit.")
 
-    recent_attempts = attempts[-3:]
+    # No [-3:] cap — include ALL attempts so nothing is silently dropped.
+    recent_attempts = attempts
     if recent_attempts:
         lines.append("\n### Recent reviewed attempts")
         for item in recent_attempts:
@@ -1030,10 +1031,10 @@ def format_status_section(state: AdvisoryReviewState,
     ca = last_attempt
     if ca and ca.status in ("blocked", "failed"):
         icon = "🚫" if ca.status == "blocked" else "❌"
-        ts_short = ca.ts[:16] if len(ca.ts) >= 16 else ca.ts
-        msg_short = ca.commit_message[:60] + ("..." if len(ca.commit_message) > 60 else "")
-        lines.append(f"\n{icon} **Last commit {ca.status.upper()}** | {ts_short}")
-        lines.append(f"   Commit: {msg_short}")
+        ts_display = ca.ts  # full timestamp — no [:16] truncation
+        commit_display = ca.commit_message  # full message — no [:60] truncation
+        lines.append(f"\n{icon} **Last commit {ca.status.upper()}** | {ts_display}")
+        lines.append(f"   Commit: {commit_display}")
         lines.append(f"   Tool: {ca.tool_name or _DEFAULT_TOOL_NAME}")
         if ca.attempt:
             lines.append(f"   Attempt: {ca.attempt}")
@@ -1046,38 +1047,34 @@ def format_status_section(state: AdvisoryReviewState,
             lines.append(f"   Duration: {ca.duration_sec:.1f}s")
         if ca.readiness_warnings:
             lines.append(f"   Readiness warnings ({len(ca.readiness_warnings)}):")
-            for warning in ca.readiness_warnings[:3]:
+            # No [:N] cap — all warnings shown; review outputs must not truncate.
+            for warning in ca.readiness_warnings:
                 lines.append(f"     - {_truncate_review_reason(warning, limit=160)}")
-            if len(ca.readiness_warnings) > 3:
-                lines.append(f"     ... and {len(ca.readiness_warnings) - 3} more")
         critical_findings = list(ca.critical_findings or [])
         advisory_findings = list(ca.advisory_findings or [])
         if critical_findings:
             lines.append(f"   Critical findings ({len(critical_findings)}):")
-            for finding in critical_findings[:3]:
+            # No [:N] cap — all findings preserved for complete carry-over.
+            for finding in critical_findings:
                 label = str(finding.get("item") or finding.get("reason") or "?")
                 reason = _truncate_review_reason(finding.get("reason", ""), limit=160)
                 lines.append(f"     - {label}: {reason}")
-            if len(critical_findings) > 3:
-                lines.append(f"     ... and {len(critical_findings) - 3} more")
         elif advisory_findings:
             lines.append(f"   Advisory findings ({len(advisory_findings)}):")
-            for finding in advisory_findings[:3]:
+            # No [:N] cap — all findings preserved.
+            for finding in advisory_findings:
                 label = str(finding.get("item") or finding.get("reason") or "?")
                 reason = _truncate_review_reason(finding.get("reason", ""), limit=160)
                 lines.append(f"     - {label}: {reason}")
-            if len(advisory_findings) > 3:
-                lines.append(f"     ... and {len(advisory_findings) - 3} more")
 
     if open_obs:
         lines.append(f"\n📋 **Open obligations from previous blocking rounds ({len(open_obs)}):**")
-        for ob in open_obs[:6]:
+        # No [:N] cap — all obligations shown; advisory must address each one.
+        for ob in open_obs:
             reason = _truncate_review_reason(ob.reason)
-            source = ob.source_attempt_msg if len(ob.source_attempt_msg) <= 60 else ob.source_attempt_msg[:60] + "..."
+            source = ob.source_attempt_msg  # full message — no [:60] truncation
             lines.append(f"   [{ob.obligation_id}] [{ob.severity.upper()}] {ob.item}: {reason}")
-            lines.append(f"      Source: {ob.source_attempt_ts[:16]} — \"{source}\"")
-        if len(open_obs) > 6:
-            lines.append(f"   ... and {len(open_obs) - 6} more")
+            lines.append(f"      Source: {ob.source_attempt_ts} — \"{source}\"")  # full ts — no [:16]
         lines.append("   Advisory MUST verify each obligation is resolved before PASS.")
 
     return "\n".join(lines)

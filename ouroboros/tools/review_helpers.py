@@ -288,13 +288,21 @@ def build_blocking_findings_json_section(
     *,
     history_limit: int = 4,
 ) -> str:
-    """Render open obligations and recent blocking findings as fenced JSON."""
-    if not open_obligations:
+    """Render open obligations and recent blocking findings as fenced JSON.
+
+    All findings and obligations are included without truncation — the caller must
+    not apply slice caps before passing these lists.  ``history_limit`` is kept
+    for backward-compat but is intentionally ignored: ALL blocking attempts are
+    serialised so no finding is silently dropped between pipeline stages.
+    """
+    if not open_obligations and not blocking_history:
         return ""
 
-    def _sanitize_text(value: str, limit: int = 500) -> str:
+    def _sanitize_text(value: str, limit: int = 0) -> str:
+        """Redact secrets from text. ``limit`` is kept for call-site compat but ignored —
+        no silent truncation (BIBLE P1). Full text is returned after secret redaction."""
         text, _ = redact_prompt_secrets(str(value or ""))
-        return text[:limit]
+        return text
 
     payload = {
         "open_obligations": [],
@@ -310,9 +318,11 @@ def build_blocking_findings_json_section(
             "source_attempt_msg": _sanitize_text(getattr(ob, "source_attempt_msg", ""), limit=200),
         })
 
-    for attempt in reversed((blocking_history or [])[-history_limit:]):
+    # Include ALL blocking attempts — no history_limit cap — so no finding is lost.
+    for attempt in reversed(list(blocking_history or [])):
         critical_findings = []
-        for finding in list(getattr(attempt, "critical_findings", []) or [])[:6]:
+        # Include ALL critical findings per attempt — no [:6] cap.
+        for finding in list(getattr(attempt, "critical_findings", []) or []):
             if isinstance(finding, dict):
                 sanitized = {}
                 for key, value in finding.items():

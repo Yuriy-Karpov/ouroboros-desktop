@@ -137,7 +137,7 @@ def _record_commit_attempt(ctx: ToolContext, commit_message: str, status: str,
 
             attempt = CommitAttemptRecord(
                 ts=_utc_now(),
-                commit_message=commit_message[:200],
+                commit_message=commit_message,  # full message — no [:200] truncation
                 status=status,
                 snapshot_hash=snapshot_hash,
                 block_reason=block_reason,
@@ -298,7 +298,7 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
     return (
         f"⚠️ REVIEWED_ATTEMPT_IN_PROGRESS: {attempt_label} is still active "
         f"(status={active.status}, late_result_pending={bool(active.late_result_pending)}, "
-        f"started={active.started_ts[:19] or active.ts[:19]}). "
+        f"started={active.started_ts or active.ts}). "  # full ts — no [:19] truncation
         f"Do not start another reviewed attempt for this repo until it finishes or auto-expires "
         f"after {expiration_window}s TTL+grace. Check review_status for current state."
     )
@@ -332,7 +332,7 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
         try:
             append_jsonl(ctx.drive_logs() / "events.jsonl", {
                 "ts": _utc_now(), "type": "advisory_pre_review_bypassed",
-                "snapshot_hash": snapshot_hash, "commit_message": commit_message[:200],
+                "snapshot_hash": snapshot_hash, "commit_message": commit_message,  # full — no [:200]
                 "bypass_reason": reason, "task_id": task_id,
             })
         except Exception:
@@ -369,10 +369,9 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
         lines = [f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Advisory is current (hash={snapshot_hash[:12]}) "
                  f"but {len(open_obs)} open obligation(s) from previous blocking rounds must be resolved.\n",
                  "Unresolved obligations:"]
+        # No [:N] cap — show all obligations so the agent sees every unresolved item.
         lines += [f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
-                  for o in open_obs[:5]]
-        if len(open_obs) > 5:
-            lines.append(f"  ... and {len(open_obs) - 5} more")
+                  for o in open_obs]
         lines.append("\nFix the flagged issues and re-run advisory_pre_review so it can mark them PASS.")
         lines.append("Or bypass: repo_commit(commit_message='...', skip_advisory_pre_review=True) (audited).")
         return "\n".join(lines)
@@ -388,14 +387,13 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
         if state.get_open_obligations(repo_key=repo_key):
             open_obs = state.get_open_obligations(repo_key=repo_key)
             obs_lines = [f"\nOpen obligations ({len(open_obs)}):"]
+            # No [:N] cap — all obligations shown.
             obs_lines += [f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
-                          for o in open_obs[:5]]
-            if len(open_obs) > 5:
-                obs_lines.append(f"  ... and {len(open_obs) - 5} more")
+                          for o in open_obs]
             obs_section = "\n".join(obs_lines)
         return (
             f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Last advisory run for this snapshot returned "
-            f"parse_failure (hash={snapshot_hash[:12]}, ts={matching_run.ts[:16]}). "
+            f"parse_failure (hash={snapshot_hash[:12]}, ts={matching_run.ts}). "  # full ts
             f"The advisory ran but its output could not be parsed — re-run it.{obs_section}\n"
             "Re-run: advisory_pre_review(commit_message='...')\n"
             "Or bypass: repo_commit(commit_message='...', skip_advisory_pre_review=True) (audited)."
@@ -403,20 +401,19 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
 
     if latest and latest.status == "stale" and state.last_stale_from_edit_ts:
         stale_reason = (f"Advisory invalidated by worktree edit at "
-                        f"{state.last_stale_from_edit_ts[:16]}. Re-run advisory after all edits.")
+                        f"{state.last_stale_from_edit_ts}. Re-run advisory after all edits.")  # full ts
     elif latest:
         stale_reason = (f"Latest run: status={latest.status}, hash={latest.snapshot_hash[:12]}, "
-                        f"ts={latest.ts[:16]}. Snapshot changed (files edited after advisory ran).")
+                        f"ts={latest.ts}. Snapshot changed (files edited after advisory ran).")  # full ts
     else:
         stale_reason = "No advisory runs recorded yet."
 
     obs_section = ""
     if open_obs:
         lines = [f"\nOpen obligations ({len(open_obs)}):"]
+        # No [:N] cap — all obligations shown so nothing is silently hidden.
         lines += [f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
-                  for o in open_obs[:5]]
-        if len(open_obs) > 5:
-            lines.append(f"  ... and {len(open_obs) - 5} more")
+                  for o in open_obs]
         lines.append("  → advisory_pre_review will verify each obligation is resolved.")
         obs_section = "\n".join(lines)
 
