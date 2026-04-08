@@ -834,8 +834,9 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         if (!taskId) return;
         // Progress messages are user-facing status updates (e.g. "🔍 Searching...")
         // that should always be visible — force the live card open immediately.
+        // Do not force-open cards for already-completed tasks (history replay).
         const taskState = getTaskUiState(taskId, true);
-        if (taskState) taskState.forceCard = true;
+        if (taskState && !taskState.completed) taskState.forceCard = true;
         const summary = summarizeChatLiveEvent({
             type: 'send_message',
             is_progress: true,
@@ -963,33 +964,41 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                 if (!resp.ok) return false;
                 const data = await resp.json();
                 const messages = Array.isArray(data.messages) ? data.messages : [];
+
+                // Two-pass processing: progress/summary first, then regular messages.
+                // This guarantees live cards are built before finishLiveCard() is called,
+                // so progress bubbles are never discarded due to taskState.completed=true.
+
+                // Pass 1: progress messages and task summaries (build card timelines).
                 for (const msg of messages) {
                     const taskId = msg.task_id || '';
-                    if (!includeUser && msg.role === 'user') continue;
+                    if (!taskId) continue;
+                    if (retiredTaskIds.has(taskId)) continue;
                     if (msg.is_progress) {
-                        if (!taskId) continue;
-                        if (retiredTaskIds.has(taskId)) continue;
-                        const taskState = getTaskUiState(taskId, true);
-                        if (taskState.completed) continue;
                         updateLiveCardFromProgressMessage(msg);
                         continue;
                     }
                     if (msg.system_type === 'task_summary') {
-                        if (!taskId) continue;
-                        if (retiredTaskIds.has(taskId)) continue;
-                        const taskState = getTaskUiState(taskId, true);
-                        if (taskState.completed) continue;
                         // Force the card visible for historical tasks only when the task
                         // was non-trivial (had tool calls or multiple rounds).  Trivial
                         // tasks (simple replies) should not show a card at all.
                         const hadToolCalls = (msg.tool_calls || 0) > 0;
                         const hadMultipleRounds = (msg.rounds || 0) > 1;
                         if (hadToolCalls || hadMultipleRounds) {
-                            taskState.forceCard = true;
+                            const taskState = getTaskUiState(taskId, true);
+                            if (taskState) taskState.forceCard = true;
                         }
                         appendTaskSummaryToLiveCard(msg);
-                        continue;
                     }
+                }
+
+                // Pass 2: regular messages (assistant replies, user messages, system bubbles).
+                // finishLiveCard() is called here, after the card timeline is already populated.
+                for (const msg of messages) {
+                    const taskId = msg.task_id || '';
+                    if (!includeUser && msg.role === 'user') continue;
+                    if (msg.is_progress) continue;
+                    if (msg.system_type === 'task_summary') continue;
                     if (taskId && (msg.role === 'assistant' || msg.role === 'system')) {
                         finishLiveCard(taskId);
                     }
@@ -1002,6 +1011,17 @@ export function initChat({ ws, state, updateUnreadBadge }) {
                         taskId,
                     });
                 }
+
+                // After first load: if there is an active in-progress task with a visible
+                // live card but no assistant reply yet, show the typing indicator so the
+                // user knows work is ongoing (e.g. page reload mid-task).
+                if (!historyLoaded) {
+                    const hasOngoingTask = Array.from(liveCardRecords.values()).some(
+                        (record) => record?.root?.isConnected && !record.finished
+                    );
+                    if (hasOngoingTask) showTyping();
+                }
+
                 const wasFirstLoad = !historyLoaded;
                 historyLoaded = true;
                 // On first load (page open / restart), scroll to the latest

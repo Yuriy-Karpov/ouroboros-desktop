@@ -42,7 +42,6 @@ def test_chat_progress_updates_route_into_live_card():
     assert "if (record.finished && !isTerminalTaskPhase(nextPhase)) {" in source
     assert "const taskId = msg.task_id || '';" in source
     assert "const taskState = getTaskUiState(taskId, true);" in source
-    assert "if (taskState.completed) continue;" in source
     assert "const wasFinished = record.finished;" in source
     assert "const justFinished = record.finished && !wasFinished;" in source
     assert "if (justFinished) {" in source
@@ -506,6 +505,73 @@ def test_chat_input_overlay_buttons_css():
     # We check that the padding value is not the symmetric default
     assert "42px" in input_body, "#chat-input must have 42px left padding for attach overlay"
     assert "52px" in input_body, "#chat-input must have 52px right padding for send overlay"
+
+
+def test_sync_history_two_pass_progress_before_finalize():
+    """syncHistory must use two-pass processing: progress/summary first, then regular messages.
+
+    This guarantees that progress bubbles are not discarded when taskState.completed=true
+    is set by a prior assistant reply during the same sync iteration.
+    """
+    source = _read("web/modules/chat.js")
+
+    # Two-pass comment markers must be present
+    assert "Two-pass processing" in source, \
+        "syncHistory must use two-pass processing"
+    assert "Pass 1: progress messages and task summaries" in source, \
+        "syncHistory must have an explicit Pass 1 comment"
+    assert "Pass 2: regular messages" in source, \
+        "syncHistory must have an explicit Pass 2 comment"
+
+    # Pass 2 must skip progress and task_summary (already handled)
+    assert "if (msg.is_progress) continue;" in source, \
+        "Pass 2 must skip is_progress messages"
+    assert "if (msg.system_type === 'task_summary') continue;" in source, \
+        "Pass 2 must skip task_summary messages"
+
+    # Pass 1 must NOT check taskState.completed before calling updateLiveCardFromProgressMessage
+    # (the old guard that caused bubbles to be lost)
+    func_start = source.index("async function syncHistory(")
+    func_end = source.index("\n    async function ", func_start + 1) if "\n    async function " in source[func_start + 1:] else len(source)
+    sync_body = source[func_start:func_end]
+
+    # The two-pass structure means the old pattern is gone
+    # Verify there is no guard between Pass-1 start and updateLiveCardFromProgressMessage
+    pass1_start = sync_body.index("Pass 1: progress messages")
+    pass2_start = sync_body.index("Pass 2: regular messages")
+    pass1_body = sync_body[pass1_start:pass2_start]
+
+    assert "if (taskState.completed) continue;" not in pass1_body, \
+        "Pass 1 must not skip progress messages due to taskState.completed"
+
+
+def test_sync_history_shows_typing_for_ongoing_tasks():
+    """syncHistory must call showTyping() after first load if a live card is still active."""
+    source = _read("web/modules/chat.js")
+
+    # The post-load typing check must be present
+    assert "After first load" in source, \
+        "syncHistory must have a post-load typing indicator check"
+    assert "const hasOngoingTask = Array.from(liveCardRecords.values()).some(" in source, \
+        "Must check for active live cards after history load"
+    assert "if (hasOngoingTask) showTyping();" in source, \
+        "Must call showTyping() when an ongoing task is detected"
+    # Guard: only on first load (!historyLoaded)
+    assert "if (!historyLoaded) {" in source, \
+        "Typing restore must only happen on first page load"
+
+
+def test_update_live_card_no_forcecard_for_completed():
+    """updateLiveCardFromProgressMessage must not force-open cards for completed tasks."""
+    source = _read("web/modules/chat.js")
+
+    func_start = source.index("function updateLiveCardFromProgressMessage(")
+    func_end = source.index("\n    function ", func_start + 1)
+    func_body = source[func_start:func_end]
+
+    # Must have the guard !taskState.completed before setting forceCard
+    assert "if (taskState && !taskState.completed) taskState.forceCard = true;" in func_body, \
+        "updateLiveCardFromProgressMessage must not force-open cards for already-completed tasks"
 
 
 def test_live_card_timeline_css_scrollable():

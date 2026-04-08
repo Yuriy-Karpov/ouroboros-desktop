@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.16.4](https://img.shields.io/badge/version-4.16.4-green.svg)](VERSION)
+[![Version 4.16.5](https://img.shields.io/badge/version-4.16.5-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -376,6 +376,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.16.5 | 2026-04-08 | Fix thinking bubbles disappearing after task completion or page reload: `syncHistory` now uses two-pass processing — progress/summary messages are replayed first (building live card timelines), then assistant replies finalize the cards. `updateLiveCardFromProgressMessage` no longer force-opens cards for completed tasks during history replay. After first load, typing indicator is restored if a task is still ongoing. 3 new regression tests. |
 | 4.16.4 | 2026-04-08 | Chat input layout: move paperclip (attach) and Send buttons inside the textarea as absolute-positioned overlays (paperclip left, Send text right). No borders; transparent background normally with subtle crimson tint on hover/active. Update ARCHITECTURE.md. |
 | 4.16.3 | 2026-04-08 | Restyle chat Send button: SVG paper-plane icon with crimson glassmorphism accent, matching the attachment button. Update ARCHITECTURE.md description. |
 | 4.16.2 | 2026-04-08 | vlm_query: add `file_path` parameter (reads local image from disk, avoids passing large base64 in tool arguments — use for files in `data/uploads/`). Auto-detects MIME type from magic bytes. Fix chat Send button layout: changed from `position:absolute` overlay to flex item so it no longer overlaps textarea text. |
