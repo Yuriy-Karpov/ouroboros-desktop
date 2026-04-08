@@ -95,6 +95,37 @@ Ouroboros repository.
 
 ---
 
+## Plan Review Checklist
+
+Used by `plan_task` for pre-implementation design reviews, BEFORE any code is written.
+Reviewers see the entire repository (full repo pack) plus the proposed plan and HEAD
+snapshots of files planned to be touched.
+
+For each item, reviewers provide: verdict (PASS / RISK / FAIL), a detailed explanation
+of what was found, a concrete fix if RISK or FAIL (naming exact file/function/symbol),
+and alternative approaches when a simpler solution exists.
+
+| # | item | what to check | severity |
+|---|------|---------------|----------|
+| 1 | completeness | Are there files, tests, docs, prompts, configs, or sibling paths that must also change but are NOT mentioned in the plan? Name each one specifically. | FAIL if a required touchpoint is concretely missing; RISK if uncertain |
+| 2 | correctness | Given the existing code, will the proposed approach actually work? Are there hidden dependencies, wrong assumptions about how existing code works, or API mismatches? Name exact functions/constants/modules at risk. | FAIL if a concrete breakage can be identified; RISK if uncertain |
+| 3 | minimalism | Is there a simpler solution to the same problem with less surface area? If yes, describe the concrete alternative with the files/approach it would use. | RISK (advisory — help the implementer, not block them) |
+| 4 | bible_alignment | Does the proposed approach violate any BIBLE.md principle? Check especially P3 (LLM-First — no hardcoded behavior logic), P5 (Minimalism — no gratuitous abstraction), and P2 (Meta-Reflection — fix the class, not the instance). | FAIL if a concrete principle violation is identifiable |
+| 5 | implicit_contracts | Does the plan touch a module that other modules depend on through implicit contracts — format assumptions, expected function signatures, shared constants, protocol invariants? Name the callers/dependents that would break. | FAIL if a concrete broken caller can be named; RISK if uncertain |
+| 6 | testability | Is the plan testable? Are there obvious edge cases not covered by the stated test approach? Are there integration boundaries that require mocking or fixtures not mentioned? | RISK (advisory) |
+| 7 | architecture_fit | Does the plan solve the class of problem or is it a narrow patch leaving the root cause unresolved? If the latter, describe what architectural change would address the root cause. | RISK (advisory) |
+| 8 | forgotten_docs | If the change affects behavior described in ARCHITECTURE.md, SYSTEM.md, README.md, DEVELOPMENT.md, or BIBLE.md, is that update included in the plan? Name the specific stale artifact. | FAIL if a concrete doc/prompt becomes stale and is not mentioned |
+
+### Aggregate signal rules
+
+- **GREEN** — no FAIL items, at most advisory RISKs. Implementer can proceed.
+- **REVIEW_REQUIRED** — one or more RISK items. Implementer should read and decide.
+- **REVISE_PLAN** — one or more FAIL items. Plan must be revised before writing code.
+
+Reviewers must end with `AGGREGATE: GREEN`, `AGGREGATE: REVIEW_REQUIRED`, or `AGGREGATE: REVISE_PLAN`.
+
+---
+
 ## Intent / Scope Review Checklist
 
 Used by the full-codebase scope reviewer, which runs IN PARALLEL with the triad diff review.

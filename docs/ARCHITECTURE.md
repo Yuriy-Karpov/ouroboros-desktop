@@ -1,4 +1,4 @@
-# Ouroboros v4.16.5 — Architecture & Reference
+# Ouroboros v4.17.0 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -75,6 +75,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
       │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
+      │   ├── plan_review.py     ← Pre-implementation design review (3 parallel full-codebase reviewers, plan_task tool)
       │   ├── review.py          ← Triad diff review (3-model parallel review against CHECKLISTS.md)
       │   ├── review_helpers.py  ← Shared review helpers (section loader, file packs, intent)
       │   └── scope_review.py   ← Blocking scope reviewer (opus, fail-closed)
@@ -659,6 +660,30 @@ the constitutional guard is that the file itself must remain non-deletable.
 - `build_recent_sections()` keeps recent dialogue broad, but task-scopes recent progress/tools/events when `task_id` is available.
 - `build_health_invariants()` is split into focused helpers and now also surfaces recent provider/routing errors plus local context overflows.
 - Local-model path no longer silently slices the live system prompt. It compacts non-core sections explicitly and raises an overflow error if core context still cannot fit.
+
+### Pre-implementation design review (plan_task)
+
+- **Module**: `tools/plan_review.py`. Tool name: `plan_task`.
+- **Purpose**: review a proposed implementation plan BEFORE writing any code. Call this
+  for non-trivial tasks (>2 files or >50 lines of changes) to surface forgotten touchpoints,
+  implicit contract violations, and simpler alternatives before the first edit.
+- **Models**: uses the same 3 models from `OUROBOROS_REVIEW_MODELS` (same as commit triad).
+  Falls back to repeating `OUROBOROS_MODEL` three times if unconfigured.
+- **Inputs**: `plan` (description of what to change), `goal` (problem being solved), and
+  optional `files_to_touch` (repo-relative paths whose HEAD content is injected for context).
+- **Context per reviewer**: full repo pack (same as scope review — no char cap, binary/sensitive
+  filtered via `build_full_repo_pack`) + HEAD snapshots of planned-touch files + "Plan Review
+  Checklist" from `docs/CHECKLISTS.md` + BIBLE.md + DEVELOPMENT.md + ARCHITECTURE.md.
+- **Checklist items**: completeness, correctness, minimalism, bible_alignment,
+  implicit_contracts, testability, architecture_fit, forgotten_docs (8 items total).
+- **Output format per reviewer**: verdict (PASS/RISK/FAIL) + detailed explanation + concrete fix
+  (exact file/function/symbol) + alternative approaches if applicable.
+- **Aggregate signal**: `GREEN` (proceed), `REVIEW_REQUIRED` (risks present), or `REVISE_PLAN` (FAILs found).
+- **Non-blocking**: results are advisory only — the implementer decides what to do.
+- **Budget gate**: if the assembled prompt exceeds `_PLAN_BUDGET_TOKEN_LIMIT` (800K tokens),
+  review is skipped with a non-blocking `⚠️ PLAN_REVIEW_SKIPPED:` warning.
+- **Cost**: ~$6-8 (3 × full-repo-pack reviewers, same cost as scope review × 3).
+  Use for tasks where the alternative is 5+ blocked commits totaling $30-100.
 
 ### Review stack (advisory → triad + scope in parallel → commit)
 

@@ -47,6 +47,7 @@ TOOL_MODULES = [
     "ouroboros.tools.claude_advisory_review",
     "ouroboros.tools.scope_review",
     "ouroboros.tools.review_helpers",
+    "ouroboros.tools.plan_review",
 ]
 
 SUPERVISOR_MODULES = [
@@ -125,6 +126,8 @@ EXPECTED_TOOLS = [
     "enable_tools",
     # Advisory pre-review gate
     "advisory_pre_review", "review_status",
+    # Pre-implementation design review
+    "plan_task",
 ]
 
 
