@@ -1,4 +1,4 @@
-# Ouroboros v4.17.8 — Architecture & Reference
+# Ouroboros v4.17.9 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -74,6 +74,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── claude_advisory_review.py ← Advisory pre-review tool (read-only Claude Agent SDK)
       │   ├── commit_gate.py     ← Advisory freshness gate and commit-attempt recording (extracted from git.py)
+      │   ├── git_rollback.py    ← rollback_to_target tool (wraps git_ops.rollback_to_version)
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
       │   ├── plan_review.py     ← Pre-implementation design review (3 parallel full-codebase reviewers, plan_task tool)
       │   ├── review.py          ← Triad diff review (3-model parallel review against CHECKLISTS.md)
@@ -560,14 +561,24 @@ backward compatibility but is not the runtime authority.
   `.py` file under `ouroboros/` or `supervisor/` is added, modified, deleted, or renamed
   but no `tests/` file is staged; blocks when a new `.py` appears under those dirs but
   `docs/ARCHITECTURE.md` is not staged as a non-deleted file — all before the expensive LLM call.
-- **`pull_from_remote`**: fast-forward only pull from origin
+- **`pull_from_remote`**: fast-forward only pull from origin. Does NOT work when
+  local and remote histories are unrelated (e.g. fresh app bundle vs full remote
+  history) — use `rollback_to_target` for that case.
+- **`rollback_to_target`**: reset current branch to any tag or commit SHA. Creates
+  a rescue snapshot of uncommitted work first. Wraps `supervisor/git_ops.rollback_to_version()`.
+  Equivalent to the UI "Restore" button in Evolution → Versions. Review-exempt: restores to
+  an already-reviewed state. Useful for syncing with remote after `pull_from_remote` fails
+  due to unrelated histories: `pull_from_remote` (fetches), then
+  `rollback_to_target(target="origin/ouroboros", confirm=true)`.
 - **`restore_to_head`**: discard uncommitted changes (review-exempt)
 - **`revert_commit`**: create a revert commit for a specific SHA (review-exempt)
 - **Auto-tag**: on VERSION change, creates annotated tag `v{VERSION}` after tests pass
 - **Auto-push**: best-effort push to origin after successful commit (non-fatal)
 - **Credential helper**: `git_ops.configure_remote()` stores credentials in repo-local
   `.git/credentials`. `migrate_remote_credentials()` migrates legacy token-in-URL origins.
-  Both are wired at startup and on settings save.
+  Both are wired at startup and on settings save. Saving `GITHUB_TOKEN` + `GITHUB_REPO`
+  in Settings automatically calls `configure_remote()`, so the remote is ready immediately
+  after save — no restart required.
 
 ### Deterministic preflight checks (`_preflight_check` in `ouroboros/tools/review.py`)
 

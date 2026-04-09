@@ -48,6 +48,7 @@ TOOL_MODULES = [
     "ouroboros.tools.scope_review",
     "ouroboros.tools.review_helpers",
     "ouroboros.tools.plan_review",
+    "ouroboros.tools.git_rollback",
 ]
 
 SUPERVISOR_MODULES = [
@@ -93,7 +94,7 @@ EXPECTED_TOOLS = [
     "repo_read", "repo_write", "repo_write_commit", "repo_list", "repo_commit", "str_replace_editor",
     "data_read", "data_write", "data_list",
     "git_status", "git_diff",
-    "pull_from_remote", "restore_to_head", "revert_commit",
+    "pull_from_remote", "restore_to_head", "revert_commit", "rollback_to_target",
     "run_shell", "claude_code_edit",
     "browse_page", "browser_action",
     "web_search",

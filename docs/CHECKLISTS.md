@@ -54,6 +54,7 @@ The following tools create commits but are **exempt** from multi-model review
 
 - `restore_to_head` — discards uncommitted changes (not a commit, no review needed)
 - `revert_commit` — creates a mechanical inverse of an already-reviewed commit
+- `rollback_to_target` — resets to an existing tag/SHA (already-reviewed state)
 
 Rationale: review gates on rollbacks create a paradox where reviewers block
 the undo for missing tests/VERSION, trapping the agent with broken code.
