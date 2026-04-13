@@ -76,12 +76,18 @@ Use the interactive installer and choose `uv` or `global`.
 Linux / macOS:
 
 ```bash
-bash scripts/install.sh
+git clone https://github.com/joi-lab/ouroboros-desktop.git
+cd ouroboros-desktop
+
+scripts/install.sh
 ```
 
 Windows:
 
 ```powershell
+git clone https://github.com/joi-lab/ouroboros-desktop.git
+cd ouroboros-desktop
+
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
 

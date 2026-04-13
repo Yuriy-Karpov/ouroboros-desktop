@@ -551,6 +551,7 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         log.info("Skipping pip install in frozen (PyInstaller) mode — deps are bundled.")
         return True, "frozen:bundled"
 
+    source = ""
     try:
         env_state = resolve_python_env(REPO_DIR, base_python=sys.executable, settings=load_settings())
         result, source, _env_state = sync_project_dependencies(
@@ -576,6 +577,23 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         return True, source
     except Exception as e:
         msg = repr(e)
+        if isinstance(e, subprocess.CalledProcessError):
+            stderr = str(getattr(e, "stderr", "") or "").strip()
+            stdout = str(getattr(e, "output", "") or "").strip()
+            details: List[str] = []
+            if source:
+                details.append(f"source={source}")
+            try:
+                details.append(f"mode={env_state.mode}")
+                details.append(f"python={env_state.runtime_python}")
+            except Exception:
+                pass
+            if stderr:
+                details.append(f"stderr={stderr[-1200:]}")
+            if stdout:
+                details.append(f"stdout={stdout[-1200:]}")
+            if details:
+                msg = " | ".join(details)
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
