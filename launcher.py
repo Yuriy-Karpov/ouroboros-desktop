@@ -38,6 +38,11 @@ from ouroboros.platform_layer import (
     close_job,
     resume_process,
 )
+from ouroboros.python_env import (
+    build_python_env_vars,
+    resolve_python_env,
+    sync_project_dependencies,
+)
 
 # ---------------------------------------------------------------------------
 # Paths (single source of truth: ouroboros.config)
@@ -296,6 +301,10 @@ Thumbs.db
 .create_release.py
 .release_notes.md
 python-standalone/
+venv/
+.venv/
+.build-venv/
+.uv-cache/
 """
 
 
@@ -389,6 +398,7 @@ def _migrate_old_settings() -> None:
     migrated = {}
     env_keys = [
         "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+        "OUROBOROS_PYTHON_ENV_MODE",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_FALLBACK", "TOTAL_BUDGET", "OUROBOROS_MAX_WORKERS",
         "OUROBOROS_SOFT_TIMEOUT_SEC", "OUROBOROS_HARD_TIMEOUT_SEC",
@@ -426,15 +436,19 @@ def _migrate_old_settings() -> None:
 
 def _install_deps() -> None:
     """Install Python dependencies for the agent."""
-    req_file = REPO_DIR / "requirements.txt"
-    if not req_file.exists():
-        return
     log.info("Installing agent dependencies...")
     try:
-        subprocess.run(
-            [EMBEDDED_PYTHON, "-m", "pip", "install", "-q", "-r", str(req_file)],
-            timeout=300, capture_output=True,
+        settings = _load_settings()
+        env_state = resolve_python_env(REPO_DIR, base_python=EMBEDDED_PYTHON, settings=settings)
+        result, _source, _env_state = sync_project_dependencies(
+            env_state,
+            capture_output=True,
+            quiet=True,
+            timeout=300,
         )
+        if result.returncode != 0:
+            stderr = (result.stderr or result.stdout or "").strip()
+            log.warning("Dependency install failed: %s", stderr[-500:] if stderr else result.returncode)
     except Exception as e:
         log.warning("Dependency install failed: %s", e)
 
@@ -451,8 +465,9 @@ _shutdown_event = threading.Event()
 def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     """Start the agent server.py as a subprocess."""
     global _agent_proc, _agent_job
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(REPO_DIR)
+    settings = _load_settings()
+    env_state = resolve_python_env(REPO_DIR, base_python=EMBEDDED_PYTHON, settings=settings)
+    env = build_python_env_vars(env_state, env=os.environ.copy(), pythonpath=REPO_DIR)
     env["OUROBOROS_SERVER_PORT"] = str(port)
     env["OUROBOROS_DATA_DIR"] = str(DATA_DIR)
     env["OUROBOROS_REPO_DIR"] = str(REPO_DIR)
@@ -460,16 +475,15 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     env["OUROBOROS_MANAGED_BY_LAUNCHER"] = "1"
 
     # Pass settings as env vars
-    settings = _load_settings()
     for key, val in settings.items():
         if val:
             env[key] = str(val)
 
     server_py = REPO_DIR / "server.py"
-    log.info("Starting agent: %s %s (port=%d)", EMBEDDED_PYTHON, server_py, port)
+    log.info("Starting agent: %s %s (port=%d)", env_state.runtime_python, server_py, port)
 
     proc = _hidden_popen(
-        [EMBEDDED_PYTHON, str(server_py)],
+        [env_state.runtime_python, str(server_py)],
         cwd=str(REPO_DIR),
         env=env,
         stdout=subprocess.PIPE,

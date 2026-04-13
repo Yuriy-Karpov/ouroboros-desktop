@@ -10,6 +10,13 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Any, Callable
 
+from ouroboros.python_env import (
+    build_python_env_vars,
+    resolve_python_env,
+    sync_project_dependencies,
+    install_python_packages,
+)
+
 
 _CORE_SYNC_PATHS = (
     "ouroboros/safety.py",
@@ -56,16 +63,22 @@ Thumbs.db
 .create_release.py
 .release_notes.md
 python-standalone/
+venv/
+.venv/
+.build-venv/
+.uv-cache/
 """
 
 MANAGED_BUNDLE_PATHS = (
     "VERSION",
     ".gitignore",
+    ".ouroboros-python-env",
     "BIBLE.md",
     "README.md",
     "requirements.txt",
     "requirements-launcher.txt",
     "pyproject.toml",
+    "uv.lock",
     "Makefile",
     "server.py",
     "ouroboros",
@@ -298,6 +311,7 @@ def _migrate_old_settings(context: BootstrapContext) -> None:
         "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
         "ANTHROPIC_API_KEY",
+        "OUROBOROS_PYTHON_ENV_MODE",
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
         "OUROBOROS_NETWORK_PASSWORD", "OUROBOROS_FILE_BROWSER_DEFAULT",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
@@ -321,13 +335,24 @@ def _migrate_old_settings(context: BootstrapContext) -> None:
 def install_deps(context: BootstrapContext) -> None:
     """Install/update Python deps inside the embedded interpreter."""
     try:
-        requirements = context.repo_dir / "requirements.txt"
-        if requirements.exists():
-            context.hidden_run(
-                [context.embedded_python, "-m", "pip", "install", "-r", str(requirements)],
-                timeout=240,
-                capture_output=True,
-            )
+        settings = {}
+        if context.settings_path.exists():
+            try:
+                import json
+                raw = json.loads(context.settings_path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    settings = raw
+            except Exception:
+                settings = {}
+        env_state = resolve_python_env(context.repo_dir, base_python=context.embedded_python, settings=settings)
+        result, _source, _env_state = sync_project_dependencies(
+            env_state,
+            capture_output=True,
+            timeout=240,
+        )
+        if result.returncode != 0:
+            stderr = (result.stderr or result.stdout or "").strip()
+            context.log.warning("Dependency install/update failed: %s", stderr[-500:] if stderr else result.returncode)
     except Exception as exc:
         context.log.warning("Dependency install/update failed: %s", exc)
 
@@ -343,13 +368,25 @@ def verify_claude_runtime(context: BootstrapContext) -> bool:
     """
     import sys as _sys
     cli_name = "claude.exe" if _sys.platform == "win32" else "claude"
+    settings = {}
+    if context.settings_path.exists():
+        try:
+            import json
+            raw = json.loads(context.settings_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                settings = raw
+        except Exception:
+            settings = {}
+    env_state = resolve_python_env(context.repo_dir, base_python=context.embedded_python, settings=settings)
+    runtime_env = build_python_env_vars(env_state)
     try:
         result = context.hidden_run(
-            [context.embedded_python, "-c",
+            [env_state.runtime_python, "-c",
              "import claude_agent_sdk; "
              "from pathlib import Path; "
              f"cli = Path(claude_agent_sdk.__file__).parent / '_bundled' / '{cli_name}'; "
              "print('ok' if cli.exists() else 'no_cli')"],
+            env=runtime_env,
             capture_output=True, text=True, timeout=30,
         )
         stdout = (result.stdout or "").strip()
@@ -362,10 +399,12 @@ def verify_claude_runtime(context: BootstrapContext) -> bool:
 
     context.log.info("Repairing Claude runtime baseline...")
     try:
-        repair = context.hidden_run(
-            [context.embedded_python, "-m", "pip", "install", "--upgrade", _CLAUDE_SDK_BASELINE],
+        repair, _env_state = install_python_packages(
+            env_state,
+            [_CLAUDE_SDK_BASELINE],
             timeout=120,
             capture_output=True,
+            upgrade=True,
         )
         if repair.returncode != 0:
             context.log.warning("Claude runtime repair pip returned exit %d", repair.returncode)

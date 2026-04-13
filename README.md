@@ -67,13 +67,85 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 
 ### Setup
 
+There are two setup paths.
+
+#### Quick setup (recommended):
+
+Use the interactive installer and choose `uv` or `global`.
+
+Linux / macOS:
+
+```bash
+bash scripts/install.sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+```
+
+The installer shows a 2-option terminal menu where you:
+- move with `↑` / `↓`
+- confirm with `Enter`
+- the selected option is highlighted in green and marked with `●`
+
+If you choose `uv` and it is not installed yet, the installer stops and prints
+the official installation page:
+- [uv installation docs](https://docs.astral.sh/uv/getting-started/installation/)
+
+This saves the selected mode into `.ouroboros-python-env`, so the choice exists
+before the first app launch and is reused by the build/download scripts.
+
+#### Manual setup:
+
+Manual `uv` + `.venv`:
+
 ```bash
 git clone https://github.com/joi-lab/ouroboros-desktop.git
 cd ouroboros-desktop
+echo uv > .ouroboros-python-env
+uv venv
+uv sync --extra browser
+```
+
+Manual global `pip`:
+
+```bash
+git clone https://github.com/joi-lab/ouroboros-desktop.git
+cd ouroboros-desktop
+echo global > .ouroboros-python-env
+pip install -r requirements.txt
+```
+
+Important: if you install manually, you must also set the mode file so the
+agent knows which environment model is in use:
+
+- `.ouroboros-python-env` = `uv`
+- `.ouroboros-python-env` = `global`
+
+Windows manual examples:
+
+```powershell
+Set-Content .ouroboros-python-env uv
+uv venv
+uv sync --extra browser
+```
+
+```powershell
+Set-Content .ouroboros-python-env global
 pip install -r requirements.txt
 ```
 
 ### Run
+
+If you installed in `uv` mode:
+
+```bash
+uv run python server.py
+```
+
+If you installed in legacy global mode:
 
 ```bash
 python server.py
@@ -82,6 +154,14 @@ python server.py
 Then open `http://127.0.0.1:8765` in your browser. The setup wizard will guide you through API key configuration.
 
 You can also override the bind address and port:
+
+`uv` mode:
+
+```bash
+uv run python server.py --host 127.0.0.1 --port 9000
+```
+
+Legacy global mode:
 
 ```bash
 python server.py --host 127.0.0.1 --port 9000
@@ -127,6 +207,14 @@ The Settings page also includes:
 ### Run Tests
 
 ```bash
+uv sync --extra browser
+make test
+```
+
+Legacy global mode:
+
+```bash
+pip install -r requirements.txt
 make test
 ```
 
@@ -144,6 +232,12 @@ Build the image:
 
 ```bash
 docker build -t ouroboros-web .
+```
+
+Build the image in `uv` mode:
+
+```bash
+docker build --build-arg PYTHON_ENV_MODE=uv -t ouroboros-web .
 ```
 
 Run on the default port:
@@ -198,6 +292,15 @@ docker run --rm -p 8765:8765 \
 bash scripts/download_python_standalone.sh
 OUROBOROS_SIGN=0 bash build.sh
 ```
+
+Use `OUROBOROS_PYTHON_ENV_MODE=uv` to build with `uv`-managed virtualenvs for the
+local build environment and runtime sync:
+
+```bash
+bash scripts/download_python_standalone.sh
+OUROBOROS_PYTHON_ENV_MODE=uv OUROBOROS_SIGN=0 bash build.sh
+```
+
 
 Output: `dist/Ouroboros-<VERSION>.dmg`
 

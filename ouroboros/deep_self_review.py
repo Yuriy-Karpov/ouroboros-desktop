@@ -83,7 +83,7 @@ def build_review_pack(
             raise RuntimeError("dulwich index is empty — cannot build review pack")
     except ImportError:
         return "", {"file_count": 0, "total_chars": 0, "skipped": [
-            "FATAL: dulwich not installed. Run: pip install dulwich"
+            "FATAL: dulwich not installed. Run: uv sync --extra browser or legacy mode: pip install dulwich"
         ]}
     except Exception as e:
         return "", {"file_count": 0, "total_chars": 0, "skipped": [f"FATAL: {e}"]}

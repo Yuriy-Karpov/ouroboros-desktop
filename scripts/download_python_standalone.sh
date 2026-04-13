@@ -7,6 +7,15 @@ set -e
 RELEASE="20260211"
 PY_VERSION="3.10.19"
 DEST="python-standalone"
+MODE_FILE=".ouroboros-python-env"
+if [ -n "${OUROBOROS_PYTHON_ENV_MODE:-}" ]; then
+    PYTHON_ENV_MODE="$OUROBOROS_PYTHON_ENV_MODE"
+elif [ -f "$MODE_FILE" ]; then
+    PYTHON_ENV_MODE="$(tr -d '[:space:]' < "$MODE_FILE")"
+else
+    PYTHON_ENV_MODE="global"
+fi
+UV_BIN="${OUROBOROS_UV_BIN:-uv}"
 
 OS=$(uname -s)
 ARCH=$(uname -m)
@@ -50,8 +59,14 @@ mv _python_tmp/python "$DEST"
 rm -rf _python_tmp
 
 echo ""
-echo "=== Installing agent dependencies ==="
-"${DEST}/bin/pip3" install --quiet -r requirements.txt
+echo "=== Syncing agent dependencies ==="
+if [ "$PYTHON_ENV_MODE" = "uv" ]; then
+    "$UV_BIN" venv --allow-existing --python "${DEST}/bin/python3" ".venv"
+    VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH" UV_PROJECT_ENVIRONMENT="$PWD/.venv" \
+        "$UV_BIN" sync --active --extra browser
+else
+    "${DEST}/bin/pip3" install --quiet -r requirements.txt
+fi
 
 echo ""
 echo "=== Done ==="

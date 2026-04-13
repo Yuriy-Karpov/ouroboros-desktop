@@ -1065,7 +1065,7 @@ starlette, uvicorn, websockets, dulwich, huggingface_hub. Data bundles include
 ### Docker (`Dockerfile`)
 
 ```
-python:3.10-slim + git → pip install requirements → python server.py
+python:3.10-slim + git → `uv sync --extra browser` (or legacy `pip install -r requirements.txt`) → python server.py
 Binds 0.0.0.0:8765, sets OUROBOROS_FILE_BROWSER_DEFAULT=/app.
 ```
 

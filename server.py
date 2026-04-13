@@ -31,6 +31,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 import uvicorn
 
 from ouroboros import get_version
+from ouroboros.python_env import install_python_packages, resolve_python_env
 from ouroboros.file_browser_api import file_browser_routes
 from ouroboros.model_catalog_api import api_model_catalog
 from ouroboros.server_control import (
@@ -790,23 +791,14 @@ async def api_claude_code_install(request: Request) -> JSONResponse:
     always reinstalls/upgrades to the pinned baseline version.
     """
     try:
-        import subprocess as _sp
-        import sys as _sys
-
-        interpreter = _sys.executable
-        try:
-            from ouroboros.platform_layer import resolve_claude_runtime
-            rt = resolve_claude_runtime()
-            if rt.interpreter_path:
-                interpreter = rt.interpreter_path
-        except Exception:
-            pass
-
-        result = await asyncio.to_thread(
-            lambda: _sp.run(
-                [interpreter, "-m", "pip", "install", "--upgrade",
-                 "claude-agent-sdk>=0.1.50"],
-                capture_output=True, text=True, timeout=120,
+        env_state = resolve_python_env(REPO_DIR, base_python=sys.executable, settings=load_settings())
+        result, _env_state = await asyncio.to_thread(
+            lambda: install_python_packages(
+                env_state,
+                ["claude-agent-sdk>=0.1.50"],
+                capture_output=True,
+                timeout=120,
+                upgrade=True,
             )
         )
         if result.returncode == 0:

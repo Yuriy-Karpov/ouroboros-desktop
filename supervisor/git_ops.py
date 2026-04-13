@@ -18,6 +18,12 @@ import sys
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.config import load_settings
+from ouroboros.python_env import (
+    build_python_env_vars,
+    resolve_python_env,
+    sync_project_dependencies,
+)
 from supervisor.state import (
     load_state, save_state, append_jsonl, atomic_write_text,
 )
@@ -173,6 +179,10 @@ Thumbs.db
 .create_release.py
 .release_notes.md
 python-standalone/
+venv/
+.venv/
+.build-venv/
+.uv-cache/
 """
 
 
@@ -541,17 +551,21 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         log.info("Skipping pip install in frozen (PyInstaller) mode — deps are bundled.")
         return True, "frozen:bundled"
 
-    req_path = REPO_DIR / "requirements.txt"
-    cmd: List[str] = [sys.executable, "-m", "pip", "install", "-q"]
-    source = ""
-    if req_path.exists():
-        cmd += ["-r", str(req_path)]
-        source = f"requirements:{req_path}"
-    else:
-        cmd += ["openai>=1.0.0", "requests"]
-        source = "fallback:minimal"
     try:
-        subprocess.run(cmd, cwd=str(REPO_DIR), check=True, timeout=120)
+        env_state = resolve_python_env(REPO_DIR, base_python=sys.executable, settings=load_settings())
+        result, source, _env_state = sync_project_dependencies(
+            env_state,
+            capture_output=True,
+            quiet=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                ["dependency-sync"],
+                output=result.stdout,
+                stderr=result.stderr,
+            )
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
@@ -577,9 +591,12 @@ def import_test() -> Dict[str, Any]:
         log.info("Skipping import_test in frozen (PyInstaller) mode — modules are bundled.")
         return {"ok": True, "skipped": "frozen"}
 
+    env_state = resolve_python_env(REPO_DIR, base_python=sys.executable, settings=load_settings())
+    env = build_python_env_vars(env_state, pythonpath=REPO_DIR)
     r = subprocess.run(
-        [sys.executable, "-c", "import ouroboros, ouroboros.agent; print('import_ok')"],
+        [env_state.runtime_python, "-c", "import ouroboros, ouroboros.agent; print('import_ok')"],
         cwd=str(REPO_DIR),
+        env=env,
         capture_output=True, text=True,
     )
     return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr,

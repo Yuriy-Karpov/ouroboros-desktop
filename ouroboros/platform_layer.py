@@ -462,6 +462,30 @@ def _find_bundled_cli(sdk_path: str) -> Optional[str]:
     return None
 
 
+def _is_app_managed_sdk_path(path: str) -> bool:
+    """Return True when the SDK lives in an app-managed runtime."""
+    try:
+        resolved = pathlib.Path(path).resolve()
+    except Exception:
+        return False
+
+    parts_lower = [part.lower() for part in resolved.parts]
+    if "python-standalone" in parts_lower:
+        return True
+
+    repo_hint = str(os.environ.get("OUROBOROS_REPO_DIR", "") or "").strip()
+    if not repo_hint:
+        return False
+
+    try:
+        repo_root = pathlib.Path(repo_hint).resolve()
+        resolved.relative_to(repo_root)
+    except Exception:
+        return False
+
+    return ".venv" in parts_lower or "venv" in parts_lower
+
+
 def _probe_cli_version(cli_path: str) -> str:
     """Run ``claude -v`` and return the version string, or empty on failure."""
     try:
@@ -491,10 +515,7 @@ def _detect_legacy_user_site_sdk() -> tuple[bool, str, str]:
     sdk_path = _find_sdk_package_path()
     if not sdk_path:
         return False, "", ""
-    normalised = pathlib.Path(sdk_path).resolve()
-    parts_lower = [p.lower() for p in normalised.parts]
-    in_app_bundle = "python-standalone" in parts_lower
-    if in_app_bundle:
+    if _is_app_managed_sdk_path(sdk_path):
         return False, "", ""
     try:
         import importlib.metadata
@@ -533,9 +554,7 @@ def resolve_claude_runtime() -> ClaudeRuntimeState:
 
     # Determine if app-managed (SDK lives inside python-standalone)
     if sdk_path:
-        normalised = pathlib.Path(sdk_path).resolve()
-        parts_lower = [p.lower() for p in normalised.parts]
-        state.app_managed = "python-standalone" in parts_lower
+        state.app_managed = _is_app_managed_sdk_path(sdk_path)
 
     # Bundled CLI
     if sdk_path:

@@ -430,7 +430,7 @@ def _run_claude_advisory(
     except ImportError:
         return [], (
             "⚠️ ADVISORY_ERROR: claude-agent-sdk not installed. "
-            "Install: pip install 'ouroboros[claude-sdk]'"
+            "Install: uv sync --extra browser or legacy mode: pip install 'claude-agent-sdk>=0.1.50'"
         )
     except Exception as e:
         err_msg = _format_advisory_error(

@@ -450,7 +450,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "",
         except ImportError:
             return (
                 "⚠️ CLAUDE_CODE_UNAVAILABLE: claude-agent-sdk not installed. "
-                "Install: pip install 'ouroboros[claude-sdk]'"
+                "Install: uv sync --extra browser or legacy mode: pip install 'claude-agent-sdk>=0.1.50'"
             )
         except Exception as e:
             import sys

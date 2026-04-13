@@ -128,7 +128,7 @@ class LocalModelManager:
         except ImportError:
             raise RuntimeError(
                 "huggingface_hub is required for downloading models. "
-                "Install with: pip install huggingface_hub"
+                "Install with: uv sync --extra browser or legacy mode: pip install huggingface_hub"
             )
 
         if not filename:
@@ -211,9 +211,9 @@ class LocalModelManager:
                 self._status = "error"
                 details = (probe.stderr or probe.stdout or "").strip()
                 if IS_MACOS:
-                    hint = 'CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python[server]'
+                    hint = "uv sync --extra browser --extra local-model or legacy mode: CMAKE_ARGS='-DGGML_METAL=on' pip install 'llama-cpp-python[server]'"
                 else:
-                    hint = "pip install llama-cpp-python[server]"
+                    hint = "uv sync --extra browser --extra local-model or legacy mode: pip install 'llama-cpp-python[server]'"
                 self._error = f"llama-cpp-python is not installed or failed to import. Install with: {hint}"
                 if details:
                     self._error += f": {details[-500:]}"

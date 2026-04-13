@@ -8,16 +8,21 @@ import subprocess
 import sys
 from typing import Any
 
+from ouroboros.config import load_settings
+from ouroboros.python_env import build_python_env_vars, resolve_python_env
+
 
 def restart_current_process(host: str, port: int, *, repo_dir: pathlib.Path, log: Any) -> None:
-    env = os.environ.copy()
+    settings = load_settings()
+    env_state = resolve_python_env(repo_dir, base_python=sys.executable, settings=settings)
+    env = build_python_env_vars(env_state, env=os.environ.copy(), pythonpath=repo_dir)
     env["OUROBOROS_SERVER_HOST"] = str(host)
     env["OUROBOROS_SERVER_PORT"] = str(port)
     env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
-    argv = [sys.executable, *sys.argv]
-    log.info("Re-executing direct server mode on %s:%d", host, port)
+    argv = [env_state.runtime_python, *sys.argv]
+    log.info("Re-executing direct server mode on %s:%d via %s", host, port, env_state.runtime_python)
     try:
-        os.execvpe(sys.executable, argv, env)
+        os.execvpe(env_state.runtime_python, argv, env)
     except Exception:
         log.exception("Direct re-exec failed; attempting spawned restart fallback.")
         try:

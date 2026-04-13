@@ -20,6 +20,9 @@ import sys
 import threading
 from typing import Any, Dict, List
 
+from ouroboros.config import REPO_DIR, load_settings
+from ouroboros.python_env import build_python_env_vars, install_python_packages, resolve_python_env
+
 try:
     from playwright_stealth import Stealth
     _HAS_STEALTH = True
@@ -46,10 +49,13 @@ def _ensure_playwright_installed():
         if getattr(sys, 'frozen', False):
             raise RuntimeError(
                 "Browser tools require Playwright, which is not bundled. "
-                "Install manually: pip3 install playwright && python3 -m playwright install chromium"
+                "Install manually: uv sync --extra browser or legacy mode: pip install playwright playwright-stealth"
             )
         log.info("Playwright not found, installing...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+        env_state = resolve_python_env(REPO_DIR, base_python=sys.executable, settings=load_settings())
+        result, env_state = install_python_packages(env_state, ["playwright"], timeout=180)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "Playwright install failed").strip())
 
     try:
         from playwright.sync_api import sync_playwright
@@ -60,11 +66,13 @@ def _ensure_playwright_installed():
         if getattr(sys, 'frozen', False):
             raise RuntimeError(
                 "Playwright chromium binary not found. "
-                "Install manually: python3 -m playwright install chromium"
+                "Install manually: python -m playwright install chromium"
             )
         log.info("Installing Playwright chromium binary...")
-        subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
-        subprocess.check_call([sys.executable, "-m", "playwright", "install-deps", "chromium"])
+        env_state = resolve_python_env(REPO_DIR, base_python=sys.executable, settings=load_settings())
+        runtime_env = build_python_env_vars(env_state)
+        subprocess.check_call([env_state.runtime_python, "-m", "playwright", "install", "chromium"], env=runtime_env)
+        subprocess.check_call([env_state.runtime_python, "-m", "playwright", "install-deps", "chromium"], env=runtime_env)
 
     _playwright_ready = True
 

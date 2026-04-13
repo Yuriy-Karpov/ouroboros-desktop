@@ -678,6 +678,15 @@ class TestClaudeRuntimeResolution:
         detected, path, ver = _detect_legacy_user_site_sdk()
         assert isinstance(detected, bool)
 
+    def test_app_managed_detection_accepts_repo_venv(self, monkeypatch, tmp_path):
+        from ouroboros.platform_layer import _is_app_managed_sdk_path
+
+        sdk_path = tmp_path / ".venv" / "lib" / "python3.11" / "site-packages" / "claude_agent_sdk"
+        sdk_path.mkdir(parents=True)
+        monkeypatch.setenv("OUROBOROS_REPO_DIR", str(tmp_path))
+
+        assert _is_app_managed_sdk_path(str(sdk_path)) is True
+
     def test_find_bundled_cli_nonexistent_path(self):
         """_find_bundled_cli returns None for a non-existent SDK path."""
         from ouroboros.platform_layer import _find_bundled_cli
@@ -757,19 +766,26 @@ class TestVerifyClaudeRuntime:
         assert result is True
         assert len(calls) == 1
 
-    def test_verify_triggers_repair_when_missing(self, tmp_path):
+    def test_verify_triggers_repair_when_missing(self, tmp_path, monkeypatch):
         """When SDK check fails, repair install is attempted."""
         import logging
+        from types import SimpleNamespace
+        import ouroboros.launcher_bootstrap as launcher_bootstrap_module
         from ouroboros.launcher_bootstrap import BootstrapContext, verify_claude_runtime
 
         calls = []
 
         def fake_run(cmd, **kw):
             calls.append(cmd)
-            from types import SimpleNamespace
             if "-c" in cmd:
                 return SimpleNamespace(returncode=1, stdout="", stderr="ModuleNotFoundError")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def fake_install(state, packages, **kw):
+            calls.append(["install_python_packages", *packages])
+            return SimpleNamespace(returncode=0, stdout="", stderr=""), state
+
+        monkeypatch.setattr(launcher_bootstrap_module, "install_python_packages", fake_install)
 
         ctx = BootstrapContext(
             bundle_dir=tmp_path,
@@ -785,4 +801,4 @@ class TestVerifyClaudeRuntime:
         result = verify_claude_runtime(ctx)
         assert result is True
         assert len(calls) == 2
-        assert "pip" in str(calls[1])
+        assert "install_python_packages" in str(calls[1])

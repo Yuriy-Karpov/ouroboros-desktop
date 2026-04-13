@@ -51,6 +51,9 @@ _extra_datas = []
 _extra_binaries = []
 _extra_hiddenimports = []
 
+if os.path.exists("uv.lock"):
+    _extra_datas.append(("uv.lock", "."))
+
 if _is_windows:
     for _pkg in ('pythonnet', 'clr_loader'):
         try:
@@ -68,6 +71,7 @@ a = Analysis(
     datas=[
         ('VERSION', '.'),
         ('.gitignore', '.'),
+        ('.ouroboros-python-env', '.'),
         ('BIBLE.md', '.'),
         ('README.md', '.'),
         ('requirements.txt', '.'),

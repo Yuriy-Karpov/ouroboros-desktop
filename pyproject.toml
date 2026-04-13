@@ -50,8 +50,23 @@ Issues = "https://github.com/joi-lab/ouroboros-desktop/issues"
 claude-sdk = ["claude-agent-sdk>=0.1.50"]
 browser = ["playwright", "playwright-stealth"]
 local-model = ["llama-cpp-python"]
+launcher = [
+    "pywebview==5.4",
+    "pythonnet==3.0.5; platform_system == 'Windows'",
+    "clr_loader==0.2.7.post0; platform_system == 'Windows'",
+]
 build = ["pyinstaller>=6.0"]
-all = ["claude-agent-sdk>=0.1.50", "playwright", "playwright-stealth", "llama-cpp-python", "huggingface_hub"]
+all = [
+    "claude-agent-sdk>=0.1.50",
+    "playwright",
+    "playwright-stealth",
+    "llama-cpp-python",
+    "huggingface_hub",
+    "pywebview==5.4",
+    "pyinstaller>=6.0",
+    "pythonnet==3.0.5; platform_system == 'Windows'",
+    "clr_loader==0.2.7.post0; platform_system == 'Windows'",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

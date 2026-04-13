@@ -129,6 +129,38 @@ def test_restart_current_process_falls_back_to_spawn_on_exec_failure(monkeypatch
     assert spawned["cwd"] == str(server_module.REPO_DIR)
 
 
+def test_restart_current_process_prefers_repo_venv_when_uv_mode_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUROBOROS_REPO_DIR", str(tmp_path))
+    server_module = _reload_server(monkeypatch, tmp_path)
+    called = {}
+    import ouroboros.server_control as server_control_module
+
+    venv_python = tmp_path / ".venv" / ("Scripts" if sys.platform == "win32" else "bin") / (
+        "python.exe" if sys.platform == "win32" else "python"
+    )
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"OUROBOROS_PYTHON_ENV_MODE": "uv"}),
+        encoding="utf-8",
+    )
+
+    def _fake_execvpe(executable, argv, env):
+        called["executable"] = executable
+        called["argv"] = argv
+        called["env"] = env
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(server_control_module.os, "execvpe", _fake_execvpe)
+    monkeypatch.setattr(server_control_module.subprocess, "Popen", lambda *args, **kwargs: object())
+
+    server_module._restart_current_process("127.0.0.1", 9032)
+
+    assert called["executable"] == str(venv_python)
+    assert called["argv"][0] == str(venv_python)
+    assert called["env"]["VIRTUAL_ENV"] == str(tmp_path / ".venv")
+
+
 def test_api_settings_post_rejects_local_only_unrouted_runtime(monkeypatch, tmp_path):
     for key in (
         "OPENROUTER_API_KEY",

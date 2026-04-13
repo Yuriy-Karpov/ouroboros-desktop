@@ -7,6 +7,15 @@ $Release = "20260211"
 $PyVersion = "3.10.19"
 $Dest = "python-standalone"
 $Platform = "x86_64-pc-windows-msvc"
+$ModeFile = ".ouroboros-python-env"
+$PythonEnvMode = if ($env:OUROBOROS_PYTHON_ENV_MODE) {
+    $env:OUROBOROS_PYTHON_ENV_MODE
+} elseif (Test-Path $ModeFile) {
+    (Get-Content $ModeFile -Raw).Trim()
+} else {
+    "global"
+}
+$UvBin = if ($env:OUROBOROS_UV_BIN) { $env:OUROBOROS_UV_BIN } else { "uv" }
 
 $Filename = "cpython-${PyVersion}+${Release}-${Platform}-install_only_stripped.tar.gz"
 $Url = "https://github.com/astral-sh/python-build-standalone/releases/download/${Release}/${Filename}"
@@ -29,13 +38,25 @@ Move-Item "_python_tmp\python" $Dest
 Remove-Item -Recurse -Force "_python_tmp"
 
 Write-Host ""
-Write-Host "=== Installing agent dependencies ==="
-& "${Dest}\python.exe" -m pip install --quiet -r requirements.txt
+Write-Host "=== Syncing agent dependencies ==="
+if ($PythonEnvMode -eq "uv") {
+    & $UvBin venv --allow-existing --python "${Dest}\python.exe" ".venv"
+    $env:VIRTUAL_ENV = (Join-Path (Get-Location) ".venv")
+    $env:UV_PROJECT_ENVIRONMENT = $env:VIRTUAL_ENV
+    $env:PATH = "$env:VIRTUAL_ENV\Scripts;$env:PATH"
+    & $UvBin sync --active --extra browser
+} else {
+    & "${Dest}\python.exe" -m pip install --quiet -r requirements.txt
+}
 
 Write-Host ""
 Write-Host "=== Installing optional: local model support ==="
 try {
-    & "${Dest}\python.exe" -m pip install --quiet "llama-cpp-python[server]" 2>&1
+    if ($PythonEnvMode -eq "uv") {
+        & $UvBin pip install --python ".venv\Scripts\python.exe" "llama-cpp-python[server]" 2>&1
+    } else {
+        & "${Dest}\python.exe" -m pip install --quiet "llama-cpp-python[server]" 2>&1
+    }
     Write-Host "llama-cpp-python installed successfully"
 } catch {
     Write-Warning "llama-cpp-python install failed - local model support will not be available"
