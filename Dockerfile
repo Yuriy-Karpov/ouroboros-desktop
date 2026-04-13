@@ -17,8 +17,7 @@ ENV APP_HOME=/app
 WORKDIR ${APP_HOME}
 
 # Runtime environment selection
-ENV OUROBOROS_PYTHON_ENV_MODE=${PYTHON_ENV_MODE} \
-    UV_PROJECT_ENVIRONMENT=${APP_HOME}/.venv \
+ENV UV_PROJECT_ENVIRONMENT=${APP_HOME}/.venv \
     VIRTUAL_ENV=${APP_HOME}/.venv \
     PATH="${APP_HOME}/.venv/bin:${PATH}"
 
@@ -28,6 +27,7 @@ RUN if [ "$PYTHON_ENV_MODE" = "uv" ]; then pip install --no-cache-dir uv; fi
 # Copy project metadata first so uv dependency sync can be cached
 COPY pyproject.toml README.md requirements.txt VERSION ./
 COPY uv.lock ./
+RUN printf '%s\n' "$PYTHON_ENV_MODE" > .ouroboros-python-env
 
 # Pre-create the project venv and install only third-party deps in uv mode.
 # The application source is copied afterwards and runs directly from /app.

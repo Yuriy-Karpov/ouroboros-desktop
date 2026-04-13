@@ -74,14 +74,6 @@ def current_env_mode(
     settings: Optional[dict] = None,
     env: Optional[dict] = None,
 ) -> str:
-    env_map = env or os.environ
-    if settings:
-        raw = settings.get("OUROBOROS_PYTHON_ENV_MODE")
-        if raw not in (None, ""):
-            return normalize_env_mode(str(raw))
-    raw_env = env_map.get("OUROBOROS_PYTHON_ENV_MODE")
-    if raw_env not in (None, ""):
-        return normalize_env_mode(raw_env)
     return read_repo_env_mode(repo_dir)
 
 
@@ -110,7 +102,7 @@ def resolve_python_env(
     env: Optional[dict] = None,
 ) -> PythonEnvState:
     repo_root = pathlib.Path(repo_dir)
-    mode = current_env_mode(repo_root, settings=settings, env=env)
+    mode = current_env_mode(repo_root)
     base = str(pathlib.Path(base_python or sys.executable))
     venv_dir = repo_root / ".venv"
     runtime = base
@@ -135,7 +127,6 @@ def build_python_env_vars(
     pythonpath: pathlib.Path | str | None = None,
 ) -> dict:
     merged = dict(env or os.environ.copy())
-    merged["OUROBOROS_PYTHON_ENV_MODE"] = state.mode
     if pythonpath is not None:
         merged["PYTHONPATH"] = str(pythonpath)
     if state.uses_uv:

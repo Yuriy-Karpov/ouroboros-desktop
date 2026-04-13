@@ -22,6 +22,7 @@ def test_normalize_env_mode_supports_uv_aliases():
 
 
 def test_resolve_python_env_prefers_repo_venv_when_enabled(tmp_path):
+    write_repo_env_mode(tmp_path, "uv")
     bin_dir = "Scripts" if sys.platform == "win32" else "bin"
     python_name = "python.exe" if sys.platform == "win32" else "python"
     venv_python = tmp_path / ".venv" / bin_dir / python_name
@@ -31,7 +32,6 @@ def test_resolve_python_env_prefers_repo_venv_when_enabled(tmp_path):
     state = resolve_python_env(
         tmp_path,
         base_python="/usr/bin/python3",
-        settings={"OUROBOROS_PYTHON_ENV_MODE": "uv"},
     )
 
     assert state.mode == ENV_MODE_UV
@@ -39,6 +39,7 @@ def test_resolve_python_env_prefers_repo_venv_when_enabled(tmp_path):
 
 
 def test_build_python_env_vars_exports_virtualenv(tmp_path):
+    write_repo_env_mode(tmp_path, "uv")
     venv_dir = tmp_path / ".venv"
     bin_dir = "Scripts" if sys.platform == "win32" else "bin"
     python_name = "python.exe" if sys.platform == "win32" else "python"
@@ -49,7 +50,6 @@ def test_build_python_env_vars_exports_virtualenv(tmp_path):
     state = resolve_python_env(
         tmp_path,
         base_python="/usr/bin/python3",
-        settings={"OUROBOROS_PYTHON_ENV_MODE": "uv"},
     )
     env = build_python_env_vars(state, env={"PATH": "/usr/bin"})
 
@@ -67,4 +67,15 @@ def test_resolve_python_env_reads_repo_mode_file(tmp_path):
     )
 
     assert read_repo_env_mode(tmp_path) == ENV_MODE_UV
+    assert state.mode == ENV_MODE_UV
+
+
+def test_repo_mode_file_beats_stale_global_setting(tmp_path):
+    write_repo_env_mode(tmp_path, "uv")
+
+    state = resolve_python_env(
+        tmp_path,
+        base_python="/usr/bin/python3",
+    )
+
     assert state.mode == ENV_MODE_UV

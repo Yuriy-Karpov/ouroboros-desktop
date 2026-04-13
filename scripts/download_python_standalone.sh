@@ -8,9 +8,7 @@ RELEASE="20260211"
 PY_VERSION="3.10.19"
 DEST="python-standalone"
 MODE_FILE=".ouroboros-python-env"
-if [ -n "${OUROBOROS_PYTHON_ENV_MODE:-}" ]; then
-    PYTHON_ENV_MODE="$OUROBOROS_PYTHON_ENV_MODE"
-elif [ -f "$MODE_FILE" ]; then
+if [ -f "$MODE_FILE" ]; then
     PYTHON_ENV_MODE="$(tr -d '[:space:]' < "$MODE_FILE")"
 else
     PYTHON_ENV_MODE="global"

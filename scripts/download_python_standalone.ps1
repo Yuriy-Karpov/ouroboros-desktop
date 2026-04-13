@@ -8,9 +8,7 @@ $PyVersion = "3.10.19"
 $Dest = "python-standalone"
 $Platform = "x86_64-pc-windows-msvc"
 $ModeFile = ".ouroboros-python-env"
-$PythonEnvMode = if ($env:OUROBOROS_PYTHON_ENV_MODE) {
-    $env:OUROBOROS_PYTHON_ENV_MODE
-} elseif (Test-Path $ModeFile) {
+$PythonEnvMode = if (Test-Path $ModeFile) {
     (Get-Content $ModeFile -Raw).Trim()
 } else {
     "global"

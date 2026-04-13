@@ -97,6 +97,8 @@ def test_merge_settings_payload_allows_explicit_secret_clear(monkeypatch, tmp_pa
 
 
 def test_restart_current_process_falls_back_to_spawn_on_exec_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUROBOROS_REPO_DIR", str(tmp_path))
+    (tmp_path / ".ouroboros-python-env").write_text("global\n", encoding="utf-8")
     server_module = _reload_server(monkeypatch, tmp_path)
     called = {}
     spawned = {}
@@ -140,10 +142,7 @@ def test_restart_current_process_prefers_repo_venv_when_uv_mode_enabled(monkeypa
     )
     venv_python.parent.mkdir(parents=True)
     venv_python.write_text("", encoding="utf-8")
-    (tmp_path / "settings.json").write_text(
-        json.dumps({"OUROBOROS_PYTHON_ENV_MODE": "uv"}),
-        encoding="utf-8",
-    )
+    (tmp_path / ".ouroboros-python-env").write_text("uv\n", encoding="utf-8")
 
     def _fake_execvpe(executable, argv, env):
         called["executable"] = executable

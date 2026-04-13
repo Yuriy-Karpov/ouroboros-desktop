@@ -51,7 +51,6 @@ SETTINGS_DEFAULTS = {
     "TELEGRAM_CHAT_ID": "",
 
     "OUROBOROS_NETWORK_PASSWORD": "",
-    "OUROBOROS_PYTHON_ENV_MODE": "global",
     "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
     "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
     "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
@@ -301,7 +300,6 @@ def apply_settings_to_env(settings: dict) -> None:
         "ANTHROPIC_API_KEY",
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
         "OUROBOROS_NETWORK_PASSWORD",
-        "OUROBOROS_PYTHON_ENV_MODE",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_FALLBACK", "CLAUDE_CODE_MODEL",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",

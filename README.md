@@ -299,12 +299,12 @@ bash scripts/download_python_standalone.sh
 OUROBOROS_SIGN=0 bash build.sh
 ```
 
-Use `OUROBOROS_PYTHON_ENV_MODE=uv` to build with `uv`-managed virtualenvs for the
-local build environment and runtime sync:
+To build in `uv` mode, set the mode file first:
 
 ```bash
+echo uv > .ouroboros-python-env
 bash scripts/download_python_standalone.sh
-OUROBOROS_PYTHON_ENV_MODE=uv OUROBOROS_SIGN=0 bash build.sh
+OUROBOROS_SIGN=0 bash build.sh
 ```
 
 

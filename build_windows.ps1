@@ -6,9 +6,7 @@ $ErrorActionPreference = "Stop"
 $Version = (Get-Content VERSION).Trim()
 $ArchiveName = "Ouroboros-${Version}-windows-x64.zip"
 $ModeFile = ".ouroboros-python-env"
-$PythonEnvMode = if ($env:OUROBOROS_PYTHON_ENV_MODE) {
-    $env:OUROBOROS_PYTHON_ENV_MODE
-} elseif (Test-Path $ModeFile) {
+$PythonEnvMode = if (Test-Path $ModeFile) {
     (Get-Content $ModeFile -Raw).Trim()
 } else {
     "global"

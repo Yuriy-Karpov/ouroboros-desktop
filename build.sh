@@ -6,9 +6,7 @@ NOTARYTOOL_PROFILE="ouroboros-notarize"
 ENTITLEMENTS="entitlements.plist"
 SIGN_MODE="${OUROBOROS_SIGN:-1}"
 MODE_FILE=".ouroboros-python-env"
-if [ -n "${OUROBOROS_PYTHON_ENV_MODE:-}" ]; then
-    PYTHON_ENV_MODE="$OUROBOROS_PYTHON_ENV_MODE"
-elif [ -f "$MODE_FILE" ]; then
+if [ -f "$MODE_FILE" ]; then
     PYTHON_ENV_MODE="$(tr -d '[:space:]' < "$MODE_FILE")"
 else
     PYTHON_ENV_MODE="global"
