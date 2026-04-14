@@ -158,6 +158,7 @@ export function initSettings({ state }) {
         applyInputValue('s-network-password', s.OUROBOROS_NETWORK_PASSWORD);
         applyInputValue('s-telegram-token', s.TELEGRAM_BOT_TOKEN);
         applyInputValue('s-telegram-chat-id', s.TELEGRAM_CHAT_ID);
+        applyInputValue('s-telegram-proxy-url', s.TELEGRAM_PROXY_URL);
 
         applyInputValue('s-model', s.OUROBOROS_MODEL);
         applyInputValue('s-model-code', s.OUROBOROS_MODEL_CODE);
@@ -247,6 +248,7 @@ export function initSettings({ state }) {
             OPENAI_COMPATIBLE_BASE_URL: byId('s-openai-compatible-base-url').value.trim(),
             CLOUDRU_FOUNDATION_MODELS_BASE_URL: byId('s-cloudru-base-url').value.trim(),
             TELEGRAM_CHAT_ID: byId('s-telegram-chat-id').value.trim(),
+            TELEGRAM_PROXY_URL: byId('s-telegram-proxy-url').value.trim(),
         };
 
         collectSecretValue('s-openrouter', body);
@@ -322,6 +324,7 @@ export function initSettings({ state }) {
             'OPENAI_COMPATIBLE_API_KEY',
             'CLOUDRU_FOUNDATION_MODELS_API_KEY',
             'TELEGRAM_BOT_TOKEN',
+            'TELEGRAM_PROXY_URL',
             'LOCAL_MODEL_SOURCE',
             'LOCAL_MODEL_FILENAME',
             'LOCAL_MODEL_PORT',

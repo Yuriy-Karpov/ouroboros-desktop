@@ -1,5 +1,7 @@
 import base64
 
+import requests
+
 import supervisor.message_bus as message_bus
 
 
@@ -34,6 +36,65 @@ def test_configure_from_settings_without_legacy_field(monkeypatch):
     })
     assert bridge._telegram_chat_id == 999
     assert bridge._telegram_active_chat_id == 999
+
+
+def test_normalize_telegram_proxy_url_accepts_http_proxy(monkeypatch):
+    bridge = _make_bridge(monkeypatch)
+    assert bridge._normalize_telegram_proxy_url("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
+
+
+def test_normalize_telegram_proxy_url_rejects_mtproto_tg_link(monkeypatch, caplog):
+    bridge = _make_bridge(monkeypatch)
+    value = bridge._normalize_telegram_proxy_url(
+        "tg://proxy?server=46.21.244.130&port=443&secret=deadbeef"
+    )
+    assert value == ""
+    assert "MTProto proxy" in caplog.text
+
+
+def test_telegram_request_passes_proxy(monkeypatch):
+    bridge = _make_bridge(monkeypatch, {"TELEGRAM_PROXY_URL": "http://127.0.0.1:8080"})
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "result": []}
+
+    def fake_request(method, url, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return DummyResponse()
+
+    monkeypatch.setattr(message_bus.requests, "request", fake_request)
+
+    bridge._telegram_request("POST", "https://api.telegram.org/test", timeout=5)
+
+    assert captured["method"] == "POST"
+    assert captured["url"] == "https://api.telegram.org/test"
+    assert captured["kwargs"]["proxies"] == {
+        "http": "http://127.0.0.1:8080",
+        "https": "http://127.0.0.1:8080",
+    }
+
+
+def test_telegram_request_socks_without_dependency_raises_clear_error(monkeypatch):
+    bridge = _make_bridge(monkeypatch, {"TELEGRAM_PROXY_URL": "socks5://127.0.0.1:1080"})
+
+    def fake_request(method, url, **kwargs):
+        raise requests.exceptions.InvalidSchema("Missing dependencies for SOCKS support.")
+
+    monkeypatch.setattr(message_bus.requests, "request", fake_request)
+
+    try:
+        bridge._telegram_request("GET", "https://api.telegram.org/test", timeout=5)
+    except RuntimeError as exc:
+        assert "requests SOCKS support" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError for SOCKS proxy without dependency")
 
 
 def test_ui_send_enqueues_structured_message_and_broadcasts(monkeypatch):

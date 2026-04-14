@@ -15,6 +15,7 @@ import queue
 import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -65,6 +66,7 @@ class LocalChatBridge:
         self._broadcast_fn = None  # set by server.py for WebSocket streaming
         self._telegram_bot_token = ""
         self._telegram_chat_id: int = 0
+        self._telegram_proxy_url = ""
         self._telegram_active_chat_id: int = 0
         self._telegram_poll_thread: Optional[threading.Thread] = None
         self._telegram_stop = threading.Event()
@@ -118,17 +120,22 @@ class LocalChatBridge:
         chat_id = self._parse_single_chat_id(
             str(settings.get("TELEGRAM_CHAT_ID", "") or "").strip(),
         )
+        proxy_url = self._normalize_telegram_proxy_url(
+            str(settings.get("TELEGRAM_PROXY_URL", "") or "").strip(),
+        )
         token_changed = token != self._telegram_bot_token
         chat_id_changed = chat_id != self._telegram_chat_id
+        proxy_changed = proxy_url != self._telegram_proxy_url
 
         self._telegram_bot_token = token
         self._telegram_chat_id = chat_id
+        self._telegram_proxy_url = proxy_url
         if chat_id:
             self._telegram_active_chat_id = chat_id
         elif token_changed:
             self._telegram_active_chat_id = 0
 
-        if token_changed or chat_id_changed:
+        if token_changed or chat_id_changed or proxy_changed:
             self._restart_telegram_polling()
 
     def shutdown(self) -> None:
@@ -142,6 +149,48 @@ class LocalChatBridge:
             return int(text)
         except ValueError:
             return 0
+
+    def _normalize_telegram_proxy_url(self, raw: str) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        parsed = urlparse(text)
+        scheme = (parsed.scheme or "").lower()
+        if scheme == "tg":
+            query = parse_qs(parsed.query)
+            server = query.get("server", [""])[0].strip()
+            port = query.get("port", [""])[0].strip()
+            hint = server
+            if server and port:
+                hint = f"{server}:{port}"
+            log.warning(
+                "Telegram proxy URL %r is an MTProto proxy and cannot be used for Bot API HTTPS requests. "
+                "Configure an http(s):// proxy instead%s.",
+                text,
+                f" (server {hint})" if hint else "",
+            )
+            return ""
+        if scheme not in {"http", "https", "socks5", "socks5h"}:
+            log.warning(
+                "Unsupported Telegram proxy URL %r. Supported schemes: http, https, socks5, socks5h.",
+                text,
+            )
+            return ""
+        try:
+            port = parsed.port
+        except ValueError:
+            log.warning(
+                "Ignoring Telegram proxy URL %r because port is invalid.",
+                text,
+            )
+            return ""
+        if not parsed.hostname or not port:
+            log.warning(
+                "Ignoring Telegram proxy URL %r because host or port is missing.",
+                text,
+            )
+            return ""
+        return text
 
     def _restart_telegram_polling(self) -> None:
         self._stop_telegram_polling()
@@ -174,12 +223,34 @@ class LocalChatBridge:
         if not self._telegram_bot_token:
             raise RuntimeError("Telegram bot token is not configured")
         url = f"https://api.telegram.org/bot{self._telegram_bot_token}/{method}"
-        response = requests.post(url, data=params, files=files, timeout=timeout)
+        response = self._telegram_request(
+            "POST",
+            url,
+            data=params,
+            files=files,
+            timeout=timeout,
+        )
         response.raise_for_status()
         payload = response.json()
         if not payload.get("ok"):
             raise RuntimeError(payload.get("description") or f"Telegram API error for {method}")
         return payload
+
+    def _telegram_request(self, http_method: str, url: str, **kwargs):
+        request_kwargs = dict(kwargs)
+        if self._telegram_proxy_url:
+            request_kwargs["proxies"] = {
+                "http": self._telegram_proxy_url,
+                "https": self._telegram_proxy_url,
+            }
+        try:
+            return requests.request(http_method, url, **request_kwargs)
+        except requests.exceptions.InvalidSchema as exc:
+            if self._telegram_proxy_url.startswith(("socks5://", "socks5h://")):
+                raise RuntimeError(
+                    "Telegram SOCKS proxy requires requests SOCKS support (install PySocks / requests[socks])"
+                ) from exc
+            raise
 
     def _telegram_download_file(self, file_id: str, timeout: int = 30) -> tuple[bytes, str]:
         payload = self._telegram_api(
@@ -191,7 +262,7 @@ class LocalChatBridge:
         if not file_path:
             raise RuntimeError("Telegram file path is missing")
         url = f"https://api.telegram.org/file/bot{self._telegram_bot_token}/{file_path}"
-        response = requests.get(url, timeout=timeout)
+        response = self._telegram_request("GET", url, timeout=timeout)
         response.raise_for_status()
         mime = mimetypes.guess_type(file_path)[0] or "image/jpeg"
         return response.content, mime

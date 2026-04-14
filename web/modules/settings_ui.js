@@ -262,6 +262,13 @@ export function renderSettingsPage() {
                                 <input id="s-telegram-chat-id" placeholder="123456789">
                             </div>
                         </div>
+                        <div class="form-row">
+                            <div class="form-field">
+                                <label>Bot API Proxy URL (optional)</label>
+                                <input id="s-telegram-proxy-url" placeholder="http://127.0.0.1:8080">
+                            </div>
+                        </div>
+                        <div class="settings-inline-note">Use an HTTP(S) proxy for Telegram Bot API requests. Telegram client links like <code>tg://proxy?...secret=...</code> are MTProto proxies and are not usable here.</div>
                         <div class="settings-inline-note">If no primary chat is pinned, the bridge binds to the first active Telegram chat and keeps replies attached there.</div>
                     </div>
 
