@@ -1,4 +1,5 @@
 .[browser]
+ddgs>=1.2.0
 # Optional local model support remains opt-in.
 # Global legacy mode: pip install ".[browser,local-model]"
 # uv mode: uv sync --extra browser --extra local-model

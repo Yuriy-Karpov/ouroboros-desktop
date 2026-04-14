@@ -1,4 +1,5 @@
-"""Web search tool — OpenAI Responses API with LLM-first overridable defaults."""
+# ouroboros/tools/search.py — lines 1–230 of 230
+"""Web search tool — OpenAI Responses API with ddgs fallback when no API key available."""
 
 from __future__ import annotations
 
@@ -49,6 +50,48 @@ def _resolve_openai_client_settings() -> tuple[str, str | None, str, str]:
     return "", None, "openai", "openai"
 
 
+def _web_search_ddgs(query: str) -> str:
+    """Fallback web search using DDGS (DuckDuckGo).
+    
+    Called when OpenAI API key is not available.
+    """
+    try:
+        from duckduckgo_search import DDGS
+        
+        # Perform search
+        results = []
+        with DDGS() as ddgs:
+            # Search with max 5 results
+            for r in ddgs.text(query, max_results=5):
+                results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("url", ""),
+                    "snippet": r.get("body", "")[:500],  # Limit snippet length
+                })
+        
+        if not results:
+            return json.dumps({"answer": "(no results found)", "provider": "ddgs"}, ensure_ascii=False)
+        
+        # Format results as markdown
+        formatted = []
+        for i, r in enumerate(results, 1):
+            formatted.append(f"**{i}. [{r['title']}]({r['url']})**\n{r['snippet']}\n")
+        
+        answer = "\n".join(formatted)
+        return json.dumps({"answer": answer, "provider": "ddgs", "result_count": len(results)}, ensure_ascii=False)
+        
+    except ImportError:
+        return json.dumps({
+            "error": "DDGS library not installed. Install with: pip install ddgs",
+            "provider": "ddgs"
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({
+            "error": f"DDGS web search failed: {repr(e)}",
+            "provider": "ddgs"
+        }, ensure_ascii=False)
+
+
 def _web_search(
     ctx: ToolContext,
     query: str,
@@ -56,15 +99,14 @@ def _web_search(
     search_context_size: str = "",
     reasoning_effort: str = "",
 ) -> str:
+    """Web search with fallback to DDGS when OpenAI API key is not available."""
     api_key, base_url, provider, api_key_type = _resolve_openai_client_settings()
+    
+    # If no OpenAI API key available, use DDGS fallback
     if not api_key:
-        return json.dumps({
-            "error": (
-                "web_search requires the official OpenAI Responses API. "
-                "Set OPENAI_API_KEY and leave OPENAI_BASE_URL empty."
-            ),
-        })
-
+        log.info("No OpenAI API key found for web_search, falling back to DDGS")
+        return _web_search_ddgs(query)
+    
     active_model = model or os.environ.get("OUROBOROS_WEBSEARCH_MODEL", DEFAULT_SEARCH_MODEL)
     active_context = search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE
     active_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
@@ -144,7 +186,7 @@ def _web_search(
             except Exception:
                 log.debug("Failed to emit web_search cost event", exc_info=True)
 
-        return json.dumps({"answer": text or "(no answer)"}, ensure_ascii=False, indent=2)
+        return json.dumps({"answer": text or "(no answer)", "provider": "openai"}, ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": f"OpenAI web search failed: {repr(e)}"}, ensure_ascii=False)
 
@@ -154,8 +196,10 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("web_search", {
             "name": "web_search",
             "description": (
-                "Search the web via OpenAI Responses API. "
-                f"Defaults: model={DEFAULT_SEARCH_MODEL}, search_context_size={DEFAULT_SEARCH_CONTEXT_SIZE}, "
+                "Search the web via OpenAI Responses API or DDGS fallback. "
+                "If OPENAI_API_KEY is set and OPENAI_BASE_URL is empty, uses OpenAI. "
+                "Otherwise, uses DuckDuckGo (DDGS). "
+                f"OpenAI defaults: model={DEFAULT_SEARCH_MODEL}, search_context_size={DEFAULT_SEARCH_CONTEXT_SIZE}, "
                 f"reasoning_effort={DEFAULT_REASONING_EFFORT}. "
                 "Override any parameter per-call if needed (LLM-first: you decide)."
             ),

@@ -190,7 +190,9 @@ Shown when `settings.json` does not contain any supported remote provider key an
   Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install`.
 - The wizard blocks progression if nothing runnable is configured.
 - When OpenRouter is absent and official OpenAI is the only configured remote runtime, untouched default model values are auto-remapped to `openai::gpt-5.4` / `openai::gpt-5.4-mini` so first-run startup does not strand the app on OpenRouter-only defaults.
-- `web_search` uses the official OpenAI Responses API only. It requires `OPENAI_API_KEY` and treats any non-empty `OPENAI_BASE_URL` as an incompatible custom runtime configuration rather than a fallback.
+- `web_search` uses the official OpenAI Responses API when `OPENAI_API_KEY` is set and `OPENAI_BASE_URL` is empty. 
+  Otherwise, falls back to DuckDuckGo (DDGS) via the `ddgs` library. Requires either `OPENAI_API_KEY` for OpenAI 
+  or `ddgs` installed for fallback search.
 - OpenAI-compatible and Cloud.ru remain explicit model-selection flows from the full Settings page because there is no single safe universal default model ID for those providers.
 - Closing the wizard without saving is non-fatal: the main app still launches and the user can finish configuration in Settings.
 
