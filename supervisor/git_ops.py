@@ -552,6 +552,7 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         return True, "frozen:bundled"
 
     source = ""
+    env_state = None
     try:
         env_state = resolve_python_env(REPO_DIR, base_python=sys.executable, settings=load_settings())
         result, source, _env_state = sync_project_dependencies(
@@ -571,7 +572,12 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "deps_sync_ok", "reason": reason, "source": source,
+                "type": "deps_sync_ok",
+                "reason": reason,
+                "source": source,
+                "mode": env_state.mode,
+                "runtime_python": env_state.runtime_python,
+                "uv_bin": env_state.uv_bin,
             },
         )
         return True, source
@@ -598,7 +604,13 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "deps_sync_error", "reason": reason, "source": source, "error": msg,
+                "type": "deps_sync_error",
+                "reason": reason,
+                "source": source,
+                "mode": getattr(env_state, "mode", ""),
+                "runtime_python": getattr(env_state, "runtime_python", ""),
+                "uv_bin": getattr(env_state, "uv_bin", ""),
+                "error": msg,
             },
         )
         return False, msg
